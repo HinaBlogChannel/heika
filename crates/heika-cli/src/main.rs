@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
+use heika_wallet::bip39::{Mnemonic, WordCount};
 use zeroize::Zeroizing;
 
 /// Symbol のピアプロトコルを話すためのツールキット。
@@ -45,6 +46,15 @@ enum KeyCommand {
         #[arg(long, value_name = "PATH")]
         out: PathBuf,
     },
+    /// ニーモニックを作ってファイルに書く
+    Mnemonic {
+        /// ニーモニックを書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// 単語の数
+        #[arg(long, value_enum, default_value_t = Words::W24)]
+        words: Words,
+    },
     /// 標準入力から読んだ秘密鍵（16進）から公開鍵を出す
     PublicKey,
 }
@@ -60,6 +70,32 @@ impl From<Network> for NetworkIdentifier {
         match network {
             Network::Mainnet => Self::MAINNET,
             Network::Testnet => Self::TESTNET,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Words {
+    #[value(name = "12")]
+    W12,
+    #[value(name = "15")]
+    W15,
+    #[value(name = "18")]
+    W18,
+    #[value(name = "21")]
+    W21,
+    #[value(name = "24")]
+    W24,
+}
+
+impl From<Words> for WordCount {
+    fn from(words: Words) -> Self {
+        match words {
+            Words::W12 => Self::Words12,
+            Words::W15 => Self::Words15,
+            Words::W18 => Self::Words18,
+            Words::W21 => Self::Words21,
+            Words::W24 => Self::Words24,
         }
     }
 }
@@ -83,8 +119,19 @@ fn run(command: Command) -> Result<(), String> {
         Command::Key(KeyCommand::Generate { out }) => {
             let private_key = PrivateKey::generate()
                 .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
-            write_private_key(&out, &private_key)?;
+            write_secret(&out, &private_key.to_hex())?;
             println!("公開鍵: {}", PublicKey::from_private_key(&private_key));
+        }
+        Command::Key(KeyCommand::Mnemonic { out, words }) => {
+            let word_count = WordCount::from(words);
+            let mnemonic = Mnemonic::generate(word_count)
+                .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
+            write_secret(&out, &mnemonic.to_phrase())?;
+            println!(
+                "{}語のニーモニックを {} に書きました",
+                word_count.get(),
+                out.display()
+            );
         }
         Command::Key(KeyCommand::PublicKey) => {
             let private_key = read_private_key()?;
@@ -136,8 +183,8 @@ fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
     Ok(stdin)
 }
 
-/// 秘密鍵を16進で書く。ほかのユーザーから読めないように、Unix では自分だけが読み書きできるファイルにする。
-fn write_private_key(path: &Path, private_key: &PrivateKey) -> Result<(), String> {
+/// 秘密鍵やニーモニックを1行で書く。ほかのユーザーから読めないように、Unix では自分だけが読み書きできるファイルにする。
+fn write_secret(path: &Path, secret: &str) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -146,7 +193,7 @@ fn write_private_key(path: &Path, private_key: &PrivateKey) -> Result<(), String
         .open(path)
         .map_err(|error| format!("{} を作れませんでした: {error}", path.display()))?;
     // 改行を足すと String が領域を取り直して、0で上書きされない古い領域が残るので、分けて書く
-    file.write_all(private_key.to_hex().as_bytes())
+    file.write_all(secret.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|error| format!("{} に書けませんでした: {error}", path.display()))
 }

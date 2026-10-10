@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 heika-core = { version = "0.1.0", path = "../heika-core" }
+zeroize = "1.9.1"

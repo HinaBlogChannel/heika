@@ -114,29 +114,58 @@ impl From<Words> for WordCount {
 
 fn main() -> ExitCode {
     match run(Cli::parse().command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+        // `| head` などで読み手が先に終わったときは、出せるだけ出したので成功にする
+        Ok(()) | Err(Failure::BrokenPipe) => ExitCode::SUCCESS,
+        Err(Failure::Message(message)) => {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(command: Command) -> Result<(), String> {
+/// `run` が途中で終わった理由。
+///
+/// 標準出力が閉じられたときも、その場で `process::exit` せずに `main` まで戻す。
+/// そうしないと途中の秘密鍵などが drop されず、メモリが0で上書きされない。
+enum Failure {
+    Message(String),
+    BrokenPipe,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+/// `println!` と違い、標準出力に書けなければ panic せずに `Failure` を返す。
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        writeln!(io::stdout(), $($arg)*).map_err(|error| {
+            if error.kind() == io::ErrorKind::BrokenPipe {
+                Failure::BrokenPipe
+            } else {
+                Failure::Message(format!("標準出力に書けませんでした: {error}"))
+            }
+        })?
+    };
+}
+
+fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Key(KeyCommand::Address {
             public_key,
             network,
-        }) => println!("{}", Address::from_public_key(&public_key, network.into())),
+        }) => outln!("{}", Address::from_public_key(&public_key, network.into())),
         Command::Key(KeyCommand::Derive { account, network }) => {
             let mnemonic: Mnemonic = read_secret("ニーモニック", "alice.mnemonic")?;
             let seed = mnemonic.to_seed("").expect("an empty passphrase is valid");
             let key =
                 ExtendedKey::from_seed(seed.as_bytes()).derive_path(&[44, 4343, account, 0, 0]);
             let public_key = PublicKey::from_private_key(&key.private_key());
-            println!("パス: m/44'/4343'/{account}'/0'/0'");
-            println!("公開鍵: {public_key}");
-            println!(
+            outln!("パス: m/44'/4343'/{account}'/0'/0'");
+            outln!("公開鍵: {public_key}");
+            outln!(
                 "アドレス: {}",
                 Address::from_public_key(&public_key, network.into())
             );
@@ -145,14 +174,14 @@ fn run(command: Command) -> Result<(), String> {
             let private_key = PrivateKey::generate()
                 .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
             write_secret(&out, &private_key.to_hex())?;
-            println!("公開鍵: {}", PublicKey::from_private_key(&private_key));
+            outln!("公開鍵: {}", PublicKey::from_private_key(&private_key));
         }
         Command::Key(KeyCommand::Mnemonic { out, words }) => {
             let word_count = WordCount::from(words);
             let mnemonic = Mnemonic::generate(word_count)
                 .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
             write_secret(&out, &mnemonic.to_phrase())?;
-            println!(
+            outln!(
                 "{}語のニーモニックを {} に書きました",
                 word_count.get(),
                 out.display()
@@ -160,7 +189,7 @@ fn run(command: Command) -> Result<(), String> {
         }
         Command::Key(KeyCommand::PublicKey) => {
             let private_key: PrivateKey = read_secret("秘密鍵", "alice.key")?;
-            println!("{}", PublicKey::from_private_key(&private_key));
+            outln!("{}", PublicKey::from_private_key(&private_key));
         }
     }
     Ok(())

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+heika-core = { path = "../heika-core", default-features = false }
 hmac = { version = "0.13.0", features = ["zeroize"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }

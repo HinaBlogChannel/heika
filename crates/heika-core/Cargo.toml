@@ -7,6 +7,13 @@ license.workspace = true
 [dependencies]
 base16ct = "1.0.0"
 ed25519-dalek = "3.0.0"
+getrandom = { version = "0.4.3", optional = true }
+rand_core = { version = "0.10.1", default-features = false }
 ripemd = "0.2.0"
 sha3 = "0.12.0"
 zeroize = "1.9.1"
+
+[features]
+default = ["getrandom"]
+# OS の乱数で秘密鍵を作る PrivateKey::generate。乱数を自分で渡すなら要らない
+getrandom = ["dep:getrandom"]

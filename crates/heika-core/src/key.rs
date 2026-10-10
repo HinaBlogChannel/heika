@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use ed25519_dalek::SigningKey;
+use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use crate::hex::{self, ParseHexError};
@@ -50,6 +51,21 @@ impl FromStr for PublicKey {
 pub struct PrivateKey(Zeroizing<[u8; 32]>);
 
 impl PrivateKey {
+    /// 渡された暗号用の乱数で作る。
+    pub fn generate_with_rng<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
+        let mut bytes = Zeroizing::new([0; 32]);
+        rng.fill_bytes(&mut *bytes);
+        Self(bytes)
+    }
+
+    /// OS の乱数で作る。
+    #[cfg(feature = "getrandom")]
+    pub fn generate() -> Result<Self, getrandom::Error> {
+        let mut bytes = Zeroizing::new([0; 32]);
+        getrandom::fill(&mut *bytes)?;
+        Ok(Self(bytes))
+    }
+
     /// 大文字の16進にする。表示するつもりで呼ぶときだけ使う。
     pub fn to_hex(&self) -> Zeroizing<String> {
         let mut buffer = Zeroizing::new([0; 64]);
@@ -191,5 +207,44 @@ mod tests {
             PublicKey::from_private_key(&key).to_string(),
             "2E834140FD66CF87B254A693A2C7862C819217B676D3943267156625E816EC6F"
         );
+    }
+
+    /// 決まったバイト列を返すだけの乱数。テストで鍵を固定するのに使う。
+    struct Replay<'a>(&'a [u8]);
+
+    impl rand_core::TryRng for Replay<'_> {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            let (head, rest) = self.0.split_at(dst.len());
+            dst.copy_from_slice(head);
+            self.0 = rest;
+            Ok(())
+        }
+    }
+
+    impl rand_core::TryCryptoRng for Replay<'_> {}
+
+    #[test]
+    fn generates_from_the_given_rng() {
+        let bytes = crate::hex::decode::<32>(PRIVATE).unwrap();
+        let key = PrivateKey::generate_with_rng(&mut Replay(&bytes));
+        assert_eq!(*key.to_hex(), PRIVATE);
+    }
+
+    #[cfg(feature = "getrandom")]
+    #[test]
+    fn generates_different_keys_from_the_os() {
+        let first = PrivateKey::generate().unwrap();
+        let second = PrivateKey::generate().unwrap();
+        assert_ne!(*first.to_hex(), *second.to_hex());
     }
 }

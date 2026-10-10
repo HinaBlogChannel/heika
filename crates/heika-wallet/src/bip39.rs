@@ -5,6 +5,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use rand_core::CryptoRng;
 use sha2::{Digest, Sha256, Sha512};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
@@ -49,6 +50,23 @@ pub struct Mnemonic {
 }
 
 impl Mnemonic {
+    /// 渡された暗号用の乱数で作る。
+    pub fn generate_with_rng<R: CryptoRng + ?Sized>(rng: &mut R, word_count: WordCount) -> Self {
+        let mut entropy = Zeroizing::new([0; MAX_ENTROPY_LENGTH]);
+        let length = word_count.entropy_length();
+        rng.fill_bytes(&mut entropy[..length]);
+        Self::from_entropy(&entropy[..length]).expect("the word count fixes the length")
+    }
+
+    /// OS の乱数で作る。
+    #[cfg(feature = "getrandom")]
+    pub fn generate(word_count: WordCount) -> Result<Self, getrandom::Error> {
+        let mut entropy = Zeroizing::new([0; MAX_ENTROPY_LENGTH]);
+        let length = word_count.entropy_length();
+        getrandom::fill(&mut entropy[..length])?;
+        Ok(Self::from_entropy(&entropy[..length]).expect("the word count fixes the length"))
+    }
+
     /// エントロピーから作る。長さは16、20、24、28、32バイトのどれか。
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, InvalidEntropyLength> {
         if !matches!(entropy.len(), 16 | 20 | 24 | 28 | 32) {
@@ -144,6 +162,34 @@ impl Mnemonic {
             *index = (window >> (24 - 11 - offset % 8)) as u16 & 0x7FF;
         }
         indices
+    }
+}
+
+/// ニーモニックの単語の数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordCount {
+    Words12,
+    Words15,
+    Words18,
+    Words21,
+    Words24,
+}
+
+impl WordCount {
+    /// 単語の数。
+    pub fn get(self) -> usize {
+        match self {
+            Self::Words12 => 12,
+            Self::Words15 => 15,
+            Self::Words18 => 18,
+            Self::Words21 => 21,
+            Self::Words24 => 24,
+        }
+    }
+
+    /// もとになるエントロピーのバイト数。
+    fn entropy_length(self) -> usize {
+        self.get() * 4 / 3
     }
 }
 
@@ -467,6 +513,54 @@ mod tests {
     fn seed_debug_hides_the_seed() {
         let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
         assert_eq!(format!("{:?}", mnemonic.to_seed("").unwrap()), "Seed(..)");
+    }
+
+    /// 決まったバイト列を返すだけの乱数。テストでニーモニックを固定するのに使う。
+    struct Replay<'a>(&'a [u8]);
+
+    impl rand_core::TryRng for Replay<'_> {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            let (head, rest) = self.0.split_at(dst.len());
+            dst.copy_from_slice(head);
+            self.0 = rest;
+            Ok(())
+        }
+    }
+
+    impl rand_core::TryCryptoRng for Replay<'_> {}
+
+    #[test]
+    fn generates_from_the_given_rng() {
+        for (byte, length, phrase) in VECTORS {
+            let bytes = vec![byte; 32];
+            let word_count = match length {
+                16 => WordCount::Words12,
+                24 => WordCount::Words18,
+                32 => WordCount::Words24,
+                _ => unreachable!(),
+            };
+            let mnemonic = Mnemonic::generate_with_rng(&mut Replay(&bytes), word_count);
+            assert_eq!(*mnemonic.to_phrase(), phrase);
+        }
+    }
+
+    #[cfg(feature = "getrandom")]
+    #[test]
+    fn generates_different_mnemonics_from_the_os() {
+        let first = Mnemonic::generate(WordCount::Words24).unwrap();
+        let second = Mnemonic::generate(WordCount::Words24).unwrap();
+        assert_eq!(first.word_count(), 24);
+        assert_ne!(first.entropy(), second.entropy());
     }
 
     fn hex(text: &str) -> Vec<u8> {

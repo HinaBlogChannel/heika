@@ -320,9 +320,11 @@ dependencies = [
 name = "heika-wallet"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "heika-core",
  "hmac",
  "pbkdf2",
+ "rand_core",
  "sha2",
  "subtle",
  "zeroize",

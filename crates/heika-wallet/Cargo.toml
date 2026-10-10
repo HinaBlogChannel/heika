@@ -5,9 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+getrandom = { version = "0.4.3", optional = true }
 heika-core = { path = "../heika-core", default-features = false }
 hmac = { version = "0.13.0", features = ["zeroize"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+rand_core = { version = "0.10.1", default-features = false }
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 subtle = "2.6.1"
 zeroize = "1.9.1"
+
+[features]
+default = ["getrandom"]
+# OS の乱数でニーモニックを作る Mnemonic::generate。乱数を自分で渡すなら要らない
+getrandom = ["dep:getrandom"]

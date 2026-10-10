@@ -1,8 +1,12 @@
 #[cfg(unix)]
 use std::fs::File;
-use std::io::{self, IsTerminal, Read};
+use std::fs::OpenOptions;
+use std::io::{self, IsTerminal, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -34,6 +38,12 @@ enum KeyCommand {
         public_key: PublicKey,
         #[arg(long, value_enum, default_value_t = Network::Mainnet)]
         network: Network,
+    },
+    /// 秘密鍵を作ってファイルに書き、公開鍵を出す
+    Generate {
+        /// 秘密鍵（16進）を書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
     },
     /// 標準入力から読んだ秘密鍵（16進）から公開鍵を出す
     PublicKey,
@@ -70,6 +80,12 @@ fn run(command: Command) -> Result<(), String> {
             public_key,
             network,
         }) => println!("{}", Address::from_public_key(&public_key, network.into())),
+        Command::Key(KeyCommand::Generate { out }) => {
+            let private_key = PrivateKey::generate()
+                .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
+            write_private_key(&out, &private_key)?;
+            println!("公開鍵: {}", PublicKey::from_private_key(&private_key));
+        }
         Command::Key(KeyCommand::PublicKey) => {
             let private_key = read_private_key()?;
             println!("{}", PublicKey::from_private_key(&private_key));
@@ -118,4 +134,19 @@ fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
 #[cfg(not(unix))]
 fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
     Ok(stdin)
+}
+
+/// 秘密鍵を16進で書く。ほかのユーザーから読めないように、Unix では自分だけが読み書きできるファイルにする。
+fn write_private_key(path: &Path, private_key: &PrivateKey) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("{} を作れませんでした: {error}", path.display()))?;
+    // 改行を足すと String が領域を取り直して、0で上書きされない古い領域が残るので、分けて書く
+    file.write_all(private_key.to_hex().as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .map_err(|error| format!("{} に書けませんでした: {error}", path.display()))
 }

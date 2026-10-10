@@ -1,0 +1,9 @@
+/target
+
+# 手元で生成する鍵と証明書
+*.key
+*.crt
+
+# 接続先など手元だけの設定
+.env*
+!.env.example

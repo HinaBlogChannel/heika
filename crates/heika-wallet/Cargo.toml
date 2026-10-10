@@ -3,3 +3,8 @@ name = "heika-wallet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+subtle = "2.6.1"
+zeroize = "1.9.1"

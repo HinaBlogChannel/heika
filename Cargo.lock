@@ -71,6 +71,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -201,6 +202,7 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+ "zeroize",
 ]
 
 [[package]]
@@ -300,6 +302,11 @@ dependencies = [
 [[package]]
 name = "heika-wallet"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "http"

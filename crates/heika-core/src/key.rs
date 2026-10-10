@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use ed25519_dalek::SigningKey;
 use zeroize::Zeroizing;
 
 use crate::hex::{self, ParseHexError};
@@ -11,6 +12,17 @@ use crate::hex::{self, ParseHexError};
 /// 文字列にするときは、Symbol の慣習に合わせて大文字の16進にする。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(pub [u8; 32]);
+
+impl PublicKey {
+    /// 秘密鍵から導出する。catapult の `crypto/KeyPair.cpp` と同じく、RFC 8032 の Ed25519（SHA-512）。
+    pub fn from_private_key(private_key: &PrivateKey) -> Self {
+        Self(
+            SigningKey::from_bytes(&private_key.0)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+}
 
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -169,6 +181,15 @@ mod tests {
         assert_eq!(
             text.parse::<PrivateKey>().unwrap_err(),
             ParsePrivateKeyError::InvalidCharacter
+        );
+    }
+
+    #[test]
+    fn derives_the_public_key_from_the_private_key() {
+        let key: PrivateKey = PRIVATE.parse().unwrap();
+        assert_eq!(
+            PublicKey::from_private_key(&key).to_string(),
+            "2E834140FD66CF87B254A693A2C7862C819217B676D3943267156625E816EC6F"
         );
     }
 }

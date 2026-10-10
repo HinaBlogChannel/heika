@@ -1,10 +1,11 @@
-//! SLIP-10 の ed25519 での鍵の導出。Symbol のウォレットは `m/44'/4343'/<アカウント>'/0'/0'` を使う。
+//! SLIP-10 の ed25519 での鍵の導出。Symbol のウォレットが使うパスは [`symbol_path`] で作る。
 //!
 //! ed25519 には hardened の導出しかないので、番号は常に hardened として扱う。
 //! Symbol の SDK（`sdk/python/symbolchain/Bip32.py`）と同じく、渡された番号に hardened のビットを立てて使うので、
 //! `44` と `0x8000002C` は同じ `44'` になる。
 
 use heika_core::key::PrivateKey;
+use heika_core::network::NetworkIdentifier;
 use hmac::digest::FixedOutput;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
@@ -13,6 +14,18 @@ use zeroize::Zeroizing;
 const HARDENED: u32 = 0x8000_0000;
 /// ルートを導出する HMAC の鍵。
 const CURVE: &[u8] = b"ed25519 seed";
+
+/// Symbol のウォレットがアカウントの鍵を導出するパス `m/44'/<coin type>'/<アカウント>'/0'/0'`。
+///
+/// coin type はメインネットなら 4343、それ以外なら 1。SDK の `SymbolFacade.bip32_path` と同じ。
+pub fn symbol_path(network: NetworkIdentifier, account: u32) -> [u32; 5] {
+    let coin_type = if network == NetworkIdentifier::MAINNET {
+        4343
+    } else {
+        1
+    };
+    [44, coin_type, account, 0, 0]
+}
 
 /// 秘密鍵とチェーンコードの組。使い終わるとメモリを0で上書きする。
 #[derive(Clone)]
@@ -132,6 +145,15 @@ mod tests {
             *root.derive_path(&[]).private_key().to_hex(),
             *root.private_key().to_hex()
         );
+    }
+
+    #[test]
+    fn symbol_path_uses_the_coin_type_of_the_network() {
+        assert_eq!(
+            symbol_path(NetworkIdentifier::MAINNET, 2),
+            [44, 4343, 2, 0, 0]
+        );
+        assert_eq!(symbol_path(NetworkIdentifier::TESTNET, 2), [44, 1, 2, 0, 0]);
     }
 
     #[test]

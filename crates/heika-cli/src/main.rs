@@ -15,7 +15,7 @@ use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
 use heika_wallet::bip39::{Mnemonic, WordCount};
-use heika_wallet::slip10::ExtendedKey;
+use heika_wallet::slip10::{self, ExtendedKey};
 use zeroize::Zeroizing;
 
 /// Symbol のピアプロトコルを話すためのツールキット。
@@ -50,7 +50,9 @@ enum KeyCommand {
     },
     /// 標準入力から読んだニーモニックから Symbol のウォレットと同じパスで鍵を導出し、公開鍵とアドレスを出す
     ///
-    /// パスは m/44'/4343'/<ACCOUNT>'/0'/0'。パスフレーズにはまだ対応していない
+    /// パスは m/44'/<COIN>'/<ACCOUNT>'/0'/0' で、COIN はメインネットなら 4343、テストネットなら 1。
+    ///
+    /// パスフレーズは公式のデスクトップウォレットと同じく空にする
     Derive {
         /// アカウントの番号
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(..0x8000_0000))]
@@ -160,14 +162,16 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Key(KeyCommand::Derive { account, network }) => {
             let mnemonic: Mnemonic = read_secret("ニーモニック", "alice.mnemonic")?;
             let seed = mnemonic.to_seed("").expect("an empty passphrase is valid");
-            let key =
-                ExtendedKey::from_seed(seed.as_bytes()).derive_path(&[44, 4343, account, 0, 0]);
+            let network = NetworkIdentifier::from(network);
+            let path = slip10::symbol_path(network, account);
+            let key = ExtendedKey::from_seed(seed.as_bytes()).derive_path(&path);
             let public_key = PublicKey::from_private_key(&key.private_key());
-            outln!("パス: m/44'/4343'/{account}'/0'/0'");
+            let path: String = path.iter().map(|index| format!("/{index}'")).collect();
+            outln!("パス: m{path}");
             outln!("公開鍵: {public_key}");
             outln!(
                 "アドレス: {}",
-                Address::from_public_key(&public_key, network.into())
+                Address::from_public_key(&public_key, network)
             );
         }
         Command::Key(KeyCommand::Generate { out }) => {

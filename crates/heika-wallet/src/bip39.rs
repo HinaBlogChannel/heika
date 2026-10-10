@@ -5,7 +5,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
@@ -35,6 +35,11 @@ const fn split_lines(text: &str) -> [&str; 2048] {
 const MAX_WORD_LENGTH: usize = 8;
 const MAX_WORD_COUNT: usize = 24;
 const MAX_ENTROPY_LENGTH: usize = 32;
+/// 単語のあいだに半角スペースを入れた文の最大のバイト数。
+const MAX_PHRASE_LENGTH: usize = MAX_WORD_COUNT * (MAX_WORD_LENGTH + 1) - 1;
+const MAX_PASSPHRASE_LENGTH: usize = 256;
+/// PBKDF2 のソルトはパスフレーズの前にこれを付けたもの。
+const SALT_PREFIX: &[u8] = b"mnemonic";
 
 /// BIP 39 のニーモニック。もとになるエントロピー（16〜32バイト）を持ち、使い終わるとメモリを0で上書きする。
 /// 中身が表示されないように、`Display` は持たない。
@@ -69,7 +74,44 @@ impl Mnemonic {
 
     /// 単語を半角スペースでつないだ文。表示するつもりで呼ぶときだけ使う。
     pub fn to_phrase(&self) -> Zeroizing<String> {
-        let mut buffer = Zeroizing::new([0; MAX_WORD_COUNT * (MAX_WORD_LENGTH + 1)]);
+        let mut buffer = Zeroizing::new([0; MAX_PHRASE_LENGTH]);
+        let length = self.write_phrase(&mut buffer);
+        Zeroizing::new(
+            str::from_utf8(&buffer[..length])
+                .expect("the word list is ASCII")
+                .to_owned(),
+        )
+    }
+
+    /// BIP 39 のシードにする。PBKDF2-HMAC-SHA512 を2048回まわす。
+    ///
+    /// パスフレーズは BIP 39 では NFKD で正規化してから使うが、正規化は実装していないので、
+    /// 正規化しても変わらない ASCII だけを受け付ける。
+    pub fn to_seed(&self, passphrase: &str) -> Result<Seed, InvalidPassphrase> {
+        if !passphrase.is_ascii() {
+            return Err(InvalidPassphrase::NonAscii);
+        }
+        if passphrase.len() > MAX_PASSPHRASE_LENGTH {
+            return Err(InvalidPassphrase::TooLong);
+        }
+        let mut password = Zeroizing::new([0; MAX_PHRASE_LENGTH]);
+        let password_length = self.write_phrase(&mut password);
+        let mut salt = Zeroizing::new([0; SALT_PREFIX.len() + MAX_PASSPHRASE_LENGTH]);
+        let salt_length = SALT_PREFIX.len() + passphrase.len();
+        salt[..SALT_PREFIX.len()].copy_from_slice(SALT_PREFIX);
+        salt[SALT_PREFIX.len()..salt_length].copy_from_slice(passphrase.as_bytes());
+        let mut seed = Zeroizing::new([0; 64]);
+        pbkdf2::pbkdf2_hmac::<Sha512>(
+            &password[..password_length],
+            &salt[..salt_length],
+            2048,
+            &mut *seed,
+        );
+        Ok(Seed(seed))
+    }
+
+    /// 単語を半角スペースでつないで書き、書いたバイト数を返す。
+    fn write_phrase(&self, buffer: &mut [u8; MAX_PHRASE_LENGTH]) -> usize {
         let mut cursor = 0;
         for (position, &index) in self
             .word_indices()
@@ -86,11 +128,7 @@ impl Mnemonic {
             buffer[cursor..cursor + length].copy_from_slice(&word[..length]);
             cursor += length;
         }
-        Zeroizing::new(
-            str::from_utf8(&buffer[..cursor])
-                .expect("the word list is ASCII")
-                .to_owned(),
-        )
+        cursor
     }
 
     /// エントロピーにチェックサムを続けたビット列を、11ビットずつ単語の番号にする。
@@ -225,6 +263,41 @@ impl fmt::Display for ParseMnemonicError {
 
 impl std::error::Error for ParseMnemonicError {}
 
+/// BIP 39 のシード（64バイト）。SLIP-10 などで鍵を導出するもとになる。使い終わるとメモリを0で上書きする。
+pub struct Seed(Zeroizing<[u8; 64]>);
+
+impl Seed {
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Seed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Seed(..)")
+    }
+}
+
+/// パスフレーズが使えない理由。パスフレーズの一部を漏らさないように、どこの何が悪かったかは含めない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidPassphrase {
+    /// ASCII 以外の文字が含まれている
+    NonAscii,
+    /// 256バイトより長い
+    TooLong,
+}
+
+impl fmt::Display for InvalidPassphrase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonAscii => f.write_str("パスフレーズには ASCII の文字だけが使えます"),
+            Self::TooLong => f.write_str("パスフレーズは256バイトまでです"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidPassphrase {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +429,50 @@ mod tests {
     fn debug_hides_the_mnemonic() {
         let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
         assert_eq!(format!("{mnemonic:?}"), "Mnemonic(..)");
+    }
+
+    #[test]
+    fn derives_the_seed_with_a_passphrase() {
+        // trezor/python-mnemonic の vectors.json の最初の組
+        let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
+        let seed = mnemonic.to_seed("TREZOR").unwrap();
+        assert_eq!(
+            seed.as_bytes()[..],
+            hex(
+                "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+            )
+        );
+    }
+
+    #[test]
+    fn accepts_a_passphrase_up_to_256_bytes() {
+        let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
+        assert!(mnemonic.to_seed(&"a".repeat(256)).is_ok());
+        assert_eq!(
+            mnemonic.to_seed(&"a".repeat(257)).unwrap_err(),
+            InvalidPassphrase::TooLong
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_ascii_passphrase() {
+        let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
+        assert_eq!(
+            mnemonic.to_seed("ﾊﾟｽ").unwrap_err(),
+            InvalidPassphrase::NonAscii
+        );
+    }
+
+    #[test]
+    fn seed_debug_hides_the_seed() {
+        let mnemonic: Mnemonic = VECTORS[0].2.parse().unwrap();
+        assert_eq!(format!("{:?}", mnemonic.to_seed("").unwrap()), "Seed(..)");
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+            .collect()
     }
 }

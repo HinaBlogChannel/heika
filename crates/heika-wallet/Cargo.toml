@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hmac = { version = "0.13.0", features = ["zeroize"] }
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 subtle = "2.6.1"
 zeroize = "1.9.1"

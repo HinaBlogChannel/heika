@@ -4,7 +4,7 @@ english.txt は BIP 39 の英語の単語リストを手を加えずに置いた
 SHA-256:  2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda
 
 BIP 39（Marek Palatinus, Pavol Rusnak, Aaron Voisine, Sean Bowe）は MIT License で公開されている。
-単語リストもこれに従い、heika の AGPL-3.0-or-later とは別に、次の条件で扱う。
+単語リストもこれに従い、heika の AGPL-3.0-only とは別に、次の条件で扱う。
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

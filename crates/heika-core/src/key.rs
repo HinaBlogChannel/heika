@@ -158,8 +158,8 @@ mod tests {
         );
     }
 
-    // 公式ベクター crypto/1.test-keys.json の最初の秘密鍵
-    const PRIVATE: &str = "575DBB3062267EFF57C970A336EBBC8FBCFE12C5BD3ED7BC11EB0481D7704CED";
+    // RFC 8032 の 7.1 節にある Ed25519 のテスト 1
+    const PRIVATE: &str = "9D61B19DEFFD5A60BA844AF492EC2CC44449C5697B326919703BAC031CAE7F60";
 
     #[test]
     fn private_key_round_trips_through_upper_case_hex() {
@@ -210,7 +210,7 @@ mod tests {
         let key: PrivateKey = PRIVATE.parse().unwrap();
         assert_eq!(
             PublicKey::from_private_key(&key).to_string(),
-            "2E834140FD66CF87B254A693A2C7862C819217B676D3943267156625E816EC6F"
+            "D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A"
         );
     }
 

@@ -1,8 +1,9 @@
 //! `crypto/6.test-hd-derivation.json`: ニーモニックからシードを作り、そこから鍵を導出する。
 
 use heika_core::key::PublicKey;
+use heika_core::network::NetworkIdentifier;
 use heika_wallet::bip39::Mnemonic;
-use heika_wallet::slip10::ExtendedKey;
+use heika_wallet::slip10::{self, ExtendedKey};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -92,4 +93,21 @@ fn derives_keys_from_seeds() {
         }
     }
     assert_eq!(checked, 424);
+}
+
+#[test]
+#[ignore = "fetches the official vectors from GitHub"]
+fn builds_the_paths_of_each_network() {
+    let vectors: Vectors = heika_vectors::fetch("crypto/6.test-hd-derivation.json");
+    let mut checked = 0;
+    for (network, vectors) in [
+        (NetworkIdentifier::MAINNET, &vectors.public_net),
+        (NetworkIdentifier::TESTNET, &vectors.test_net),
+    ] {
+        for child in vectors.iter().flat_map(|vector| &vector.child_accounts) {
+            assert_eq!(slip10::symbol_path(network, child.path[2]), child.path[..]);
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 414);
 }

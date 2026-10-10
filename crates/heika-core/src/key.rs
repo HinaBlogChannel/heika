@@ -51,6 +51,11 @@ impl FromStr for PublicKey {
 pub struct PrivateKey(Zeroizing<[u8; 32]>);
 
 impl PrivateKey {
+    /// 32バイトのシードから作る。渡した側の配列は呼び出し側で消す。
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(Zeroizing::new(*bytes))
+    }
+
     /// 渡された暗号用の乱数で作る。
     pub fn generate_with_rng<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut bytes = Zeroizing::new([0; 32]);
@@ -207,6 +212,12 @@ mod tests {
             PublicKey::from_private_key(&key).to_string(),
             "2E834140FD66CF87B254A693A2C7862C819217B676D3943267156625E816EC6F"
         );
+    }
+
+    #[test]
+    fn private_key_from_bytes_keeps_the_bytes() {
+        let key = PrivateKey::from_bytes(&[0xAB; 32]);
+        assert_eq!(*key.to_hex(), "AB".repeat(32));
     }
 
     /// 決まったバイト列を返すだけの乱数。テストで鍵を固定するのに使う。

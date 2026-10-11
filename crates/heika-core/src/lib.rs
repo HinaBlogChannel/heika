@@ -3,6 +3,7 @@
 pub mod address;
 mod base32;
 mod ed25519;
+pub mod hash;
 mod hex;
 pub mod key;
 pub mod network;

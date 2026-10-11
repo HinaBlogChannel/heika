@@ -391,6 +391,7 @@ dependencies = [
  "getrandom 0.4.3",
  "heika-cert",
  "heika-core",
+ "heika-p2p",
  "heika-tls",
  "heika-transaction",
  "heika-wallet",
@@ -410,6 +411,14 @@ dependencies = [
  "sha2",
  "sha3",
  "zeroize",
+]
+
+[[package]]
+name = "heika-p2p"
+version = "0.1.0"
+dependencies = [
+ "heika-core",
+ "heika-tls",
 ]
 
 [[package]]

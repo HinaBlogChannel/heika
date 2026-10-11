@@ -18,12 +18,14 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - 🚧WIP: 鍵を交換したときの、証明書のフォルダーへの配置
 - ✅DONE: ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）と、トランザクションへの署名と連署
 - ✅DONE: 署名したトランザクションの送信（ノードの証明書で名乗って、ノードと TLS でつなぐ）
+- ✅DONE: 近くて速いノードを探す（ノードと TLS でつなぎ、接続にかかる時間、高さ、ブロックの読み出しの速さを測る。REST のないノードも調べられる）
 
 ## 構成
 
 - `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名、Merkle ツリー
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
+- `heika-p2p`: ノードへの問い合わせ。ノードの情報、高さ、ほかのノードの一覧、ブロック
 - `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。リンク、Transfer、アグリゲート
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10、委任ハーベストの要求に使う公開鍵あての暗号化
 - `heika-cli`: コマンドラインツール `heika`
@@ -56,6 +58,8 @@ heika harvesting --network mainnet --signer <メインアカウントの公開�
 heika tx sign --network mainnet --out harvesting.signed.bin harvesting.bin < main.key
 heika tx cosign --network mainnet --out harvesting.cosigned.bin harvesting.signed.bin < cosigner.key
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem harvesting.signed.bin < node.key.pem
+
+heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 ```
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。
@@ -63,6 +67,8 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の形（`/O=example/CN=node`）でも書ける。2 つは区切りが違い、書く順番も逆になる。証明書を表示するときは RFC 4514 の形で出す。
 
 `heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
+
+`heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
 
 ## テスト
 

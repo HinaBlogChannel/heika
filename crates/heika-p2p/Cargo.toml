@@ -1,0 +1,9 @@
+[package]
+name = "heika-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+heika-core = { path = "../heika-core", default-features = false }
+heika-tls = { path = "../heika-tls" }

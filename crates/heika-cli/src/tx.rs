@@ -14,10 +14,17 @@ use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
 use heika_transaction::{Aggregate, Body, EmbeddedTransaction, Transaction};
 
-use crate::cert::AnyPrivateKey;
+use heika_cert::certificate::Certificate;
+use heika_tls::{ClientCertificate, Identity};
+
+use crate::cert::{AnyPrivateKey, CONNECT_TIMEOUT, read_chain};
 use crate::{Failure, Network, read_secret};
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
+/// ネットワークの設定 maxTransactionLifetime。メインネットもテストネットも 6h
+const MAX_TRANSACTION_LIFETIME_HOURS: u64 = 6;
+/// catapult の `ionet::PacketType::Push_Transactions`
+const PUSH_TRANSACTIONS: u32 = 9;
 
 #[derive(Subcommand)]
 pub enum TxCommand {
@@ -31,6 +38,25 @@ pub enum TxCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// 署名したトランザクションを、ノードと TLS でつないで送る
+    ///
+    /// 送る前に、ネットワーク、署名、期限を確かめる。名乗るのはノードの証明書で、ノードの秘密鍵は標準入力から読む。
+    /// ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで別に確かめる。
+    Announce {
+        #[arg(long, value_enum)]
+        network: Network,
+        /// 送る、署名したトランザクションのファイル
+        signed: PathBuf,
+        /// 送り先のノード
+        #[arg(long, value_name = "HOST:PORT")]
+        connect: String,
+        /// 名乗る証明書のチェーン（ノード、CA の順の PEM）
+        #[arg(long, value_name = "PATH")]
+        client_cert: PathBuf,
+        /// 送ったあと、切られないか待つ秒数
+        #[arg(long, default_value_t = 3)]
+        wait: u64,
+    },
 }
 
 /// 署名していないトランザクションを組んで書くコマンドに共通の引数。
@@ -39,8 +65,8 @@ pub struct Unsigned {
     /// 手数料は、トランザクションのバイト数にこれを掛けたもの
     #[arg(long, default_value_t = 100)]
     fee_multiplier: u64,
-    /// 期限を今から何時間後にするか。ネットワークの設定 maxTransactionLifetime（メインネットもテストネットも 6h）より先にはできない
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=6))]
+    /// 期限を今から何時間後にするか。ネットワークの設定 maxTransactionLifetime より先にはできない
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=MAX_TRANSACTION_LIFETIME_HOURS))]
     deadline_hours: u64,
     /// 署名していないトランザクションを書くファイル（すでにあれば上書きしない）
     #[arg(long)]
@@ -134,6 +160,87 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .map_err(|error| error.to_string())?;
             write_new(&out, &transaction.to_bytes())?;
             outln!("ハッシュ: {}", transaction.hash(&seed));
+        }
+        TxCommand::Announce {
+            network,
+            signed,
+            connect,
+            client_cert,
+            wait,
+        } => {
+            let bytes = fs::read(&signed)
+                .map_err(|error| format!("{} を読めませんでした: {error}", signed.display()))?;
+            let transaction = Transaction::from_bytes(&bytes)
+                .map_err(|error| format!("{}: {error}", signed.display()))?;
+            if transaction.network != NetworkIdentifier::from(network) {
+                return Err(format!(
+                    "{} は --network と違うネットワークのトランザクションです",
+                    signed.display()
+                )
+                .into());
+            }
+            if transaction.signature == Signature([0; 64]) {
+                return Err(format!("{} はまだ署名されていません", signed.display()).into());
+            }
+            let seed = network.generation_hash_seed();
+            if !transaction.verify(&seed) {
+                return Err(format!("{} の署名が正しくありません", signed.display()).into());
+            }
+            let now = SystemTime::now();
+            if transaction.deadline <= network_milliseconds(network, now)? {
+                return Err(format!("{} は期限が切れています", signed.display()).into());
+            }
+            let latest = now + MAX_TRANSACTION_LIFETIME_HOURS as u32 * HOUR;
+            if transaction.deadline > network_milliseconds(network, latest)? {
+                return Err(format!(
+                    "{} は期限が {MAX_TRANSACTION_LIFETIME_HOURS} 時間より先です",
+                    signed.display()
+                )
+                .into());
+            }
+
+            let chain = read_chain(&client_cert)?;
+            let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
+            let identity = Identity::new(&chain, &key)
+                .map_err(|error| format!("{}: {error}", client_cert.display()))?;
+            drop(key);
+            let inspection = heika_tls::send(
+                &connect,
+                &identity,
+                PUSH_TRANSACTIONS,
+                &bytes,
+                CONNECT_TIMEOUT,
+                Duration::from_secs(wait),
+            )
+            .map_err(|error| format!("{connect}: {error}"))?;
+            if let Some(Ok(ca)) = inspection
+                .peer_certificates
+                .get(1)
+                .map(|der| Certificate::from_der(der))
+            {
+                outln!("送り先のノードの CA の公開鍵: {}", ca.public_key());
+            }
+            outln!("ハッシュ: {}", transaction.hash(&seed));
+            match inspection.client_certificate {
+                ClientCertificate::Kept => {
+                    outln!("送りました（{wait} 秒のあいだ切られませんでした）")
+                }
+                ClientCertificate::DataReceived => {
+                    outln!("送りました（相手から何か届きました）")
+                }
+                ClientCertificate::Closed => {
+                    outln!("送りましたが、アラートなしで切られたので、届いたかはわかりません")
+                }
+                ClientCertificate::Rejected(alert) => {
+                    return Err(format!(
+                        "こちらの証明書が弾かれたので、送れていません（TLS のアラート: {alert}）"
+                    )
+                    .into());
+                }
+            }
+            outln!(
+                "ノードは受け取ったことを返さないので、ブロックに入ったかはハッシュで確かめてください"
+            );
         }
     }
     Ok(())

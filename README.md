@@ -16,7 +16,7 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: リンク（アカウント、ノード、VRF）と Transfer とアグリゲートのトランザクションの読み書き、署名、連署、ハッシュ（ライブラリのみ）
 - ✅DONE: 委任ハーベストの要求のメッセージの読み書き（ライブラリのみ）
 - 🚧WIP: 鍵を交換したときの、証明書のフォルダーへの配置
-- ✅DONE: ハーベストの委任（リモートと VRF の鍵を毎回作り直し、古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる）と、トランザクションへの署名
+- ✅DONE: ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）と、トランザクションへの署名
 - 🚧WIP: 署名したトランザクションの送信
 
 ## 構成
@@ -51,15 +51,16 @@ heika cert renew --shoestring-certs-dir <フォルダー> < ca.key.pem
 heika cert show node.full.crt.pem
 heika cert show --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 
-heika tx delegate --network mainnet --signer <メインアカウントの公開鍵> --node <ノードの公開鍵> --out delegate.bin
-heika tx sign --network mainnet --out delegate.signed.bin delegate.bin < main.key
+heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --delegate <ノードの公開鍵> --out harvesting.bin
+heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-remote <公開鍵> --link-vrf <公開鍵> --out harvesting.bin
+heika tx sign --network mainnet --out harvesting.signed.bin harvesting.bin < main.key
 ```
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。
 
 DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の形（`/O=example/CN=node`）でも書ける。2 つは区切りが違い、書く順番も逆になる。証明書を表示するときは RFC 4514 の形で出す。
 
-`heika tx delegate` は、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika tx delegate` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。
+`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。
 
 ## テスト
 

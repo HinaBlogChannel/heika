@@ -19,7 +19,7 @@ use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::slip10::{self, ExtendedKey};
 use zeroize::Zeroizing;
 
-/// Symbol のピアプロトコルを話すためのツールキット。
+/// Symbol のノード運営のための、鍵と証明書のツールキット。
 #[derive(Parser)]
 #[command(name = "heika", version, about)]
 struct Cli {

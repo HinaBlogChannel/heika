@@ -18,7 +18,7 @@
 
 ## 公式ベクターとの照合
 
-`cargo test -p heika-vectors -- --ignored` で実行する。
+`cargo test -p heika-vectors -- --include-ignored` で実行する。下の SDK で作ったベクターとの照合も一緒に走る。
 
 - github.com/symbol/symbol の `tests/vectors/symbol/` から、コミットを固定した URL でテストのたびに取得する。リポジトリには含めない。
 - 固定するコミットは `crates/heika-vectors/src/lib.rs` の `COMMIT` にある。
@@ -30,6 +30,22 @@
 | `crypto/1.test-address.json` | 公開鍵からメインネットとテストネットのアドレス |
 | `crypto/2.test-sign.json` | 秘密鍵でデータに署名した結果と、その署名の検証 |
 | `crypto/6.test-hd-derivation.json` | ニーモニックからシード、シードから子の鍵、ネットワークごとのパス |
+| `models/transactions.json` | トランザクションのバイト列と中身の読み書き（リンクと Transfer）。ここの署名はレイアウトを試すための値で、検証は通らない |
+
+## SDK で作ったベクター
+
+公式ベクターにはトランザクションの正しい署名とハッシュがないので、公式の Python SDK で署名したものを `crates/heika-vectors/testdata/sdk-transactions.json` に置いて照合する。
+
+- `crates/heika-vectors/scripts/generate-sdk-vectors.py` が作る。SDK のバージョンはスクリプトの先頭のインラインメタデータで固定していて、`uv run` で動く。
+- 鍵は、誰でも知っているテスト用のニーモニック（test を11個並べて最後が junk）から SDK のパスで導出する。このアカウントには何も送らない。
+- 鍵以外の値は `SHA-256("<ラベル>/<番号>")` から切り出すので、作り直せば同じものが出る。スクリプトを変えたら作り直して差分を確かめる。
+- 照合では、ニーモニックから heika-wallet で鍵を導出し、heika-transaction で組んで署名した結果が、署名、ハッシュ、バイト列のすべてで SDK と一致することを確かめる。
+- ネットワークを使わないので `#[ignore]` は付けていない。
+- スクリプトは AGPL から外して MIT にしている。
+
+```sh
+uv run crates/heika-vectors/scripts/generate-sdk-vectors.py > crates/heika-vectors/testdata/sdk-transactions.json
+```
 
 ## 入力の検証
 

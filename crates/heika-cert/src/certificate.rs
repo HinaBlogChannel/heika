@@ -222,6 +222,28 @@ impl Certificate {
         };
         issuer.verify(&[&tbs], &Signature(signature))
     }
+
+    /// issuer と subject が同じで、自分の鍵で署名されているか。
+    pub fn is_self_signed(&self) -> bool {
+        self.issuer() == self.subject() && self.is_signed_by(&self.public_key)
+    }
+}
+
+/// catapult がつなぐときに確かめるチェーンの条件（`CatapultCertificateProcessor`）。
+///
+/// ノード、CA の順の2枚で、CA が自己署名、ノードが CA の鍵で署名されていること。
+/// 有効期間は catapult では OpenSSL が確かめるので、ここでは見ない。
+pub fn check_catapult_chain(chain: &[Certificate]) -> Result<(), ChainError> {
+    let [node, ca] = chain else {
+        return Err(ChainError::NotTwoCertificates);
+    };
+    if !ca.is_self_signed() {
+        return Err(ChainError::RootNotSelfSigned);
+    }
+    if node.issuer() != ca.subject() || !node.is_signed_by(ca.public_key()) {
+        return Err(ChainError::NotSignedByRoot);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Certificate {
@@ -339,6 +361,29 @@ impl fmt::Display for ParseCertificateError {
 }
 
 impl std::error::Error for ParseCertificateError {}
+
+/// チェーンが catapult の条件を満たさない理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainError {
+    /// 2枚ではない
+    NotTwoCertificates,
+    /// 2枚目が自己署名ではない
+    RootNotSelfSigned,
+    /// 1枚目が2枚目の鍵で署名されていない
+    NotSignedByRoot,
+}
+
+impl fmt::Display for ChainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotTwoCertificates => "2枚のチェーンではない",
+            Self::RootNotSelfSigned => "2枚目が自己署名ではない",
+            Self::NotSignedByRoot => "1枚目が2枚目の鍵で署名されていない",
+        })
+    }
+}
+
+impl std::error::Error for ChainError {}
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +539,35 @@ mod tests {
         assert_eq!(
             Certificate::from_pem(OPENSSL_P256).unwrap_err(),
             ParseCertificateError::NotEd25519
+        );
+    }
+
+    #[test]
+    fn checks_the_catapult_chain() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let node = Certificate::issue(&ca, &ca_key(), &node_key(), &template("CN=node")).unwrap();
+        assert!(ca.is_self_signed());
+        assert!(!node.is_self_signed());
+        assert_eq!(check_catapult_chain(&[node.clone(), ca.clone()]), Ok(()));
+        assert_eq!(
+            check_catapult_chain(std::slice::from_ref(&node)),
+            Err(ChainError::NotTwoCertificates)
+        );
+        assert_eq!(
+            check_catapult_chain(&[node.clone(), ca.clone(), ca.clone()]),
+            Err(ChainError::NotTwoCertificates)
+        );
+        assert_eq!(
+            check_catapult_chain(&[ca.clone(), node.clone()]),
+            Err(ChainError::RootNotSelfSigned)
+        );
+        // 同じ DN で別の鍵の CA
+        let other =
+            Certificate::self_signed(&PrivateKey::from_bytes(&[3; 32]), &template("CN=CA heika"))
+                .unwrap();
+        assert_eq!(
+            check_catapult_chain(&[node, other]),
+            Err(ChainError::NotSignedByRoot)
         );
     }
 

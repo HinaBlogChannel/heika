@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use clap::{Args, Subcommand};
 use der::DateTime;
-use heika_cert::certificate::{Certificate, Template};
+use heika_cert::certificate::{Certificate, Template, check_catapult_chain};
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
@@ -196,7 +196,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
                     .collect();
                 outln!("シリアル番号: {serial_number}");
                 describe(certificate)?;
-                if is_self_signed(certificate) {
+                if certificate.is_self_signed() {
                     outln!(
                         "CA の公開鍵のアドレス: {}",
                         Address::from_public_key(certificate.public_key(), network.into())
@@ -205,37 +205,16 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             }
             if certificates.len() > 1 {
                 outln!();
-                match catapult_violation(&certificates) {
-                    None => outln!(
+                match check_catapult_chain(&certificates) {
+                    Ok(()) => outln!(
                         "catapult の条件: 満たしています（2枚で、2枚目が自己署名、1枚目が2枚目の鍵で署名されている）"
                     ),
-                    Some(reason) => outln!("catapult の条件: 満たしていません（{reason}）"),
+                    Err(reason) => outln!("catapult の条件: 満たしていません（{reason}）"),
                 }
             }
         }
     }
     Ok(())
-}
-
-fn is_self_signed(certificate: &Certificate) -> bool {
-    certificate.issuer() == certificate.subject()
-        && certificate.is_signed_by(certificate.public_key())
-}
-
-/// catapult の `CatapultCertificateProcessor` がつなぐときに確かめる条件のうち、満たしていないもの。
-///
-/// 有効期間は OpenSSL が確かめるので、ここでは見ない（各証明書の有効期間の行に出す）。
-fn catapult_violation(certificates: &[Certificate]) -> Option<&'static str> {
-    let [node, ca] = certificates else {
-        return Some("2枚のチェーンではない");
-    };
-    if !is_self_signed(ca) {
-        return Some("2枚目が自己署名ではない");
-    }
-    if node.issuer() != ca.subject() || !node.is_signed_by(ca.public_key()) {
-        return Some("1枚目が2枚目の鍵で署名されていない");
-    }
-    None
 }
 
 impl SubjectArgs {

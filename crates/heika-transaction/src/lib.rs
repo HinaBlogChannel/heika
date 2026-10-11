@@ -192,6 +192,55 @@ impl Transaction {
         hasher.update(self.signed_part(&bytes));
         Hash256(hasher.finalize().into())
     }
+
+    /// アグリゲートに `private_key` の連署を足す。
+    ///
+    /// 連署するのは外側の署名を含むハッシュなので、先に署名されていなければならない。
+    /// catapult の `BasicAggregateCosignaturesValidator` と同じく、外側の署名者やすでに連署した鍵の連署は弾く。
+    /// 誰の連署が要るかはマルチシグの設定で決まるので、ここでは確かめない。
+    pub fn cosign(
+        &mut self,
+        private_key: &PrivateKey,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<(), CosignError> {
+        if !Body::is_aggregate_type(self.body.transaction_type()) {
+            return Err(CosignError::NotAggregate);
+        }
+        if self.signature == Signature([0; 64]) {
+            return Err(CosignError::NotSigned);
+        }
+        let hash = self.hash(generation_hash_seed);
+        let public_key = PublicKey::from_private_key(private_key);
+        let signer_public_key = self.signer_public_key;
+        let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) =
+            &mut self.body
+        else {
+            unreachable!("the type is an aggregate");
+        };
+        if public_key == signer_public_key
+            || aggregate
+                .cosignatures()
+                .iter()
+                .any(|cosignature| cosignature.signer_public_key == public_key)
+        {
+            return Err(CosignError::Redundant);
+        }
+        aggregate.add_cosignature(Cosignature::sign(private_key, &hash));
+        Ok(())
+    }
+
+    /// 連署をすべて検証する。アグリゲートでなければ連署はないので `true`。
+    pub fn verify_cosignatures(&self, generation_hash_seed: &GenerationHashSeed) -> bool {
+        let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) = &self.body
+        else {
+            return true;
+        };
+        let hash = self.hash(generation_hash_seed);
+        aggregate
+            .cosignatures()
+            .iter()
+            .all(|cosignature| cosignature.verify(&hash))
+    }
 }
 
 impl Body {
@@ -394,6 +443,30 @@ impl fmt::Display for SignError {
 
 impl std::error::Error for SignError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CosignError {
+    /// アグリゲートではない
+    NotAggregate,
+    /// 外側の署名がまだない
+    NotSigned,
+    /// 外側の署名者か、すでに連署した鍵
+    Redundant,
+}
+
+impl fmt::Display for CosignError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAggregate => f.write_str("アグリゲートではないので連署できません"),
+            Self::NotSigned => f.write_str("まだ署名されていないので連署できません"),
+            Self::Redundant => {
+                f.write_str("この鍵は署名者か、すでに連署しているので、連署を重ねられません")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CosignError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +661,69 @@ mod tests {
         let expected = Hash256(hasher.finalize().into());
         assert_eq!(transaction.hash(&seed()), expected);
         assert_ne!(transaction.hash(&GenerationHashSeed([0; 32])), expected);
+    }
+
+    fn aggregate_complete() -> Transaction {
+        let cosigner = PublicKey::from_private_key(&cosigner_key());
+        let embedded = vrf_key_link().body;
+        let aggregate = Aggregate::new(vec![EmbeddedTransaction::new(
+            cosigner,
+            NetworkIdentifier::TESTNET,
+            embedded,
+        )])
+        .unwrap();
+        transaction(Body::AggregateComplete(aggregate))
+    }
+
+    fn cosigner_key() -> PrivateKey {
+        PrivateKey::from_bytes(&[7; 32])
+    }
+
+    #[test]
+    fn cosigns_the_hash_of_a_signed_aggregate() {
+        let mut transaction = aggregate_complete();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        let hash = transaction.hash(&seed());
+        transaction.cosign(&cosigner_key(), &seed()).unwrap();
+        assert_eq!(transaction.hash(&seed()), hash);
+        let Body::AggregateComplete(aggregate) = &transaction.body else {
+            unreachable!()
+        };
+        assert_eq!(
+            aggregate.cosignatures(),
+            [Cosignature::sign(&cosigner_key(), &hash)]
+        );
+        assert!(transaction.verify_cosignatures(&seed()));
+        assert!(!transaction.verify_cosignatures(&GenerationHashSeed([0; 32])));
+    }
+
+    #[test]
+    fn refuses_to_cosign_an_unsigned_or_non_aggregate_transaction() {
+        assert_eq!(
+            aggregate_complete().cosign(&cosigner_key(), &seed()),
+            Err(CosignError::NotSigned)
+        );
+        let mut transaction = vrf_key_link();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        assert_eq!(
+            transaction.cosign(&cosigner_key(), &seed()),
+            Err(CosignError::NotAggregate)
+        );
+        assert!(transaction.verify_cosignatures(&seed()));
+    }
+
+    #[test]
+    fn refuses_a_redundant_cosignature() {
+        let mut transaction = aggregate_complete();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        assert_eq!(
+            transaction.cosign(&private_key(), &seed()),
+            Err(CosignError::Redundant)
+        );
+        transaction.cosign(&cosigner_key(), &seed()).unwrap();
+        assert_eq!(
+            transaction.cosign(&cosigner_key(), &seed()),
+            Err(CosignError::Redundant)
+        );
     }
 }

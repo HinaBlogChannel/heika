@@ -23,7 +23,7 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。リンクと Transfer
-- `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10
+- `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10、委任ハーベストの要求に使う公開鍵あての暗号化
 - `heika-cli`: コマンドラインツール `heika`
 - `heika-vectors`: Symbol の公式テストベクターと、公式の Python SDK で作ったベクターとの照合
 

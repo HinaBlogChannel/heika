@@ -316,6 +316,7 @@ dependencies = [
  "getrandom 0.4.3",
  "heika-cert",
  "heika-core",
+ "heika-tls",
  "heika-wallet",
  "zeroize",
 ]
@@ -332,6 +333,15 @@ dependencies = [
  "sha2",
  "sha3",
  "zeroize",
+]
+
+[[package]]
+name = "heika-tls"
+version = "0.1.0"
+dependencies = [
+ "heika-cert",
+ "heika-core",
+ "rustls",
 ]
 
 [[package]]

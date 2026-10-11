@@ -14,5 +14,6 @@ der = "0.8.2"
 getrandom = "0.4.3"
 heika-cert = { version = "0.1.0", path = "../heika-cert" }
 heika-core = { version = "0.1.0", path = "../heika-core" }
+heika-tls = { version = "0.1.0", path = "../heika-tls" }
 heika-wallet = { version = "0.1.0", path = "../heika-wallet" }
 zeroize = "1.9.1"

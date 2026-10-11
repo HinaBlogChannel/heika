@@ -8,14 +8,16 @@ use std::time::{Duration, SystemTime};
 
 use clap::{Args, Subcommand};
 use der::DateTime;
-use heika_cert::certificate::{Certificate, Template};
+use heika_cert::certificate::{Certificate, ParseCertificateError, Template, check_catapult_chain};
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
+use heika_tls::{ClientCertificate, Identity};
 
 use crate::{Failure, Network, read_secret};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// shoestring と symbol-bootstrap の既定値
 const CA_DAYS: u32 = 7300;
 const NODE_DAYS: u32 = 375;
@@ -52,13 +54,33 @@ pub enum CertCommand {
         #[command(flatten)]
         validity: ValidityArgs,
     },
-    /// 証明書のファイル（PEM）の中身を出す
+    /// 証明書の中身を出す
     ///
     /// node.full.crt.pem のように2枚つないだものなら、catapult がつなぐときの条件も確かめる。
     /// 自己署名の証明書は CA の証明書とみなし、その公開鍵のアドレスも出す。
+    ///
+    /// --connect を付けると、ファイルの代わりにノードが実際に出している証明書を調べる。
+    /// こちらも名乗る必要があるので、--client-cert のチェーンと、標準入力から読んだその秘密鍵（PEM か16進）を使う。
+    /// TLS のハンドシェイクだけをして、こちらの証明書が受け付けられたかも確かめる。
+    /// 同じ IP から短いあいだに違う証明書でつなぎ直すと、ノードにしばらく弾かれることがある。
     Show {
         /// 証明書のファイル（PEM）。何枚つないであってもよい
-        path: PathBuf,
+        #[arg(required_unless_present = "connect", conflicts_with = "connect")]
+        path: Option<PathBuf>,
+        /// 調べるノード（ホスト:ポート）
+        #[arg(long, value_name = "HOST:PORT", requires = "client_cert")]
+        connect: Option<String>,
+        /// --connect で名乗る証明書のチェーン（ノード、CA の順の PEM）
+        #[arg(long, value_name = "PATH", requires = "connect")]
+        client_cert: Option<PathBuf>,
+        /// --connect で、ハンドシェイクのあと切られないか待つ秒数
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 3,
+            requires = "connect"
+        )]
+        wait: u64,
         #[arg(long, value_enum, default_value_t = Network::Mainnet)]
         network: Network,
     },
@@ -178,64 +200,109 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             write_new(&out, &certificate.to_pem())?;
             describe(&certificate)?;
         }
-        CertCommand::Show { path, network } => {
-            let pem = fs::read_to_string(&path)
-                .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
-            let certificates = Certificate::from_pem_chain(&pem)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            for (index, certificate) in certificates.iter().enumerate() {
-                if index > 0 {
-                    outln!();
-                }
-                outln!("{}枚目", index + 1);
-                outln!("バージョン: v{}", certificate.version());
-                let serial_number: String = certificate
-                    .serial_number()
-                    .iter()
-                    .map(|byte| format!("{byte:02X}"))
-                    .collect();
-                outln!("シリアル番号: {serial_number}");
-                describe(certificate)?;
-                if is_self_signed(certificate) {
-                    outln!(
-                        "CA の公開鍵のアドレス: {}",
-                        Address::from_public_key(certificate.public_key(), network.into())
-                    );
-                }
+        CertCommand::Show {
+            path,
+            connect,
+            client_cert,
+            wait,
+            network,
+        } => match (path, connect, client_cert) {
+            (Some(path), _, _) => {
+                let certificates = read_chain(&path)?;
+                show_chain(
+                    &certificates.into_iter().map(Ok).collect::<Vec<_>>(),
+                    network,
+                )?;
             }
-            if certificates.len() > 1 {
+            (None, Some(address), Some(client_cert)) => {
+                let chain = read_chain(&client_cert)?;
+                let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
+                let identity = Identity::new(&chain, &key)
+                    .map_err(|error| format!("{}: {error}", client_cert.display()))?;
+                let inspection = heika_tls::inspect(
+                    &address,
+                    &identity,
+                    CONNECT_TIMEOUT,
+                    Duration::from_secs(wait),
+                )
+                .map_err(|error| format!("{address}: {error}"))?;
+                outln!("接続先: {address}");
                 outln!();
-                match catapult_violation(&certificates) {
-                    None => outln!(
-                        "catapult の条件: 満たしています（2枚で、2枚目が自己署名、1枚目が2枚目の鍵で署名されている）"
-                    ),
-                    Some(reason) => outln!("catapult の条件: 満たしていません（{reason}）"),
+                let certificates: Vec<_> = inspection
+                    .peer_certificates
+                    .iter()
+                    .map(|der| Certificate::from_der(der))
+                    .collect();
+                show_chain(&certificates, network)?;
+                outln!();
+                match inspection.client_certificate {
+                    ClientCertificate::Kept => {
+                        outln!(
+                            "こちらの証明書: 受け付けられました（{wait} 秒のあいだ切られませんでした）"
+                        )
+                    }
+                    ClientCertificate::Rejected(alert) => {
+                        outln!("こちらの証明書: 弾かれました（TLS のアラート: {alert}）")
+                    }
+                    ClientCertificate::Closed => {
+                        outln!("こちらの証明書: わかりません（アラートなしで切られました）")
+                    }
+                    ClientCertificate::DataReceived => {
+                        outln!("こちらの証明書: 受け付けられたようです（相手から何か届きました）")
+                    }
                 }
             }
-        }
+            _ => unreachable!("clap requires a path or --connect with --client-cert"),
+        },
     }
     Ok(())
 }
 
-fn is_self_signed(certificate: &Certificate) -> bool {
-    certificate.issuer() == certificate.subject()
-        && certificate.is_signed_by(certificate.public_key())
-}
-
-/// catapult の `CatapultCertificateProcessor` がつなぐときに確かめる条件のうち、満たしていないもの。
-///
-/// 有効期間は OpenSSL が確かめるので、ここでは見ない（各証明書の有効期間の行に出す）。
-fn catapult_violation(certificates: &[Certificate]) -> Option<&'static str> {
-    let [node, ca] = certificates else {
-        return Some("2枚のチェーンではない");
-    };
-    if !is_self_signed(ca) {
-        return Some("2枚目が自己署名ではない");
+/// 証明書を1枚ずつ出し、2枚以上なら catapult の条件も出す。
+fn show_chain(
+    certificates: &[Result<Certificate, ParseCertificateError>],
+    network: Network,
+) -> Result<(), Failure> {
+    for (index, certificate) in certificates.iter().enumerate() {
+        if index > 0 {
+            outln!();
+        }
+        outln!("{}枚目", index + 1);
+        let certificate = match certificate {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                outln!("読めません: {error}");
+                continue;
+            }
+        };
+        outln!("バージョン: v{}", certificate.version());
+        let serial_number: String = certificate
+            .serial_number()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        outln!("シリアル番号: {serial_number}");
+        describe(certificate)?;
+        if certificate.is_self_signed() {
+            outln!(
+                "CA の公開鍵のアドレス: {}",
+                Address::from_public_key(certificate.public_key(), network.into())
+            );
+        }
     }
-    if node.issuer() != ca.subject() || !node.is_signed_by(ca.public_key()) {
-        return Some("1枚目が2枚目の鍵で署名されていない");
+    if certificates.len() > 1 {
+        outln!();
+        match certificates.iter().cloned().collect::<Result<Vec<_>, _>>() {
+            Err(_) => outln!("catapult の条件: 満たしていません（読めない証明書がある）"),
+            Ok(certificates) => match check_catapult_chain(&certificates) {
+                Ok(()) => outln!(
+                    "catapult の条件: 満たしています（2枚で、2枚目が自己署名、1枚目が2枚目の鍵で署名されている）"
+                ),
+                Err(reason) => outln!("catapult の条件: 満たしていません（{reason}）"),
+            },
+        }
     }
-    None
+    Ok(())
 }
 
 impl SubjectArgs {
@@ -256,6 +323,12 @@ fn read_certificate(path: &Path) -> Result<Certificate, String> {
     let pem = fs::read_to_string(path)
         .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
     Certificate::from_pem(&pem).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn read_chain(path: &Path) -> Result<Vec<Certificate>, String> {
+    let pem = fs::read_to_string(path)
+        .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
+    Certificate::from_pem_chain(&pem).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn serial_number() -> Result<[u8; SERIAL_NUMBER_LENGTH], String> {

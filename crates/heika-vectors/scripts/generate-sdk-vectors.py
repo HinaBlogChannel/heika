@@ -33,6 +33,10 @@ TYPES = [
 	'vrf_key_link_transaction_v1',
 	'transfer_transaction_v1',
 ]
+AGGREGATE_TYPES = [
+	'aggregate_complete_transaction_v3',
+	'aggregate_bonded_transaction_v3',
+]
 
 ROOT = Bip32().from_mnemonic(MNEMONIC, '')
 FACADES = {name: SymbolFacade(name) for name in ['mainnet', 'testnet']}
@@ -51,46 +55,70 @@ def key_pair(facade, account):
 	return facade.bip32_node_to_key_pair(ROOT.derive_path(facade.bip32_path(account)))
 
 
-def recipient_address(facade, name, index):
+def recipient_address(facade, label, index):
 	"""同じニーモニックの別のアカウントのアドレスか、ネームスペースを指すアドレス。"""
-	if draw(f'{name}/recipient-kind', index)[0] % 2:
+	if draw(f'{label}/recipient-kind', index)[0] % 2:
 		# ネットワークの1バイトの最下位ビットを立て、ネームスペースの ID を続けて、残りを0で埋める
-		namespace_id = u64(f'{name}/namespace-id', index) | (1 << 63)
+		namespace_id = u64(f'{label}/namespace-id', index) | (1 << 63)
 		return bytes([facade.network.identifier | 1]) + namespace_id.to_bytes(8, 'little') + bytes(15)
-	account = 1000 + draw(f'{name}/recipient-account', index)[0]
+	account = 1000 + draw(f'{label}/recipient-account', index)[0]
 	return facade.network.public_key_to_address(key_pair(facade, account).public_key).bytes
 
 
-def mosaics(name, index):
+def mosaics(label, index):
 	"""0から4種類。ID の最上位ビットが立っているものはネームスペースを指す。"""
-	count = draw(f'{name}/mosaic-count', index)[0] % 5
+	count = draw(f'{label}/mosaic-count', index)[0] % 5
 	return [
-		{'mosaic_id': u64(f'{name}/mosaic-id/{slot}', index), 'amount': u64(f'{name}/mosaic-amount/{slot}', index)}
+		{'mosaic_id': u64(f'{label}/mosaic-id/{slot}', index), 'amount': u64(f'{label}/mosaic-amount/{slot}', index)}
 		for slot in range(count)
 	]
 
 
-def message(name, index):
+def message(label, index):
 	"""空、UTF-8 の文、バイト列のどれか。"""
-	kind = draw(f'{name}/message-kind', index)[0] % 3
+	kind = draw(f'{label}/message-kind', index)[0] % 3
 	if 0 == kind:
 		return b''
 	if 1 == kind:
 		return f'heika のテスト {index} 番 ✓'.encode()
-	return draw(f'{name}/message-bytes', index)[:draw(f'{name}/message-length', index)[0] % 33]
+	return draw(f'{label}/message-bytes', index)[:draw(f'{label}/message-length', index)[0] % 33]
 
 
-def body(facade, name, index):
+def body(facade, name, index, label):
+	"""アグリゲートではない種類の本体の、SDK に渡す値と JSON に書く値。"""
 	if 'transfer_transaction_v1' == name:
-		return {
-			'recipient_address': recipient_address(facade, name, index),
-			'mosaics': mosaics(name, index),
-			'message': message(name, index),
-		}
-	return {
-		'linked_public_key': draw(f'{name}/linked-public-key', index),
-		'link_action': 'link' if draw(f'{name}/link-action', index)[0] % 2 else 'unlink',
-	}
+		recipient = recipient_address(facade, label, index)
+		data = message(label, index)
+		descriptor = {'recipient_address': recipient, 'mosaics': mosaics(label, index), 'message': data}
+		# SDK が並べ替える前の順のまま残す
+		fields = {'recipient_address': recipient.hex().upper(), 'mosaics': mosaics(label, index), 'message': data.hex().upper()}
+		return descriptor, fields
+	linked_public_key = draw(f'{label}/linked-public-key', index)
+	link_action = 'link' if draw(f'{label}/link-action', index)[0] % 2 else 'unlink'
+	descriptor = {'linked_public_key': linked_public_key, 'link_action': link_action}
+	fields = {'linked_public_key': linked_public_key.hex().upper(), 'link_action': link_action}
+	return descriptor, fields
+
+
+def aggregate(facade, name, index, signer_account):
+	"""0から5件の中のトランザクション。署名者は外側と同じか別のアカウントで、別なら連署する。"""
+	embedded = []
+	fields = []
+	cosigners = []
+	for slot in range(draw(f'{name}/transaction-count', index)[0] % 6):
+		inner = TYPES[draw(f'{name}/{slot}/type', index)[0] % len(TYPES)]
+		account = signer_account if draw(f'{name}/{slot}/signer', index)[0] % 2 else 5000 + 8 * index + slot
+		descriptor, inner_fields = body(facade, inner, index, f'{name}/{slot}/{inner}')
+		embedded.append(facade.transaction_factory.create_embedded({
+			'type': inner,
+			'signer_public_key': key_pair(facade, account).public_key,
+			**descriptor,
+		}))
+		fields.append({'type': inner, 'account': account, **inner_fields})
+		if account != signer_account and account not in cosigners:
+			cosigners.append(account)
+	descriptor = {'transactions_hash': facade.hash_embedded_transactions(embedded), 'transactions': embedded}
+	return descriptor, {'transactions': fields, 'cosigners': cosigners}
 
 
 def vector(name, index):
@@ -98,34 +126,30 @@ def vector(name, index):
 	facade = FACADES[network]
 	account = index
 	signer = key_pair(facade, account)
+	if name in AGGREGATE_TYPES:
+		descriptor, body_fields = aggregate(facade, name, index, account)
+	else:
+		descriptor, body_fields = body(facade, name, index, name)
 	transaction = facade.transaction_factory.create({
 		'type': name,
 		'signer_public_key': signer.public_key,
 		'fee': u64(f'{name}/fee', index),
 		'deadline': u64(f'{name}/deadline', index),
-		**body(facade, name, index),
+		**descriptor,
 	})
 	signature = facade.sign_transaction(signer, transaction)
 	facade.transaction_factory.attach_signature(transaction, signature)
+	for cosigner in body_fields.get('cosigners', []):
+		transaction.cosignatures.append(facade.cosign_transaction(key_pair(facade, cosigner), transaction))
 
-	fields = {
+	return {
 		'type': name,
 		'network': network,
 		'account': account,
 		'signer_public_key': str(signer.public_key),
 		'fee': transaction.fee.value,
 		'deadline': transaction.deadline.value,
-	}
-	if 'transfer_transaction_v1' == name:
-		fields['recipient_address'] = transaction.recipient_address.bytes.hex().upper()
-		# 書くときと同じく、SDK が並べ替える前の順のまま残す
-		fields['mosaics'] = mosaics(name, index)
-		fields['message'] = bytes(transaction.message).hex().upper()
-	else:
-		fields['linked_public_key'] = str(transaction.linked_public_key)
-		fields['link_action'] = str(transaction.link_action).split('.')[-1].lower()
-	return {
-		**fields,
+		**body_fields,
 		'signature': str(signature),
 		'hash': str(facade.hash_transaction(transaction)),
 		'payload': transaction.serialize().hex().upper(),
@@ -169,6 +193,7 @@ def harvest_request(index):
 		'message': message.hex().upper(),
 	}
 
+
 def main():
 	document = {
 		'sdk': SDK,
@@ -180,7 +205,7 @@ def main():
 			}
 			for name, facade in FACADES.items()
 		},
-		'transactions': [vector(name, index) for name in TYPES for index in range(COUNT)],
+		'transactions': [vector(name, index) for name in TYPES + AGGREGATE_TYPES for index in range(COUNT)],
 		'harvest_requests': [harvest_request(index) for index in range(COUNT)],
 	}
 	json.dump(document, sys.stdout, ensure_ascii=False, indent='\t')

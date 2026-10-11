@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_transaction::{
-    Body, KeyLink, LinkAction, Transaction, Transfer, UnresolvedAddress, UnresolvedMosaicId,
+    Aggregate, Body, Cosignature, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
+    UnresolvedAddress, UnresolvedMosaicId,
 };
 use heika_wallet::bip39::Mnemonic;
 use heika_wallet::harvest_request::{self, HarvesterKeys};
@@ -35,22 +36,42 @@ struct Network {
 
 #[derive(Deserialize)]
 struct Vector {
-    #[serde(rename = "type")]
-    transaction_type: String,
+    #[serde(flatten)]
+    fields: Fields,
     network: String,
     account: u32,
     signer_public_key: String,
     fee: u64,
     deadline: u64,
+    /// アグリゲートの中のトランザクション
+    #[serde(default)]
+    transactions: Vec<Embedded>,
+    /// アグリゲートに連署するアカウント
+    #[serde(default)]
+    cosigners: Vec<u32>,
+    signature: String,
+    hash: String,
+    payload: String,
+}
+
+#[derive(Deserialize)]
+struct Embedded {
+    #[serde(flatten)]
+    fields: Fields,
+    account: u32,
+}
+
+/// アグリゲートではない種類の本体。
+#[derive(Deserialize)]
+struct Fields {
+    #[serde(rename = "type")]
+    transaction_type: String,
     linked_public_key: Option<String>,
     link_action: Option<String>,
     recipient_address: Option<String>,
     #[serde(default)]
     mosaics: Vec<Mosaic>,
     message: Option<String>,
-    signature: String,
-    hash: String,
-    payload: String,
 }
 
 #[derive(Deserialize)]
@@ -77,15 +98,15 @@ fn from_hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn body(vector: &Vector) -> Body {
-    if vector.transaction_type == "transfer_transaction_v1" {
-        let recipient = from_hex(vector.recipient_address.as_deref().unwrap());
-        let mosaics = vector
+fn body(fields: &Fields) -> Body {
+    if fields.transaction_type == "transfer_transaction_v1" {
+        let recipient = from_hex(fields.recipient_address.as_deref().unwrap());
+        let mosaics = fields
             .mosaics
             .iter()
             .map(|mosaic| (UnresolvedMosaicId(mosaic.mosaic_id), mosaic.amount))
             .collect();
-        let message = from_hex(vector.message.as_deref().unwrap());
+        let message = from_hex(fields.message.as_deref().unwrap());
         return Body::Transfer(
             Transfer::new(
                 UnresolvedAddress(recipient.try_into().unwrap()),
@@ -96,19 +117,19 @@ fn body(vector: &Vector) -> Body {
         );
     }
     let link = KeyLink {
-        linked_public_key: vector
+        linked_public_key: fields
             .linked_public_key
             .as_deref()
             .unwrap()
             .parse()
             .unwrap(),
-        link_action: match vector.link_action.as_deref().unwrap() {
+        link_action: match fields.link_action.as_deref().unwrap() {
             "link" => LinkAction::Link,
             "unlink" => LinkAction::Unlink,
             action => panic!("link_action {action}"),
         },
     };
-    match vector.transaction_type.as_str() {
+    match fields.transaction_type.as_str() {
         "account_key_link_transaction_v1" => Body::AccountKeyLink(link),
         "node_key_link_transaction_v1" => Body::NodeKeyLink(link),
         "vrf_key_link_transaction_v1" => Body::VrfKeyLink(link),
@@ -126,9 +147,11 @@ fn signs_and_hashes_like_the_sdk() {
         let network = &document.networks[&vector.network];
         let identifier = NetworkIdentifier(network.identifier);
         let seed: GenerationHashSeed = network.generation_hash_seed.parse().unwrap();
-        let private_key = root
-            .derive_path(&slip10::symbol_path(identifier, vector.account))
-            .private_key();
+        let derive = |account| -> PrivateKey {
+            root.derive_path(&slip10::symbol_path(identifier, account))
+                .private_key()
+        };
+        let private_key = derive(vector.account);
         let signer_public_key: PublicKey = vector.signer_public_key.parse().unwrap();
         assert_eq!(
             PublicKey::from_private_key(&private_key),
@@ -136,24 +159,53 @@ fn signs_and_hashes_like_the_sdk() {
             "vector {index}"
         );
 
+        let body = match vector.fields.transaction_type.as_str() {
+            "aggregate_complete_transaction_v3" | "aggregate_bonded_transaction_v3" => {
+                let transactions = vector
+                    .transactions
+                    .iter()
+                    .map(|embedded| {
+                        EmbeddedTransaction::new(
+                            PublicKey::from_private_key(&derive(embedded.account)),
+                            identifier,
+                            body(&embedded.fields),
+                        )
+                    })
+                    .collect();
+                let aggregate = Aggregate::new(transactions).unwrap();
+                if vector.fields.transaction_type == "aggregate_complete_transaction_v3" {
+                    Body::AggregateComplete(aggregate)
+                } else {
+                    Body::AggregateBonded(aggregate)
+                }
+            }
+            _ => body(&vector.fields),
+        };
         let mut transaction = Transaction::new(
             signer_public_key,
             identifier,
             vector.fee,
             vector.deadline,
-            body(vector),
+            body,
         );
         transaction.sign(&private_key, &seed).unwrap();
+        let hash = transaction.hash(&seed);
+        if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) =
+            &mut transaction.body
+        {
+            for &cosigner in &vector.cosigners {
+                let cosignature = Cosignature::sign(&derive(cosigner), &hash);
+                assert!(cosignature.verify(&hash), "vector {index}");
+                aggregate.add_cosignature(cosignature);
+            }
+        }
         assert_eq!(
             transaction.signature.to_string(),
             vector.signature,
             "vector {index}"
         );
-        assert_eq!(
-            transaction.hash(&seed).to_string(),
-            vector.hash,
-            "vector {index}"
-        );
+        assert_eq!(hash.to_string(), vector.hash, "vector {index}");
+        assert_eq!(transaction.hash(&seed), hash, "vector {index}");
         let payload = from_hex(&vector.payload);
         assert_eq!(transaction.to_bytes(), payload, "vector {index}");
         assert_eq!(

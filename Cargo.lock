@@ -433,6 +433,7 @@ dependencies = [
  "heika-core",
  "heika-transaction",
  "heika-wallet",
+ "rand_core",
  "serde",
  "serde_json",
  "ureq",

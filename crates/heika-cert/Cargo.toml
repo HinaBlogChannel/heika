@@ -3,6 +3,8 @@ name = "heika-cert"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "ノードの TLS で使う鍵と証明書のファイル"
 
 [dependencies]
 base64ct = "1.8.3"

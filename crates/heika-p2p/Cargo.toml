@@ -3,6 +3,8 @@ name = "heika-p2p"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol のノードへの問い合わせ"
 
 [dependencies]
 heika-core = { path = "../heika-core", default-features = false }

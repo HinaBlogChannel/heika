@@ -3,6 +3,8 @@ name = "heika-wallet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol のウォレットのための計算"
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }

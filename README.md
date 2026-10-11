@@ -31,11 +31,35 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - `heika-cli`: コマンドラインツール `heika`
 - `heika-vectors`: Symbol の公式テストベクターと、公式の Python SDK で作ったベクターとの照合
 
+## インストール
+
+Releases に、次のバイナリを置いている。
+
+- Linux の x86_64 と aarch64（musl で静的にリンクしたもの）
+- macOS の Apple Silicon
+- Windows の x86_64
+
+ダウンロードしたものは、`SHA256SUMS` と、GitHub Actions で作ったことを示す来歴の証明で確かめられる。
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify heika-<バージョン>-<ターゲット>.tar.gz --repo <リポジトリ>
+```
+
+macOS のバイナリは Apple の公証を受けていない。ブラウザーでダウンロードすると Gatekeeper に止められるので、`curl` で取るか、`xattr -d com.apple.quarantine heika` で印を外す。
+
+Windows のバイナリはおまけ程度である。Unix 以外では、標準入力から読んだ秘密鍵が std のバッファに残り、書き出す秘密鍵のファイルも自分だけが読めるようにはならない。
+
+ソースからなら、Rust 1.99 以上で次のようにする。
+
+```sh
+cargo install --git <リポジトリの URL> heika-cli
+cargo install --path crates/heika-cli  # 手元に clone したなら
+```
+
 ## 使い方
 
 ```sh
-cargo install --path crates/heika-cli
-
 heika key mnemonic --out alice.mnemonic
 heika key derive < alice.mnemonic
 heika key generate --out alice.key

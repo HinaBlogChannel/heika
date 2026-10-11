@@ -6,6 +6,7 @@ mod ed25519;
 pub mod hash;
 mod hex;
 pub mod key;
+pub mod merkle;
 pub mod network;
 pub mod signature;
 

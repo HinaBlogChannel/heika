@@ -1,0 +1,12 @@
+# heika のバイナリに入る依存のライセンスを、cargo about で THIRD-PARTY-LICENSES にまとめる。
+# 作り直すには、このフォルダーで cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
+accepted = ["Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "AGPL-3.0-only"]
+# Release で配るターゲットだけを見る
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

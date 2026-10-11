@@ -71,7 +71,8 @@ jobs:
       - name: まとめる
         run: |
           mkdir -p "dist/$PACKAGE"
-          cp LICENSE README.md "dist/$PACKAGE/"
+          cp LICENSE README.md crates/heika-cli/THIRD-PARTY-LICENSES "dist/$PACKAGE/"
+          cp crates/heika-wallet/src/bip39/NOTICE "dist/$PACKAGE/NOTICE-BIP39"
           if [ "$RUNNER_OS" = Windows ]; then
             cp "target/$TARGET/release/heika.exe" "dist/$PACKAGE/"
             (cd dist && 7z a "$PACKAGE.zip" "$PACKAGE")

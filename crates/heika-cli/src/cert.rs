@@ -10,9 +10,10 @@ use clap::{Args, Subcommand};
 use der::DateTime;
 use heika_cert::certificate::{Certificate, Template};
 use heika_cert::key;
+use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 
-use crate::{Failure, read_secret};
+use crate::{Failure, Network, read_secret};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// shoestring と symbol-bootstrap の既定値
@@ -50,6 +51,16 @@ pub enum CertCommand {
         out: PathBuf,
         #[command(flatten)]
         validity: ValidityArgs,
+    },
+    /// 証明書のファイル（PEM）の中身を出す
+    ///
+    /// node.full.crt.pem のように2枚つないだものなら、catapult がつなぐときの条件も確かめる。
+    /// 自己署名の証明書は CA の証明書とみなし、その公開鍵のアドレスも出す。
+    Show {
+        /// 証明書のファイル（PEM）。何枚つないであってもよい
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = Network::Mainnet)]
+        network: Network,
     },
 }
 
@@ -167,8 +178,64 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             write_new(&out, &certificate.to_pem())?;
             describe(&certificate)?;
         }
+        CertCommand::Show { path, network } => {
+            let pem = fs::read_to_string(&path)
+                .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
+            let certificates = Certificate::from_pem_chain(&pem)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            for (index, certificate) in certificates.iter().enumerate() {
+                if index > 0 {
+                    outln!();
+                }
+                outln!("{}枚目", index + 1);
+                outln!("バージョン: v{}", certificate.version());
+                let serial_number: String = certificate
+                    .serial_number()
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect();
+                outln!("シリアル番号: {serial_number}");
+                describe(certificate)?;
+                if is_self_signed(certificate) {
+                    outln!(
+                        "CA の公開鍵のアドレス: {}",
+                        Address::from_public_key(certificate.public_key(), network.into())
+                    );
+                }
+            }
+            if certificates.len() > 1 {
+                outln!();
+                match catapult_violation(&certificates) {
+                    None => outln!(
+                        "catapult の条件: 満たしています（2枚で、2枚目が自己署名、1枚目が2枚目の鍵で署名されている）"
+                    ),
+                    Some(reason) => outln!("catapult の条件: 満たしていません（{reason}）"),
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn is_self_signed(certificate: &Certificate) -> bool {
+    certificate.issuer() == certificate.subject()
+        && certificate.is_signed_by(certificate.public_key())
+}
+
+/// catapult の `CatapultCertificateProcessor` がつなぐときに確かめる条件のうち、満たしていないもの。
+///
+/// 有効期間は OpenSSL が確かめるので、ここでは見ない（各証明書の有効期間の行に出す）。
+fn catapult_violation(certificates: &[Certificate]) -> Option<&'static str> {
+    let [node, ca] = certificates else {
+        return Some("2枚のチェーンではない");
+    };
+    if !is_self_signed(ca) {
+        return Some("2枚目が自己署名ではない");
+    }
+    if node.issuer() != ca.subject() || !node.is_signed_by(ca.public_key()) {
+        return Some("1枚目が2枚目の鍵で署名されていない");
+    }
+    None
 }
 
 impl SubjectArgs {
@@ -212,12 +279,28 @@ fn describe(certificate: &Certificate) -> Result<(), Failure> {
     outln!("subject: {}", certificate.subject());
     outln!("issuer: {}", certificate.issuer());
     outln!(
-        "有効期間: {} から {} まで",
+        "有効期間: {} から {} まで（{}）",
         format_time(certificate.not_before()),
-        format_time(certificate.not_after())
+        format_time(certificate.not_after()),
+        remaining(certificate, SystemTime::now())
     );
     outln!("公開鍵: {}", certificate.public_key());
     Ok(())
+}
+
+fn remaining(certificate: &Certificate, now: SystemTime) -> String {
+    let days = |duration: Duration| duration.as_secs() / DAY.as_secs();
+    if let Ok(until) = certificate.not_before().duration_since(now) {
+        format!("まだ有効ではありません。あと {} 日で有効", days(until))
+    } else if let Ok(since) = now.duration_since(certificate.not_after()) {
+        format!("期限切れです。{} 日前に切れました", days(since))
+    } else {
+        let left = certificate
+            .not_after()
+            .duration_since(now)
+            .unwrap_or_default();
+        format!("あと {} 日", days(left))
+    }
 }
 
 fn format_time(time: SystemTime) -> String {

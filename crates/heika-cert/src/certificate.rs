@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use der::asn1::{BitString, ObjectIdentifier};
 use der::pem::LineEnding;
-use der::{Decode, DecodePem, Encode, EncodePem, Sequence};
+use der::{Decode, Encode, EncodePem, Sequence};
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::signature::Signature;
 use x509_cert::certificate::Version;
@@ -127,12 +127,29 @@ impl Certificate {
 
     /// `-----BEGIN CERTIFICATE-----` の PEM から読む。
     pub fn from_pem(pem: &str) -> Result<Self, ParseCertificateError> {
-        let inner = x509_cert::Certificate::from_pem(pem.trim())
+        // x509-cert で読んでから DER に戻すと正規でない DER も直ってしまうので、PEM の中身をそのまま渡す
+        let (label, der) = der::pem::decode_vec(pem.trim().as_bytes())
             .map_err(|_| ParseCertificateError::InvalidPem)?;
-        let der = inner
-            .to_der()
-            .map_err(|_| ParseCertificateError::InvalidDer)?;
+        if label != "CERTIFICATE" {
+            return Err(ParseCertificateError::InvalidPem);
+        }
         Self::from_der(&der)
+    }
+
+    /// PEM の証明書をつないだもの（`node.full.crt.pem` など）を、書かれた順に読む。
+    pub fn from_pem_chain(pem: &str) -> Result<Vec<Self>, ParseCertificateError> {
+        const END: &str = "-----END CERTIFICATE-----";
+        let mut certificates = Vec::new();
+        let mut rest = pem.trim();
+        while !rest.is_empty() {
+            let end = rest.find(END).ok_or(ParseCertificateError::InvalidPem)? + END.len();
+            certificates.push(Self::from_pem(&rest[..end])?);
+            rest = rest[end..].trim_start();
+        }
+        if certificates.is_empty() {
+            return Err(ParseCertificateError::InvalidPem);
+        }
+        Ok(certificates)
     }
 
     pub fn to_der(&self) -> &[u8] {
@@ -481,10 +498,46 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_chain_in_order() {
+        let chain = format!("{OPENSSL_V3_NODE}{OPENSSL_V3_CA}");
+        let certificates = Certificate::from_pem_chain(&chain).unwrap();
+        let subjects: Vec<_> = certificates.iter().map(Certificate::subject).collect();
+        assert_eq!(subjects, ["CN=node fixture", "CN=CA fixture"]);
+        assert_eq!(Certificate::from_pem_chain(OPENSSL_V3_CA).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_chain_with_trailing_garbage() {
+        let chain = format!("{OPENSSL_V3_NODE}garbage");
+        assert_eq!(
+            Certificate::from_pem_chain(&chain).unwrap_err(),
+            ParseCertificateError::InvalidPem
+        );
+        assert_eq!(
+            Certificate::from_pem_chain(" \n").unwrap_err(),
+            ParseCertificateError::InvalidPem
+        );
+    }
+
+    #[test]
+    fn rejects_a_pem_with_another_label() {
+        let key = key::public_key_to_pem(&node_key());
+        assert_eq!(
+            Certificate::from_pem(&key).unwrap_err(),
+            ParseCertificateError::InvalidPem
+        );
+    }
+
+    #[test]
     fn rejects_garbage() {
+        // PEM としては読めて、中身が証明書になっていない
         assert_eq!(
             Certificate::from_pem("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----")
                 .unwrap_err(),
+            ParseCertificateError::InvalidDer
+        );
+        assert_eq!(
+            Certificate::from_pem("not a pem").unwrap_err(),
             ParseCertificateError::InvalidPem
         );
         assert_eq!(

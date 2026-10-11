@@ -29,6 +29,8 @@
 | `crypto/1.test-keys.json` | 秘密鍵から公開鍵 |
 | `crypto/1.test-address.json` | 公開鍵からメインネットとテストネットのアドレス |
 | `crypto/2.test-sign.json` | 秘密鍵でデータに署名した結果と、その署名の検証 |
+| `crypto/3.test-derive-hkdf.json` | 秘密鍵と相手の公開鍵から、委任ハーベストの要求の暗号化に使う共有鍵 |
+| `crypto/4.test-cipher.json` | 共有鍵での AES-GCM の暗号化と復号 |
 | `crypto/6.test-hd-derivation.json` | ニーモニックからシード、シードから子の鍵、ネットワークごとのパス |
 | `models/transactions.json` | トランザクションのバイト列と中身の読み書き（リンクと Transfer）。ここの署名はレイアウトを試すための値で、検証は通らない |
 

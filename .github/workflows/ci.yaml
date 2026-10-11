@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # release.yaml から呼ばれたときは github.workflow が Release になるので、push の CI を止めない
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

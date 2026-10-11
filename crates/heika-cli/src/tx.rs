@@ -12,7 +12,7 @@ use clap::{Args, Subcommand};
 use heika_core::key::PublicKey;
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
-use heika_transaction::{Aggregate, Body, EmbeddedTransaction, Transaction};
+use heika_transaction::{Aggregate, Body, Cosignature, EmbeddedTransaction, Transaction};
 
 use heika_cert::certificate::Certificate;
 use heika_tls::{ClientCertificate, Identity};
@@ -23,6 +23,8 @@ use crate::{Failure, Network, read_secret};
 const HOUR: Duration = Duration::from_secs(60 * 60);
 /// ネットワークの設定 maxTransactionLifetime。メインネットもテストネットも 6h
 const MAX_TRANSACTION_LIFETIME_HOURS: u64 = 6;
+/// ネットワークの設定 maxCosignaturesPerAggregate。外側の署名も数える。メインネットもテストネットも 25
+const MAX_COSIGNATURES_PER_AGGREGATE: usize = 25;
 /// catapult の `ionet::PacketType::Push_Transactions`
 const PUSH_TRANSACTIONS: u32 = 9;
 
@@ -38,9 +40,22 @@ pub enum TxCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// 署名したアグリゲートに、標準入力から読んだ秘密鍵で連署する
+    ///
+    /// 連署するのは外側の署名を含むハッシュなので、先に heika tx sign で署名しておく。
+    /// AggregateComplete だけを扱う。
+    Cosign {
+        #[arg(long, value_enum)]
+        network: Network,
+        /// 連署する、署名したトランザクションのファイル
+        signed: PathBuf,
+        /// 連署を足したトランザクションを書くファイル（すでにあれば上書きしない）
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// 署名したトランザクションを、ノードと TLS でつないで送る
     ///
-    /// 送る前に、ネットワーク、署名、期限を確かめる。名乗るのはノードの証明書で、ノードの秘密鍵は標準入力から読む。
+    /// 送る前に、ネットワーク、署名と連署、期限を確かめる。名乗るのはノードの証明書で、ノードの秘密鍵は標準入力から読む。
     /// ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで別に確かめる。
     Announce {
         #[arg(long, value_enum)]
@@ -151,7 +166,11 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .into());
             }
             if transaction.signature != Signature([0; 64]) {
-                return Err(format!("{} はすでに署名されています", unsigned.display()).into());
+                return Err(format!(
+                    "{} はすでに署名されています。連署するなら heika tx cosign を使ってください",
+                    unsigned.display()
+                )
+                .into());
             }
             let AnyPrivateKey(private_key) = read_secret("秘密鍵", "main.key")?;
             let seed = network.generation_hash_seed();
@@ -160,6 +179,44 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .map_err(|error| error.to_string())?;
             write_new(&out, &transaction.to_bytes())?;
             outln!("ハッシュ: {}", transaction.hash(&seed));
+            show_missing_cosigners(&transaction)?;
+        }
+        TxCommand::Cosign {
+            network,
+            signed,
+            out,
+        } => {
+            let (_, mut transaction) = read_signed(&signed, network)?;
+            if !matches!(transaction.body, Body::AggregateComplete(_)) {
+                return Err(format!(
+                    "{} は AggregateComplete ではないので連署できません",
+                    signed.display()
+                )
+                .into());
+            }
+            if cosignatures(&transaction).len() + 1 >= MAX_COSIGNATURES_PER_AGGREGATE {
+                return Err(format!(
+                    "{} はもう署名と連署が {MAX_COSIGNATURES_PER_AGGREGATE} 件あります",
+                    signed.display()
+                )
+                .into());
+            }
+            let AnyPrivateKey(private_key) = read_secret("秘密鍵", "cosigner.key")?;
+            let cosigner = PublicKey::from_private_key(&private_key);
+            let seed = network.generation_hash_seed();
+            transaction
+                .cosign(&private_key, &seed)
+                .map_err(|error| error.to_string())?;
+            drop(private_key);
+            write_new(&out, &transaction.to_bytes())?;
+            outln!("連署した公開鍵: {cosigner}");
+            if !embedded_signers(&transaction).contains(&cosigner) {
+                outln!(
+                    "注意: 中のトランザクションの署名者ではありません。マルチシグの連署者でなければ、ノードで弾かれます"
+                );
+            }
+            outln!("ハッシュ: {}", transaction.hash(&seed));
+            show_missing_cosigners(&transaction)?;
         }
         TxCommand::Announce {
             network,
@@ -168,23 +225,15 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             client_cert,
             wait,
         } => {
-            let bytes = fs::read(&signed)
-                .map_err(|error| format!("{} を読めませんでした: {error}", signed.display()))?;
-            let transaction = Transaction::from_bytes(&bytes)
-                .map_err(|error| format!("{}: {error}", signed.display()))?;
-            if transaction.network != NetworkIdentifier::from(network) {
-                return Err(format!(
-                    "{} は --network と違うネットワークのトランザクションです",
-                    signed.display()
-                )
-                .into());
-            }
-            if transaction.signature == Signature([0; 64]) {
-                return Err(format!("{} はまだ署名されていません", signed.display()).into());
+            let (bytes, transaction) = read_signed(&signed, network)?;
+            if matches!(transaction.body, Body::AggregateBonded(_)) {
+                return Err(
+                    format!("{} は AggregateBonded なので送れません", signed.display()).into(),
+                );
             }
             let seed = network.generation_hash_seed();
-            if !transaction.verify(&seed) {
-                return Err(format!("{} の署名が正しくありません", signed.display()).into());
+            if !transaction.verify_cosignatures(&seed) {
+                return Err(format!("{} の連署が正しくありません", signed.display()).into());
             }
             let now = SystemTime::now();
             if transaction.deadline <= network_milliseconds(network, now)? {
@@ -221,6 +270,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 outln!("送り先のノードの CA の公開鍵: {}", ca.public_key());
             }
             outln!("ハッシュ: {}", transaction.hash(&seed));
+            show_missing_cosigners(&transaction)?;
             match inspection.client_certificate {
                 ClientCertificate::Kept => {
                     outln!("送りました（{wait} 秒のあいだ切られませんでした）")
@@ -242,6 +292,70 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 "ノードは受け取ったことを返さないので、ブロックに入ったかはハッシュで確かめてください"
             );
         }
+    }
+    Ok(())
+}
+
+/// 署名したトランザクションを読み、ネットワークと署名を確かめる。読んだバイト列も返す。
+fn read_signed(path: &Path, network: Network) -> Result<(Vec<u8>, Transaction), String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
+    let transaction =
+        Transaction::from_bytes(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    if transaction.network != NetworkIdentifier::from(network) {
+        return Err(format!(
+            "{} は --network と違うネットワークのトランザクションです",
+            path.display()
+        ));
+    }
+    if transaction.signature == Signature([0; 64]) {
+        return Err(format!(
+            "{} はまだ署名されていません。先に heika tx sign で署名してください",
+            path.display()
+        ));
+    }
+    if !transaction.verify(&network.generation_hash_seed()) {
+        return Err(format!("{} の署名が正しくありません", path.display()));
+    }
+    Ok((bytes, transaction))
+}
+
+fn cosignatures(transaction: &Transaction) -> &[Cosignature] {
+    match &transaction.body {
+        Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+            aggregate.cosignatures()
+        }
+        _ => &[],
+    }
+}
+
+/// 中のトランザクションの署名者。重なりは除き、出てきた順に並べる。
+fn embedded_signers(transaction: &Transaction) -> Vec<PublicKey> {
+    let mut signers = Vec::new();
+    if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) = &transaction.body
+    {
+        for embedded in aggregate.transactions() {
+            if !signers.contains(&embedded.signer_public_key) {
+                signers.push(embedded.signer_public_key);
+            }
+        }
+    }
+    signers
+}
+
+/// 中のトランザクションの署名者のうち、署名も連署もしていない公開鍵を出す。
+/// マルチシグのアカウントなら、代わりにその連署者が連署するので、足りないとは限らない。
+fn show_missing_cosigners(transaction: &Transaction) -> Result<(), Failure> {
+    let cosignatures = cosignatures(transaction);
+    for public_key in embedded_signers(transaction) {
+        if public_key == transaction.signer_public_key
+            || cosignatures
+                .iter()
+                .any(|cosignature| cosignature.signer_public_key == public_key)
+        {
+            continue;
+        }
+        outln!("まだ連署していない、中のトランザクションの署名者: {public_key}");
     }
     Ok(())
 }

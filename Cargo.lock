@@ -346,10 +346,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-transaction"
+version = "0.1.0"
+dependencies = [
+ "heika-core",
+ "sha3",
+]
+
+[[package]]
 name = "heika-vectors"
 version = "0.1.0"
 dependencies = [
  "heika-core",
+ "heika-transaction",
  "heika-wallet",
  "serde",
  "serde_json",

@@ -1,10 +1,10 @@
 //! X.509 の証明書。catapult のノードが TLS でつなぐときに使う、Ed25519 の鍵の証明書だけを扱う。
 //!
 //! 発行するのは v1（拡張なし）と v3（shoestring が OpenSSL 3 で作るのと同じ拡張）。読むほうも v1 と v3 を受け付ける。
-//! catapult は DN を見ないので、subject と issuer には RFC 4514 の DN を自由に書ける。
+//! catapult は DN を見ないので、subject と issuer には DN を自由に書ける。発行するときは RFC 4514 の形でも OpenSSL の形でも受け付ける。
 
-use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fmt, mem};
 
 use der::asn1::{AnyRef, BitString, ObjectIdentifier, OctetString};
 use der::oid::AssociatedOid;
@@ -74,7 +74,7 @@ pub enum Version {
 /// 発行する証明書の中身。
 #[derive(Clone, Debug)]
 pub struct Template<'a> {
-    /// RFC 4514 の DN。`CN=node` など
+    /// RFC 4514 の DN（`CN=node,O=example`）か、OpenSSL の `-subj` の形（`/O=example/CN=node`）
     pub subject: &'a str,
     /// 秒より細かい部分は切り捨てる
     pub not_before: SystemTime,
@@ -405,8 +405,72 @@ fn key_identifier(public_key: &PublicKey) -> [u8; 20] {
     Sha1::digest(public_key.0).into()
 }
 
+/// RFC 4514 の DN を読む。`/` で始まっていれば OpenSSL の `-subj` の形として読む。
 fn parse_name(text: &str) -> Result<Name, IssueError> {
-    text.parse().map_err(|_| IssueError::InvalidName)
+    let rfc4514 = match text.strip_prefix('/') {
+        Some(openssl) => openssl_to_rfc4514(openssl).ok_or(IssueError::InvalidName)?,
+        None => text.to_owned(),
+    };
+    rfc4514.parse().map_err(|_| IssueError::InvalidName)
+}
+
+/// OpenSSL の `-subj` の形（先頭の `/` を除いた `O=example/CN=node`）を、RFC 4514 の形（`CN=node,O=example`）に直す。
+///
+/// OpenSSL と同じく、`/` で RDN を、`+` で RDN の中の属性を区切り、`\` の次の文字はそのまま値に入れる。
+/// OpenSSL の形は DER と同じく上位の RDN から書き、RFC 4514 の形は逆に書く。
+/// OpenSSL は値が空の属性を飛ばすが、ここでは読めないものとする。
+fn openssl_to_rfc4514(text: &str) -> Option<String> {
+    let mut rdns = Vec::new();
+    let mut attributes = Vec::new();
+    let mut attribute_type = None;
+    let mut field = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => field.push(chars.next()?),
+            '=' if attribute_type.is_none() => attribute_type = Some(mem::take(&mut field)),
+            '+' | '/' => {
+                attributes.push((attribute_type.take()?, mem::take(&mut field)));
+                if c == '/' {
+                    rdns.push(mem::take(&mut attributes));
+                }
+            }
+            _ => field.push(c),
+        }
+    }
+    attributes.push((attribute_type.take()?, field));
+    rdns.push(attributes);
+    let mut rfc4514 = Vec::new();
+    for rdn in rdns.iter().rev() {
+        let mut parts = Vec::new();
+        for (attribute_type, value) in rdn {
+            if attribute_type.is_empty() || value.is_empty() {
+                return None;
+            }
+            parts.push(format!("{attribute_type}={}", escape_rfc4514(value)));
+        }
+        rfc4514.push(parts.join("+"));
+    }
+    Some(rfc4514.join(","))
+}
+
+/// RFC 4514 の 2.4 節のとおりに値をエスケープする。
+fn escape_rfc4514(value: &str) -> String {
+    let mut escaped = String::new();
+    let last = value.chars().count() - 1;
+    for (index, c) in value.chars().enumerate() {
+        match c {
+            '#' if index == 0 => escaped.push_str("\\#"),
+            ' ' if index == 0 || index == last => escaped.push_str("\\ "),
+            '"' | '+' | ',' | ';' | '<' | '>' | '\\' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            '\0' => escaped.push_str("\\00"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// 秒より細かい部分を切り捨てて、2049年までは UTCTime、それより後は GeneralizedTime にする。
@@ -421,7 +485,7 @@ fn to_time(time: SystemTime) -> Result<Time, IssueError> {
 /// 証明書を発行できなかった理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueError {
-    /// subject が RFC 4514 の DN として読めない
+    /// subject が RFC 4514 の DN としても OpenSSL の形の DN としても読めない
     InvalidName,
     /// 1970年より前か、9999年より後
     InvalidTime,
@@ -436,7 +500,9 @@ pub enum IssueError {
 impl fmt::Display for IssueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidName => "subject が RFC 4514 の DN（CN=node など）として読めません",
+            Self::InvalidName => {
+                "subject が DN として読めません（RFC 4514 の CN=node,O=example か、OpenSSL の /O=example/CN=node の形で書いてください）"
+            }
             Self::InvalidTime => "有効期間は1970年から9999年までにしてください",
             Self::InvalidValidity => "有効期間の始まりが終わりより前になっていません",
             Self::InvalidSerialNumber => "シリアル番号は20バイトまでです",
@@ -696,6 +762,60 @@ mod tests {
             Certificate::self_signed(&ca_key(), &template).unwrap_err(),
             IssueError::InvalidValidity
         );
+    }
+
+    /// subject を `text` にして発行した CA の証明書の、subject の DER
+    fn subject_der(text: &str) -> Vec<u8> {
+        let ca = Certificate::self_signed(&ca_key(), &template(text)).unwrap();
+        ca.inner.tbs_certificate().subject().to_der().unwrap()
+    }
+
+    #[test]
+    fn reads_an_openssl_style_name_in_reverse_order() {
+        let ca = Certificate::self_signed(&ca_key(), &template("/C=JP/O=heika/CN=node")).unwrap();
+        assert_eq!(ca.subject(), "CN=node,O=heika,C=JP");
+        assert_eq!(
+            subject_der("/C=JP/O=heika/CN=node"),
+            subject_der("CN=node,O=heika,C=JP")
+        );
+    }
+
+    #[test]
+    fn reads_escapes_and_special_characters_in_an_openssl_style_name() {
+        // OpenSSL では `\` の次の文字はそのまま値になる
+        assert_eq!(subject_der(r"/CN=a\/b"), subject_der("CN=a/b"));
+        assert_eq!(subject_der(r"/CN=a\+b"), subject_der(r"CN=a\+b"));
+        // RFC 4514 でエスケープが要る文字も、OpenSSL の形ではそのまま書ける
+        assert_eq!(subject_der("/CN=a,b;c"), subject_der(r"CN=a\,b\;c"));
+        assert_eq!(subject_der("/CN=#a b "), subject_der(r"CN=\#a b\ "));
+        assert_eq!(subject_der("/CN=a=b"), subject_der("CN=a=b"));
+    }
+
+    #[test]
+    fn reads_a_multi_valued_rdn_in_an_openssl_style_name() {
+        assert_eq!(
+            subject_der("/O=heika+OU=nodes/CN=node"),
+            subject_der("CN=node,O=heika+OU=nodes")
+        );
+    }
+
+    #[test]
+    fn refuses_a_malformed_openssl_style_name() {
+        for text in [
+            "/",
+            "/CN",
+            "/CN=",
+            "/=node",
+            "/CN=node/",
+            r"/CN=node\",
+            "/CN=a+O",
+        ] {
+            assert_eq!(
+                Certificate::self_signed(&ca_key(), &template(text)).unwrap_err(),
+                IssueError::InvalidName,
+                "{text}"
+            );
+        }
     }
 
     #[test]

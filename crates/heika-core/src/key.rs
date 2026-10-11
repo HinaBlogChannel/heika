@@ -3,7 +3,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use ed25519_dalek::SigningKey;
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
@@ -19,11 +18,7 @@ pub struct PublicKey(pub [u8; 32]);
 impl PublicKey {
     /// 秘密鍵から導出する。catapult の `crypto/KeyPair.cpp` と同じく、RFC 8032 の Ed25519（SHA-512）。
     pub fn from_private_key(private_key: &PrivateKey) -> Self {
-        Self(
-            SigningKey::from_bytes(&private_key.0)
-                .verifying_key()
-                .to_bytes(),
-        )
+        Self(ed25519::public_key(&private_key.0))
     }
 
     /// 署名を検証する。catapult の `crypto::Verify` と同じものだけを受け付ける。

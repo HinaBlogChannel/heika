@@ -39,6 +39,11 @@ impl ExpandedKey {
     }
 }
 
+/// 秘密鍵から公開鍵を導出する。
+pub fn public_key(seed: &[u8; 32]) -> [u8; 32] {
+    ExpandedKey::new(seed).public_key().to_bytes()
+}
+
 /// 署名する。
 pub fn sign(seed: &[u8; 32], message: &[&[u8]]) -> [u8; 64] {
     let key = ExpandedKey::new(seed);

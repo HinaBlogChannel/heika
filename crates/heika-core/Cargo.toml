@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 base16ct = "1.0.0"
 curve25519-dalek = "5.0.0"
-ed25519-dalek = "3.0.0"
 getrandom = { version = "0.4.3", optional = true }
 rand_core = { version = "0.10.1", default-features = false }
 ripemd = "0.2.0"

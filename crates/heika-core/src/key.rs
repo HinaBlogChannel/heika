@@ -3,11 +3,12 @@
 use std::fmt;
 use std::str::FromStr;
 
-use ed25519_dalek::SigningKey;
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
+use crate::ed25519;
 use crate::hex::{self, ParseHexError};
+use crate::signature::Signature;
 
 /// Ed25519 の公開鍵。catapult の `Key` と同じく、曲線上の点かどうかは確かめず32バイトとして扱う。
 /// 文字列にするときは、Symbol の慣習に合わせて大文字の16進にする。
@@ -17,11 +18,14 @@ pub struct PublicKey(pub [u8; 32]);
 impl PublicKey {
     /// 秘密鍵から導出する。catapult の `crypto/KeyPair.cpp` と同じく、RFC 8032 の Ed25519（SHA-512）。
     pub fn from_private_key(private_key: &PrivateKey) -> Self {
-        Self(
-            SigningKey::from_bytes(&private_key.0)
-                .verifying_key()
-                .to_bytes(),
-        )
+        Self(ed25519::public_key(&private_key.0))
+    }
+
+    /// 署名を検証する。catapult の `crypto::Verify` と同じものだけを受け付ける。
+    ///
+    /// catapult と同じく、メッセージはいくつかに分けたまま渡せる。
+    pub fn verify(&self, message: &[&[u8]], signature: &Signature) -> bool {
+        ed25519::verify(&self.0, message, &signature.0)
     }
 }
 
@@ -77,6 +81,13 @@ impl PrivateKey {
         let text = base16ct::upper::encode_str(&*self.0, &mut *buffer)
             .expect("64 bytes hold 32 bytes of hex");
         Zeroizing::new(text.to_owned())
+    }
+
+    /// RFC 8032 の Ed25519 で署名する。catapult の `crypto::Sign` と同じ。
+    ///
+    /// catapult と同じく、メッセージはいくつかに分けたまま渡せる。
+    pub fn sign(&self, message: &[&[u8]]) -> Signature {
+        Signature(ed25519::sign(&self.0, message))
     }
 }
 
@@ -218,6 +229,53 @@ mod tests {
     fn private_key_from_bytes_keeps_the_bytes() {
         let key = PrivateKey::from_bytes(&[0xAB; 32]);
         assert_eq!(*key.to_hex(), "AB".repeat(32));
+    }
+
+    /// RFC 8032 の 7.1 節にある Ed25519 のテスト 1 から 3。秘密鍵、公開鍵、メッセージ、署名
+    const RFC_8032: [(&str, &str, &str, &str); 3] = [
+        (
+            PRIVATE,
+            "D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A",
+            "",
+            "E5564300C360AC729086E2CC806E828A84877F1EB8E5D974D873E065224901555FB8821590A33BACC61E39701CF9B46BD25BF5F0595BBE24655141438E7A100B",
+        ),
+        (
+            "4CCD089B28FF96DA9DB6C346EC114E0F5B8A319F35ABA624DA8CF6ED4FB8A6FB",
+            "3D4017C3E843895A92B70AA74D1B7EBC9C982CCF2EC4968CC0CD55F12AF4660C",
+            "72",
+            "92A009A9F0D4CAB8720E820B5F642540A2B27B5416503F8FB3762223EBDB69DA085AC1E43E15996E458F3613D0F11D8C387B2EAEB4302AEEB00D291612BB0C00",
+        ),
+        (
+            "C5AA8DF43F9F837BEDB7442F31DCB7B166D38535076F094B85CE3A2E0B4458F7",
+            "FC51CD8E6218A1A38DA47ED00230F0580816ED13BA3303AC5DEB911548908025",
+            "AF82",
+            "6291D657DEEC24024827E69C3ABE01A30CE548A284743A445E3680D7DB5AC3AC18FF9B538D16F290AE67F760984DC6594A7C15E9716ED28DC027BECEEA1EC40A",
+        ),
+    ];
+
+    fn message(text: &str) -> Vec<u8> {
+        text.as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn signs_like_rfc_8032() {
+        for (private_key, _, text, signature) in RFC_8032 {
+            let key: PrivateKey = private_key.parse().unwrap();
+            assert_eq!(key.sign(&[&message(text)]).to_string(), signature);
+        }
+    }
+
+    #[test]
+    fn verifies_rfc_8032_signatures() {
+        for (_, public_key, text, signature) in RFC_8032 {
+            let key: PublicKey = public_key.parse().unwrap();
+            let signature: Signature = signature.parse().unwrap();
+            assert!(key.verify(&[&message(text)], &signature));
+            assert!(!key.verify(&[&message(text), b"!"], &signature));
+        }
     }
 
     /// 決まったバイト列を返すだけの乱数。テストで鍵を固定するのに使う。

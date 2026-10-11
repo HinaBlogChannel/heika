@@ -113,7 +113,7 @@ impl From<X509Version> for Version {
 
 #[derive(Args)]
 pub struct SubjectArgs {
-    /// RFC 4514 の DN（CN=node,O=example など）。OpenSSL の -subj（/O=example/CN=node）とは書き方も順番も違う
+    /// DN。RFC 4514 の形（CN=node,O=example）か、OpenSSL の -subj の形（/O=example/CN=node）。2つは書く順番が逆
     #[arg(long, value_name = "DN")]
     subject: String,
 }
@@ -182,7 +182,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             validity,
             x509_version,
         } => {
-            let subject = subject.check()?;
+            let subject = subject.subject.as_str();
             let AnyPrivateKey(ca_key) = read_secret("CA の秘密鍵", "ca.key.pem")?;
             let serial_number = serial_number()?;
             let (not_before, not_after) = validity.resolve(CA_DAYS);
@@ -209,7 +209,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             x509_version,
         } => {
             let ca = read_certificate(&ca_cert)?;
-            let subject = subject.check()?;
+            let subject = subject.subject.as_str();
             let AnyPrivateKey(ca_key) = read_secret("CA の秘密鍵", "ca.key.pem")?;
             let serial_number = serial_number()?;
             let (not_before, not_after) = validity.resolve(NODE_DAYS);
@@ -332,20 +332,6 @@ fn show_chain(
         }
     }
     Ok(())
-}
-
-impl SubjectArgs {
-    /// OpenSSL の書き方で渡されたら、RFC 4514 の書き方を案内する。
-    fn check(&self) -> Result<&str, String> {
-        if self.subject.starts_with('/') {
-            return Err(format!(
-                "--subject は RFC 4514 の形（CN=node,O=example など）で書いてください。\
-                 OpenSSL の -subj の形（{}）とは区切りが違い、順番も逆です",
-                self.subject
-            ));
-        }
-        Ok(&self.subject)
-    }
 }
 
 fn read_certificate(path: &Path) -> Result<Certificate, String> {

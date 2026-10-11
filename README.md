@@ -9,10 +9,10 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: 鍵の PEM と16進の相互変換
 - ✅DONE: catapult と同じ判定の署名の検証（ライブラリのみ）
 - ✅DONE: CA とノードの証明書の発行（DN と有効期間を指定できる。v3 は shoestring と同じ拡張、v1 も選べる）
+- ✅DONE: DN は RFC 4514 の形（CN=node,O=example）でも OpenSSL の形（/O=example/CN=node）でも書ける
 - ✅DONE: 証明書の確認（有効期間、catapult がつなぐときの条件、CA の公開鍵のアドレス）
 - ✅DONE: ノードが実際に出している証明書の確認（TLS でつなぎ、こちらの証明書が受け付けられるかも確かめる）
 - 🚧WIP: shoestring や symbol-bootstrap のフォルダーへの証明書の配置
-- 🚧WIP: OpenSSL の形（/CN=node）の DN
 - 🚧WIP: VRF キーなどを紐づけるリンクのトランザクション
 
 ## 構成
@@ -48,7 +48,7 @@ heika cert show --connect <ホスト>:<ポート> --client-cert node.full.crt.pe
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。
 
-DN は RFC 4514 の形（`CN=node,O=example`）で書く。OpenSSL の `-subj`（`/O=example/CN=node`）とは区切りが違い、順番も逆になる。
+DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の形（`/O=example/CN=node`）でも書ける。2 つは区切りが違い、書く順番も逆になる。証明書を表示するときは RFC 4514 の形で出す。
 
 ## テスト
 

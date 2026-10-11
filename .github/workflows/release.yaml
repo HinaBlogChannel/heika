@@ -68,6 +68,19 @@ jobs:
           sudo apt-get install -y musl-tools
           echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p heika-cli --target "$TARGET"
+      - name: 埋め込んだソースを、README の手順で実行せずに取り出せるか確かめる
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              objcopy -O binary --only-section=.heika_source "target/$TARGET/release/heika" source.zip
+              unzip -tq source.zip ;;
+            macOS)
+              segedit "target/$TARGET/release/heika" -extract __TEXT __heika_source source.zip
+              unzip -tq source.zip ;;
+            Windows)
+              llvm-objcopy --dump-section .hksrc=source.zip "target/$TARGET/release/heika.exe"
+              7z t source.zip ;;
+          esac
       - name: まとめる
         run: |
           mkdir -p "dist/$PACKAGE"

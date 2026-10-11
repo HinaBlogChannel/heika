@@ -312,6 +312,8 @@ name = "heika-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "der",
+ "getrandom 0.4.3",
  "heika-cert",
  "heika-core",
  "heika-wallet",

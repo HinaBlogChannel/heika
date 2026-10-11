@@ -4,7 +4,7 @@
 //! webpki は v1 の証明書を読めないので、証明書は heika-cert で読んで自分で確かめる。
 
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::iter;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
@@ -205,7 +205,7 @@ fn check_validity(certificate: &Certificate, now: SystemTime) -> Result<(), Erro
     Ok(())
 }
 
-/// [`inspect`] で調べた結果。
+/// [`inspect`] と [`send`] で起きたこと。
 #[derive(Debug)]
 pub struct Inspection {
     /// 相手が出した証明書の DER。ノード、CA の順のはず
@@ -227,7 +227,7 @@ pub enum ClientCertificate {
 }
 
 /// `address` に接続して、相手が出した証明書と、こちらの証明書が受け付けられたかを調べる。
-/// Symbol のパケットはやりとりしない。
+/// Symbol のパケットはやりとりせず、相手のチェーンも確かめない。
 ///
 /// catapult はハンドシェイクのあと自分からは何も送らず、こちらの証明書を受け付けなければ
 /// TLS のアラートを送って切る。なので、ハンドシェイクのあと `wait` のあいだ待ち、
@@ -237,24 +237,74 @@ pub fn inspect(
     identity: &Identity,
     timeout: Duration,
     wait: Duration,
-) -> Result<Inspection, InspectError> {
+) -> Result<Inspection, ConnectError> {
+    exchange(
+        address,
+        identity,
+        ServerVerification::Inspect,
+        None,
+        timeout,
+        wait,
+    )
+}
+
+/// `address` に接続して、種類が `packet_type` で本体が `body` の Symbol のパケットを1つ送る。応答は待たない。
+///
+/// 相手のチェーンは catapult と同じ条件で確かめる。送ったあとは [`inspect`] と同じく `wait` のあいだ待ち、
+/// こちらの証明書が弾かれなかったかを確かめる。弾かれたなら、パケットは読まれていない。
+pub fn send(
+    address: &str,
+    identity: &Identity,
+    packet_type: u32,
+    body: &[u8],
+    timeout: Duration,
+    wait: Duration,
+) -> Result<Inspection, ConnectError> {
+    let size = u32::try_from(PACKET_HEADER_SIZE + body.len())
+        .map_err(|_| ConnectError::Io(io::Error::other("パケットが大きすぎます")))?;
+    let mut packet = Vec::with_capacity(size as usize);
+    packet.extend_from_slice(&size.to_le_bytes());
+    packet.extend_from_slice(&packet_type.to_le_bytes());
+    packet.extend_from_slice(body);
+    exchange(
+        address,
+        identity,
+        ServerVerification::Catapult,
+        Some(&packet),
+        timeout,
+        wait,
+    )
+}
+
+/// パケットのヘッダーは、ヘッダーを含む全長 `u32` と種類 `u32` の8バイト。
+const PACKET_HEADER_SIZE: usize = 8;
+
+/// 接続してハンドシェイクを済ませ、`packet` があれば送り、`wait` のあいだ切られないか待つ。
+fn exchange(
+    address: &str,
+    identity: &Identity,
+    verification: ServerVerification,
+    packet: Option<&[u8]>,
+    timeout: Duration,
+    wait: Duration,
+) -> Result<Inspection, ConnectError> {
     let socket_address = address
         .to_socket_addrs()
-        .map_err(InspectError::Address)?
+        .map_err(ConnectError::Address)?
         .next()
         .ok_or_else(|| {
-            InspectError::Address(io::Error::new(
+            ConnectError::Address(io::Error::new(
                 io::ErrorKind::NotFound,
                 "アドレスが見つかりません",
             ))
         })?;
     let mut socket =
-        TcpStream::connect_timeout(&socket_address, timeout).map_err(InspectError::Connect)?;
+        TcpStream::connect_timeout(&socket_address, timeout).map_err(ConnectError::Connect)?;
     socket
         .set_read_timeout(Some(timeout))
         .and_then(|()| socket.set_write_timeout(Some(timeout)))
-        .map_err(InspectError::Io)?;
-    let config = client_config(identity, ServerVerification::Inspect);
+        .map_err(ConnectError::Io)?;
+    let config = client_config(identity, verification);
     let mut connection =
         ClientConnection::new(Arc::new(config), server_name(address)).expect("the config is valid");
     while connection.is_handshaking() {
@@ -265,14 +315,26 @@ pub fn inspect(
                     peer_certificates,
                     client_certificate: ClientCertificate::Rejected(alert),
                 }),
-                _ => Err(InspectError::Handshake(error)),
+                _ => Err(ConnectError::Handshake(error)),
             };
         }
     }
     let peer_certificates = peer_certificates(&connection).unwrap_or_default();
+    if let Some(packet) = packet {
+        let mut stream = rustls::Stream::new(&mut connection, &mut socket);
+        if let Err(error) = stream.write_all(packet).and_then(|()| stream.flush()) {
+            return match alert(&error) {
+                Some(alert) => Ok(Inspection {
+                    peer_certificates,
+                    client_certificate: ClientCertificate::Rejected(alert),
+                }),
+                None => Err(ConnectError::Io(error)),
+            };
+        }
+    }
     socket
         .set_read_timeout(Some(wait))
-        .map_err(InspectError::Io)?;
+        .map_err(ConnectError::Io)?;
     let mut byte = [0];
     let client_certificate = match rustls::Stream::new(&mut connection, &mut socket).read(&mut byte)
     {
@@ -289,7 +351,7 @@ pub fn inspect(
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => ClientCertificate::Closed,
         Err(error) => match alert(&error) {
             Some(alert) => ClientCertificate::Rejected(alert),
-            None => return Err(InspectError::Io(error)),
+            None => return Err(ConnectError::Io(error)),
         },
     };
     connection.send_close_notify();
@@ -324,9 +386,9 @@ fn peer_certificates(connection: &ClientConnection) -> Option<Vec<Vec<u8>>> {
         .map(|certificates| certificates.iter().map(|der| der.to_vec()).collect())
 }
 
-/// [`inspect`] が失敗した理由。
+/// [`inspect`] と [`send`] が失敗した理由。
 #[derive(Debug)]
-pub enum InspectError {
+pub enum ConnectError {
     /// 接続先のアドレスを解決できない
     Address(io::Error),
     /// TCP でつながらない
@@ -336,7 +398,7 @@ pub enum InspectError {
     Io(io::Error),
 }
 
-impl fmt::Display for InspectError {
+impl fmt::Display for ConnectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Address(error) => write!(f, "接続先のアドレスを解決できませんでした: {error}"),
@@ -349,11 +411,12 @@ impl fmt::Display for InspectError {
     }
 }
 
-impl std::error::Error for InspectError {}
+impl std::error::Error for ConnectError {}
 
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
+    use std::sync::mpsc;
     use std::thread;
 
     use heika_cert::certificate::{Template, Version};
@@ -576,6 +639,77 @@ mod tests {
         assert_eq!(inspection.peer_certificates.len(), 2);
     }
 
+    /// 1回だけ接続を受け、こちらの証明書を受け付けて、届いたバイト列を相手が閉じるまで読むサーバー
+    fn serve_and_read(identity: Identity) -> (String, mpsc::Receiver<Vec<u8>>) {
+        let provider = provider();
+        let config = ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(TestClientVerifier {
+                provider,
+                accept: true,
+            }))
+            .with_cert_resolver(Arc::new(SingleCertAndKey::from(identity.certified_key)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut connection = ServerConnection::new(Arc::new(config)).unwrap();
+            let mut received = Vec::new();
+            let _ = rustls::Stream::new(&mut connection, &mut socket).read_to_end(&mut received);
+            sender.send(received).unwrap();
+        });
+        (address, receiver)
+    }
+
+    #[test]
+    fn sends_a_packet() {
+        let (chain, key) = chain(1);
+        let (address, received) = serve_and_read(Identity::new(&chain, &key).unwrap());
+        let inspection = send(
+            &address,
+            &client_identity(),
+            9,
+            b"body",
+            Duration::from_secs(5),
+            WAIT,
+        )
+        .unwrap();
+        assert_eq!(inspection.client_certificate, ClientCertificate::Kept);
+        assert_eq!(
+            received.recv().unwrap(),
+            [&12u32.to_le_bytes()[..], &9u32.to_le_bytes(), b"body"].concat()
+        );
+    }
+
+    #[test]
+    fn does_not_send_to_a_server_with_an_invalid_chain() {
+        let (chain, key) = chain(1);
+        let other = chain_with_other_ca(&chain);
+        let (address, received) = serve_and_read(Identity {
+            certified_key: Arc::new(CertifiedKey::new(
+                ders(&other),
+                provider()
+                    .key_provider
+                    .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        key::private_key_to_der(&key).to_vec(),
+                    )))
+                    .unwrap(),
+            )),
+        });
+        let error = send(
+            &address,
+            &client_identity(),
+            9,
+            b"body",
+            Duration::from_secs(5),
+            WAIT,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConnectError::Handshake(_)), "{error:?}");
+        assert_eq!(received.recv().unwrap(), b"");
+    }
     #[test]
     fn fails_to_connect_to_a_closed_port() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -583,6 +717,6 @@ mod tests {
         drop(listener);
         let error =
             inspect(&address, &client_identity(), Duration::from_secs(5), WAIT).unwrap_err();
-        assert!(matches!(error, InspectError::Connect(_)), "{error:?}");
+        assert!(matches!(error, ConnectError::Connect(_)), "{error:?}");
     }
 }

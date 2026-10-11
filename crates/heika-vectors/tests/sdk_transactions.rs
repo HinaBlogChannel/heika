@@ -2,16 +2,18 @@
 //!
 //! `models/transactions.json` の署名は検証が通らないので、署名する範囲とハッシュの取り方はこちらで照合する。
 //! JSON は `scripts/generate-sdk-vectors.py` が決定的に作ったもので、作り直せば同じものが出る。
+//! 委任ハーベストの要求のメッセージも、同じ JSON で照合する。
 //! ネットワークは使わない。
 
 use std::collections::HashMap;
 
-use heika_core::key::PublicKey;
+use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_transaction::{
     Body, KeyLink, LinkAction, Transaction, Transfer, UnresolvedAddress, UnresolvedMosaicId,
 };
 use heika_wallet::bip39::Mnemonic;
+use heika_wallet::harvest_request::{self, HarvesterKeys};
 use heika_wallet::slip10::{self, ExtendedKey};
 use serde::Deserialize;
 
@@ -22,6 +24,7 @@ struct Document {
     mnemonic: String,
     networks: HashMap<String, Network>,
     transactions: Vec<Vector>,
+    harvest_requests: Vec<HarvestRequest>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +51,17 @@ struct Vector {
     signature: String,
     hash: String,
     payload: String,
+}
+
+#[derive(Deserialize)]
+struct HarvestRequest {
+    network: String,
+    node_account: u32,
+    signing_account: u32,
+    vrf_account: u32,
+    node_public_key: String,
+    randomness: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -150,4 +164,74 @@ fn signs_and_hashes_like_the_sdk() {
         assert!(transaction.verify(&seed), "vector {index}");
     }
     eprintln!("{} vectors checked", document.transactions.len());
+}
+
+/// 決まったバイト列を先頭から順に返す乱数。SDK に渡したものと同じ使い捨ての鍵と初期化ベクトルにする。
+struct Replay<'a>(&'a [u8]);
+
+impl rand_core::TryRng for Replay<'_> {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        unimplemented!("only fill_bytes is used")
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        unimplemented!("only fill_bytes is used")
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        let (head, rest) = self.0.split_at(dst.len());
+        dst.copy_from_slice(head);
+        self.0 = rest;
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for Replay<'_> {}
+
+#[test]
+fn encodes_harvest_requests_like_the_sdk() {
+    let document: Document = serde_json::from_str(VECTORS).unwrap();
+    let mnemonic: Mnemonic = document.mnemonic.parse().unwrap();
+    let root = ExtendedKey::from_seed(mnemonic.to_seed("").unwrap().as_bytes());
+    assert!(!document.harvest_requests.is_empty());
+    for (index, vector) in document.harvest_requests.iter().enumerate() {
+        let identifier = NetworkIdentifier(document.networks[&vector.network].identifier);
+        let derive = |account| -> PrivateKey {
+            root.derive_path(&slip10::symbol_path(identifier, account))
+                .private_key()
+        };
+        let node = derive(vector.node_account);
+        let node_public_key: PublicKey = vector.node_public_key.parse().unwrap();
+        assert_eq!(
+            PublicKey::from_private_key(&node),
+            node_public_key,
+            "vector {index}"
+        );
+        let keys = HarvesterKeys {
+            signing: derive(vector.signing_account),
+            vrf: derive(vector.vrf_account),
+        };
+        let randomness = from_hex(&vector.randomness);
+        let message =
+            harvest_request::encode(&mut Replay(&randomness), &node_public_key, &keys).unwrap();
+        assert_eq!(message, from_hex(&vector.message), "vector {index}");
+
+        let decoded = harvest_request::decode(&node, &message).unwrap();
+        assert_eq!(
+            decoded.signing.as_bytes(),
+            keys.signing.as_bytes(),
+            "vector {index}"
+        );
+        assert_eq!(
+            decoded.vrf.as_bytes(),
+            keys.vrf.as_bytes(),
+            "vector {index}"
+        );
+    }
+    eprintln!(
+        "{} harvest requests checked",
+        document.harvest_requests.len()
+    );
 }

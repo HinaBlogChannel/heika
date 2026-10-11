@@ -10,14 +10,19 @@
 鍵は、誰でも知っているテスト用のニーモニック（test を11個並べて最後が junk）から、
 SDK の bip32_path で導出する。このアカウントには何も送らない。
 鍵以外の値は、SHA-256("<ラベル>/<番号>") から切り出すので、何度動かしても同じものが出る。
+委任ハーベストの要求では、SDK が secrets.token_bytes で作る使い捨ての鍵と初期化ベクトルも、
+SHA-512("harvest-request/randomness/<番号>") の先頭から順に切り出したものに差し替える。
 """
 
+import contextlib
 import hashlib
 import json
+import secrets
 import sys
 
 from symbolchain.Bip32 import Bip32
 from symbolchain.facade.SymbolFacade import SymbolFacade
+from symbolchain.symbol.MessageEncoder import MessageEncoder
 
 MNEMONIC = ' '.join(['test'] * 11 + ['junk'])
 SDK = 'symbol-sdk-python 3.3.3'
@@ -127,6 +132,43 @@ def vector(name, index):
 	}
 
 
+@contextlib.contextmanager
+def replay(randomness):
+	"""secrets.token_bytes が、渡したバイト列を先頭から順に返すようにする。"""
+	original = secrets.token_bytes
+	remaining = bytearray(randomness)
+
+	def token_bytes(size):
+		assert size <= len(remaining), 'not enough randomness'
+		head = bytes(remaining[:size])
+		del remaining[:size]
+		return head
+
+	secrets.token_bytes = token_bytes
+	try:
+		yield
+		assert not remaining, 'randomness left over'
+	finally:
+		secrets.token_bytes = original
+
+
+def harvest_request(index):
+	"""ノード、リモート、VRF の鍵は、同じニーモニックの別のアカウントから導出する。"""
+	network = 'mainnet' if draw('harvest-request/network', index)[0] % 2 else 'testnet'
+	facade = FACADES[network]
+	accounts = {'node': 2000 + index, 'signing': 3000 + index, 'vrf': 4000 + index}
+	node, signing, vrf = (key_pair(facade, account) for account in accounts.values())
+	randomness = hashlib.sha512(f'harvest-request/randomness/{index}'.encode()).digest()[:32 + 12]
+	with replay(randomness):
+		message = MessageEncoder.encode_persistent_harvesting_delegation(node.public_key, signing, vrf)
+	return {
+		'network': network,
+		**{f'{name}_account': account for name, account in accounts.items()},
+		'node_public_key': str(node.public_key),
+		'randomness': randomness.hex().upper(),
+		'message': message.hex().upper(),
+	}
+
 def main():
 	document = {
 		'sdk': SDK,
@@ -139,6 +181,7 @@ def main():
 			for name, facade in FACADES.items()
 		},
 		'transactions': [vector(name, index) for name in TYPES for index in range(COUNT)],
+		'harvest_requests': [harvest_request(index) for index in range(COUNT)],
 	}
 	json.dump(document, sys.stdout, ensure_ascii=False, indent='\t')
 	sys.stdout.write('\n')

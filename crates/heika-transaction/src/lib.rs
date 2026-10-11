@@ -9,6 +9,10 @@ use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
 use sha3::{Digest, Sha3_256};
 
+mod transfer;
+
+pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};
+
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
 /// サイズ、予約、署名、署名者の公開鍵、予約の順に並ぶ。
 const UNSIGNED_HEADER_SIZE: usize = 4 + 4 + 64 + 32 + 4;
@@ -33,7 +37,7 @@ pub struct Transaction {
 }
 
 /// 種類ごとの本体。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Body {
     /// 重要度を預けるリモートアカウントの公開鍵を紐づける。リモートハーベストと委任ハーベストに使う。
     AccountKeyLink(KeyLink),
@@ -41,6 +45,8 @@ pub enum Body {
     NodeKeyLink(KeyLink),
     /// ハーベストで使う VRF の公開鍵を紐づける。
     VrfKeyLink(KeyLink),
+    /// モザイクとメッセージを送る。
+    Transfer(Transfer),
 }
 
 /// 公開鍵を紐づける、または紐づけを外すトランザクションに共通の本体。
@@ -176,13 +182,17 @@ impl Body {
             Self::AccountKeyLink(_) => 0x414C,
             Self::NodeKeyLink(_) => 0x424C,
             Self::VrfKeyLink(_) => 0x4243,
+            Self::Transfer(_) => 0x4154,
         }
     }
 
     /// 種類ごとの構造のバージョン。どれも catbuffer の最新のものを書く。
     pub fn version(&self) -> u8 {
         match self {
-            Self::AccountKeyLink(_) | Self::NodeKeyLink(_) | Self::VrfKeyLink(_) => 1,
+            Self::AccountKeyLink(_)
+            | Self::NodeKeyLink(_)
+            | Self::VrfKeyLink(_)
+            | Self::Transfer(_) => 1,
         }
     }
 
@@ -191,23 +201,26 @@ impl Body {
             Self::AccountKeyLink(link) | Self::NodeKeyLink(link) | Self::VrfKeyLink(link) => {
                 link.encode(out)
             }
+            Self::Transfer(transfer) => transfer.encode(out),
         }
     }
 
     fn decode(transaction_type: u16, version: u8, bytes: &[u8]) -> Result<Self, DecodeError> {
-        let wrap = match transaction_type {
-            0x414C => Self::AccountKeyLink,
-            0x424C => Self::NodeKeyLink,
-            0x4243 => Self::VrfKeyLink,
-            _ => return Err(DecodeError::UnknownType(transaction_type)),
-        };
+        if !matches!(transaction_type, 0x414C | 0x424C | 0x4243 | 0x4154) {
+            return Err(DecodeError::UnknownType(transaction_type));
+        }
         if version != 1 {
             return Err(DecodeError::UnsupportedVersion {
                 transaction_type,
                 version,
             });
         }
-        KeyLink::decode(bytes).map(wrap)
+        match transaction_type {
+            0x414C => KeyLink::decode(bytes).map(Self::AccountKeyLink),
+            0x424C => KeyLink::decode(bytes).map(Self::NodeKeyLink),
+            0x4243 => KeyLink::decode(bytes).map(Self::VrfKeyLink),
+            _ => Transfer::decode(bytes).map(Self::Transfer),
+        }
     }
 }
 
@@ -283,6 +296,8 @@ pub enum DecodeError {
     InvalidBodySize,
     /// 紐づけの操作が、紐づけるか外すかのどちらでもない
     InvalidLinkAction(u8),
+    /// モザイクが ID の昇順に並んでいない。同じ ID が2回出てくるものも含む
+    UnsortedMosaics,
 }
 
 impl fmt::Display for DecodeError {
@@ -314,6 +329,7 @@ impl fmt::Display for DecodeError {
                     "紐づけの操作 {action} は、紐づけるか外すかのどちらでもありません"
                 )
             }
+            Self::UnsortedMosaics => f.write_str("モザイクが ID の昇順に並んでいません"),
         }
     }
 }

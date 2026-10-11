@@ -66,6 +66,6 @@ cargo test
 
 ## GitHub Actions
 
-- `.github/workflows/ci.yaml`: `master` への push と PR で、整形、clippy（警告はエラーにする）、`cargo test`、`heika-cert` の `--all-features`、公式ベクターと SDK のベクターとの照合を回す。最後に SDK のベクターを作り直し、コミットしたものと差分がないことを確かめる。
+- `.github/workflows/ci.yaml`: `master` への push と PR で、整形、clippy（警告はエラーにする）、`cargo test`、`heika-cert` の `--all-features`、公式ベクターと SDK のベクターとの照合を回す。最後に SDK のベクターを作り直し、コミットしたものと差分がないことを確かめる。依存のライセンスの一覧（`crates/heika-cli/THIRD-PARTY-LICENSES`）も cargo-about で作り直し、同じように確かめる。依存を変えたら、`crates/heika-cli` で `cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES` をしてコミットする。
 - `.github/workflows/release.yaml`: `v*` のタグで、4つのターゲットのバイナリを `ci.yaml` と並べて作り、`ci.yaml` が通ったら `SHA256SUMS` と来歴の証明を付けて Release に載せる。タグは `Cargo.toml` のバージョンと同じでなければならず、`v0.2.0-rc.1` のようにハイフンのあるタグはプレリリースにする。手で回すとビルドまでして Release は作らないので、ビルドが通るかだけを試せる。
 - Rust のツールチェインは、ワークフローの `RUST_TOOLCHAIN` で固定する。Action はコミットのハッシュで固定する。

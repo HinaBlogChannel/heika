@@ -106,4 +106,4 @@ cargo test -p heika-cert --all-features             # heika-cert だけを、fea
 
 ## ライセンス
 
-AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。
+AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。バイナリに入る依存のクレートのライセンスは [crates/heika-cli/THIRD-PARTY-LICENSES](crates/heika-cli/THIRD-PARTY-LICENSES) にまとめてあり、Release のアーカイブにも入れている。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。

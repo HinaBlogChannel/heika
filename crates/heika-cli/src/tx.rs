@@ -369,7 +369,7 @@ fn network_milliseconds(network: Network, time: SystemTime) -> Result<u64, Strin
 }
 
 /// バイト列をそのまま書く。すでにあるファイルは上書きしない。
-fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
+pub fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
     OpenOptions::new()
         .write(true)
         .create_new(true)

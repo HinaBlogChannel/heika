@@ -335,6 +335,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-tls"
+version = "0.1.0"
+dependencies = [
+ "heika-cert",
+ "heika-core",
+ "rustls",
+]
+
+[[package]]
 name = "heika-vectors"
 version = "0.1.0"
 dependencies = [

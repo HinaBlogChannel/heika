@@ -1,0 +1,10 @@
+[package]
+name = "heika-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+heika-cert = { path = "../heika-cert" }
+heika-core = { path = "../heika-core", default-features = false }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }

@@ -6,5 +6,7 @@ license.workspace = true
 
 [dependencies]
 base64ct = "1.8.3"
+der = { version = "0.8.2", features = ["derive"] }
 heika-core = { path = "../heika-core", default-features = false }
+x509-cert = "0.3.0"
 zeroize = "1.9.1"

@@ -1,0 +1,495 @@
+//! X.509 の証明書。catapult のノードが TLS でつなぐときに使う、Ed25519 の鍵の証明書だけを扱う。
+//!
+//! 発行するのは今は v1（拡張なし）の証明書だけ。読むほうは v1 も v3 も受け付ける。
+//! catapult は DN を見ないので、subject と issuer には RFC 4514 の DN を自由に書ける。
+
+use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use der::asn1::{BitString, ObjectIdentifier};
+use der::pem::LineEnding;
+use der::{Decode, DecodePem, Encode, EncodePem, Sequence};
+use heika_core::key::{PrivateKey, PublicKey};
+use heika_core::signature::Signature;
+use x509_cert::certificate::Version;
+use x509_cert::name::Name;
+use x509_cert::serial_number::SerialNumber;
+use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+use x509_cert::time::{Time, Validity};
+
+use crate::key;
+
+/// Ed25519 の OID（RFC 8410）
+const ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+
+/// v1 の TBSCertificate。version は既定値の v1 なので書かない。
+#[derive(Sequence)]
+struct TbsCertificateV1 {
+    serial_number: SerialNumber,
+    signature: AlgorithmIdentifierOwned,
+    issuer: Name,
+    validity: Validity,
+    subject: Name,
+    subject_public_key_info: SubjectPublicKeyInfoOwned,
+}
+
+#[derive(Sequence)]
+struct CertificateV1 {
+    tbs_certificate: TbsCertificateV1,
+    signature_algorithm: AlgorithmIdentifierOwned,
+    signature: BitString,
+}
+
+/// 発行する証明書の中身。
+#[derive(Clone, Debug)]
+pub struct Template<'a> {
+    /// RFC 4514 の DN。`CN=node` など
+    pub subject: &'a str,
+    /// 秒より細かい部分は切り捨てる
+    pub not_before: SystemTime,
+    /// 秒より細かい部分は切り捨てる
+    pub not_after: SystemTime,
+    /// 符号なしの大きな整数として読む。20バイトまで
+    pub serial_number: &'a [u8],
+}
+
+/// Ed25519 の鍵の X.509 の証明書。
+#[derive(Clone)]
+pub struct Certificate {
+    inner: x509_cert::Certificate,
+    der: Vec<u8>,
+    public_key: PublicKey,
+}
+
+impl Certificate {
+    /// 自己署名の証明書を発行する。ノードの CA の証明書になる。
+    pub fn self_signed(key: &PrivateKey, template: &Template) -> Result<Self, IssueError> {
+        let subject = parse_name(template.subject)?;
+        issue(
+            subject.clone(),
+            key,
+            subject,
+            &PublicKey::from_private_key(key),
+            template,
+        )
+    }
+
+    /// `ca` の鍵で `public_key` に証明書を発行する。issuer には `ca` の subject を使う。
+    ///
+    /// `ca_key` が `ca` の公開鍵と組でなければ発行しない。
+    pub fn issue(
+        ca: &Certificate,
+        ca_key: &PrivateKey,
+        public_key: &PublicKey,
+        template: &Template,
+    ) -> Result<Self, IssueError> {
+        if PublicKey::from_private_key(ca_key) != ca.public_key {
+            return Err(IssueError::KeyMismatch);
+        }
+        let issuer = ca.inner.tbs_certificate().subject().clone();
+        issue(
+            issuer,
+            ca_key,
+            parse_name(template.subject)?,
+            public_key,
+            template,
+        )
+    }
+
+    /// DER から読む。DER として正規でないもの、Ed25519 の鍵と署名でないものは受け付けない。
+    pub fn from_der(der: &[u8]) -> Result<Self, ParseCertificateError> {
+        let inner =
+            x509_cert::Certificate::from_der(der).map_err(|_| ParseCertificateError::InvalidDer)?;
+        // 署名の対象は TBSCertificate のバイト列そのものなので、読み直して同じにならないものは扱わない
+        if inner.to_der().ok().as_deref() != Some(der) {
+            return Err(ParseCertificateError::InvalidDer);
+        }
+        let tbs = inner.tbs_certificate();
+        let ed25519 = AlgorithmIdentifierOwned {
+            oid: ED25519,
+            parameters: None,
+        };
+        if *inner.signature_algorithm() != ed25519 || *tbs.signature() != ed25519 {
+            return Err(ParseCertificateError::NotEd25519);
+        }
+        let spki = tbs
+            .subject_public_key_info()
+            .to_der()
+            .map_err(|_| ParseCertificateError::InvalidDer)?;
+        let public_key =
+            key::public_key_from_der(&spki).map_err(|_| ParseCertificateError::NotEd25519)?;
+        Ok(Self {
+            inner,
+            der: der.to_vec(),
+            public_key,
+        })
+    }
+
+    /// `-----BEGIN CERTIFICATE-----` の PEM から読む。
+    pub fn from_pem(pem: &str) -> Result<Self, ParseCertificateError> {
+        let inner = x509_cert::Certificate::from_pem(pem.trim())
+            .map_err(|_| ParseCertificateError::InvalidPem)?;
+        let der = inner
+            .to_der()
+            .map_err(|_| ParseCertificateError::InvalidDer)?;
+        Self::from_der(&der)
+    }
+
+    pub fn to_der(&self) -> &[u8] {
+        &self.der
+    }
+
+    /// PEM にする。末尾に改行は付けない。
+    pub fn to_pem(&self) -> String {
+        let pem = self
+            .inner
+            .to_pem(LineEnding::LF)
+            .expect("a parsed certificate encodes");
+        pem.trim_end().to_owned()
+    }
+
+    /// 1、2、3 のどれか。
+    pub fn version(&self) -> u8 {
+        match self.inner.tbs_certificate().version() {
+            Version::V1 => 1,
+            Version::V2 => 2,
+            Version::V3 => 3,
+        }
+    }
+
+    /// 先頭の0を除いた、符号なしの大きな整数のバイト列。
+    pub fn serial_number(&self) -> &[u8] {
+        self.inner.tbs_certificate().serial_number().as_bytes()
+    }
+
+    /// RFC 4514 の DN。
+    pub fn issuer(&self) -> String {
+        self.inner.tbs_certificate().issuer().to_string()
+    }
+
+    /// RFC 4514 の DN。
+    pub fn subject(&self) -> String {
+        self.inner.tbs_certificate().subject().to_string()
+    }
+
+    pub fn not_before(&self) -> SystemTime {
+        self.inner
+            .tbs_certificate()
+            .validity()
+            .not_before
+            .to_system_time()
+    }
+
+    pub fn not_after(&self) -> SystemTime {
+        self.inner
+            .tbs_certificate()
+            .validity()
+            .not_after
+            .to_system_time()
+    }
+
+    pub fn public_key(&self) -> &PublicKey {
+        &self.public_key
+    }
+
+    /// `issuer` の鍵で署名されているか。
+    ///
+    /// 判定には catapult の署名の検証を使う。catapult がつなぐときの証明書の署名は
+    /// OpenSSL が確かめるので、境界のケースでは判定が少し違いうる。
+    pub fn is_signed_by(&self, issuer: &PublicKey) -> bool {
+        let Ok(tbs) = self.inner.tbs_certificate().to_der() else {
+            return false;
+        };
+        let Ok(signature) = <[u8; 64]>::try_from(self.inner.signature().raw_bytes()) else {
+            return false;
+        };
+        issuer.verify(&[&tbs], &Signature(signature))
+    }
+}
+
+impl fmt::Debug for Certificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Certificate")
+            .field("version", &self.version())
+            .field("subject", &self.subject())
+            .field("issuer", &self.issuer())
+            .field("public_key", &self.public_key)
+            .finish_non_exhaustive()
+    }
+}
+
+fn issue(
+    issuer: Name,
+    issuer_key: &PrivateKey,
+    subject: Name,
+    public_key: &PublicKey,
+    template: &Template,
+) -> Result<Certificate, IssueError> {
+    let not_before = to_time(template.not_before)?;
+    let not_after = to_time(template.not_after)?;
+    if not_before.to_unix_duration() >= not_after.to_unix_duration() {
+        return Err(IssueError::InvalidValidity);
+    }
+    let serial_number =
+        SerialNumber::new(template.serial_number).map_err(|_| IssueError::InvalidSerialNumber)?;
+    let ed25519 = AlgorithmIdentifierOwned {
+        oid: ED25519,
+        parameters: None,
+    };
+    let subject_public_key_info =
+        SubjectPublicKeyInfoOwned::from_der(&key::public_key_to_der(public_key))
+            .expect("the public key DER is valid");
+    let tbs_certificate = TbsCertificateV1 {
+        serial_number,
+        signature: ed25519.clone(),
+        issuer,
+        validity: Validity::new(not_before, not_after),
+        subject,
+        subject_public_key_info,
+    };
+    let tbs = tbs_certificate.to_der().expect("a v1 certificate encodes");
+    let signature = issuer_key.sign(&[&tbs]);
+    let certificate = CertificateV1 {
+        tbs_certificate,
+        signature_algorithm: ed25519,
+        signature: BitString::from_bytes(&signature.0).expect("64 bytes fit in a bit string"),
+    };
+    let der = certificate.to_der().expect("a v1 certificate encodes");
+    Ok(Certificate::from_der(&der).expect("an issued certificate parses"))
+}
+
+fn parse_name(text: &str) -> Result<Name, IssueError> {
+    text.parse().map_err(|_| IssueError::InvalidName)
+}
+
+/// 秒より細かい部分を切り捨てて、2049年までは UTCTime、それより後は GeneralizedTime にする。
+fn to_time(time: SystemTime) -> Result<Time, IssueError> {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| IssueError::InvalidTime)?
+        .as_secs();
+    Time::try_from(UNIX_EPOCH + Duration::from_secs(seconds)).map_err(|_| IssueError::InvalidTime)
+}
+
+/// 証明書を発行できなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueError {
+    /// subject が RFC 4514 の DN として読めない
+    InvalidName,
+    /// 1970年より前か、9999年より後
+    InvalidTime,
+    /// not_before が not_after より前になっていない
+    InvalidValidity,
+    /// シリアル番号が20バイトを超える
+    InvalidSerialNumber,
+    /// 発行に使う秘密鍵が CA の証明書の公開鍵と組でない
+    KeyMismatch,
+}
+
+impl fmt::Display for IssueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidName => "subject が RFC 4514 の DN（CN=node など）として読めません",
+            Self::InvalidTime => "有効期間は1970年から9999年までにしてください",
+            Self::InvalidValidity => "有効期間の始まりが終わりより前になっていません",
+            Self::InvalidSerialNumber => "シリアル番号は20バイトまでです",
+            Self::KeyMismatch => "秘密鍵が CA の証明書の公開鍵と組になっていません",
+        })
+    }
+}
+
+impl std::error::Error for IssueError {}
+
+/// 証明書が読めなかった理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseCertificateError {
+    /// `-----BEGIN CERTIFICATE-----` の PEM として読めない
+    InvalidPem,
+    /// X.509 の証明書の DER として読めない
+    InvalidDer,
+    /// 鍵か署名が Ed25519 ではない
+    NotEd25519,
+}
+
+impl fmt::Display for ParseCertificateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidPem => "-----BEGIN CERTIFICATE----- の PEM として読めません",
+            Self::InvalidDer => "X.509 の証明書の DER として読めません",
+            Self::NotEd25519 => "Ed25519 の鍵と署名の証明書ではありません",
+        })
+    }
+}
+
+impl std::error::Error for ParseCertificateError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // OpenSSL 3.5 で shoestring と同じ拡張を付けて作った v3 の CA とノードの証明書。
+    //   openssl req -config ca.cnf -key ca.key -new -x509 -days 7300 -set_serial 1 -out ca.crt
+    //   openssl x509 -req -in node.csr -CA ca.crt -CAkey ca.key -set_serial 2 -days 375 -out node.crt
+    const OPENSSL_V3_CA: &str = include_str!("../testdata/openssl-v3-ca.pem");
+    const OPENSSL_V3_NODE: &str = include_str!("../testdata/openssl-v3-node.pem");
+    // OpenSSL 3.5 で作った P-256 の自己署名の証明書
+    const OPENSSL_P256: &str = include_str!("../testdata/openssl-p256.pem");
+
+    fn at(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    fn template(subject: &str) -> Template<'_> {
+        Template {
+            subject,
+            // 2026-01-01T00:00:00Z から 2027-01-01T00:00:00Z
+            not_before: at(1_767_225_600),
+            not_after: at(1_798_761_600),
+            serial_number: &[0x01, 0x23],
+        }
+    }
+
+    fn ca_key() -> PrivateKey {
+        PrivateKey::from_bytes(&[1; 32])
+    }
+
+    fn node_key() -> PublicKey {
+        PublicKey::from_private_key(&PrivateKey::from_bytes(&[2; 32]))
+    }
+
+    #[test]
+    fn issues_a_self_signed_v1_certificate() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        assert_eq!(ca.version(), 1);
+        assert_eq!(ca.subject(), "CN=CA heika");
+        assert_eq!(ca.issuer(), "CN=CA heika");
+        assert_eq!(ca.serial_number(), [0x01, 0x23]);
+        assert_eq!(ca.not_before(), at(1_767_225_600));
+        assert_eq!(ca.not_after(), at(1_798_761_600));
+        assert_eq!(*ca.public_key(), PublicKey::from_private_key(&ca_key()));
+        assert!(ca.is_signed_by(ca.public_key()));
+    }
+
+    #[test]
+    fn issues_a_node_certificate_signed_by_the_ca() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let node = Certificate::issue(&ca, &ca_key(), &node_key(), &template("CN=node")).unwrap();
+        assert_eq!(node.version(), 1);
+        assert_eq!(node.subject(), "CN=node");
+        assert_eq!(node.issuer(), "CN=CA heika");
+        assert_eq!(*node.public_key(), node_key());
+        assert!(node.is_signed_by(ca.public_key()));
+        assert!(!node.is_signed_by(&node_key()));
+    }
+
+    #[test]
+    fn round_trips_through_pem_and_der() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let pem = ca.to_pem();
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
+        assert!(pem.ends_with("-----END CERTIFICATE-----"));
+        assert_eq!(Certificate::from_pem(&pem).unwrap().to_der(), ca.to_der());
+        assert_eq!(Certificate::from_der(ca.to_der()).unwrap().to_pem(), pem);
+    }
+
+    #[test]
+    fn keeps_a_distinguished_name_with_several_attributes() {
+        let ca =
+            Certificate::self_signed(&ca_key(), &template("CN=CA heika,O=heika,C=JP")).unwrap();
+        assert_eq!(ca.subject(), "CN=CA heika,O=heika,C=JP");
+    }
+
+    #[test]
+    fn uses_generalized_time_after_2049() {
+        let mut template = template("CN=CA heika");
+        // 2050-01-01T00:00:00Z
+        template.not_after = at(2_524_608_000);
+        let ca = Certificate::self_signed(&ca_key(), &template).unwrap();
+        assert_eq!(ca.not_after(), at(2_524_608_000));
+    }
+
+    #[test]
+    fn truncates_sub_seconds() {
+        let mut template = template("CN=CA heika");
+        template.not_before += Duration::from_millis(999);
+        let ca = Certificate::self_signed(&ca_key(), &template).unwrap();
+        assert_eq!(ca.not_before(), at(1_767_225_600));
+    }
+
+    #[test]
+    fn refuses_to_issue_with_a_key_other_than_the_ca() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let other = PrivateKey::from_bytes(&[3; 32]);
+        assert_eq!(
+            Certificate::issue(&ca, &other, &node_key(), &template("CN=node")).unwrap_err(),
+            IssueError::KeyMismatch
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_or_reversed_validity() {
+        let mut template = template("CN=CA heika");
+        template.not_after = template.not_before;
+        assert_eq!(
+            Certificate::self_signed(&ca_key(), &template).unwrap_err(),
+            IssueError::InvalidValidity
+        );
+    }
+
+    #[test]
+    fn refuses_an_invalid_name_and_serial_number() {
+        assert_eq!(
+            Certificate::self_signed(&ca_key(), &template("not a DN")).unwrap_err(),
+            IssueError::InvalidName
+        );
+        let mut template = template("CN=CA heika");
+        template.serial_number = &[0xFF; 21];
+        assert_eq!(
+            Certificate::self_signed(&ca_key(), &template).unwrap_err(),
+            IssueError::InvalidSerialNumber
+        );
+    }
+
+    #[test]
+    fn reads_v3_certificates_made_by_openssl() {
+        let ca = Certificate::from_pem(OPENSSL_V3_CA).unwrap();
+        let node = Certificate::from_pem(OPENSSL_V3_NODE).unwrap();
+        assert_eq!(ca.version(), 3);
+        assert_eq!(node.version(), 3);
+        assert_eq!(ca.subject(), "CN=CA fixture");
+        assert_eq!(node.subject(), "CN=node fixture");
+        assert_eq!(node.issuer(), "CN=CA fixture");
+        assert_eq!(node.serial_number(), [0x02]);
+        assert_eq!(
+            ca.public_key().to_string(),
+            "9C2AA8EDFAB3C3A3958C6C4D2C5E254BCF9D6E9BE3A1C6FE4144784C7C6CA16A"
+        );
+        assert!(ca.is_signed_by(ca.public_key()));
+        assert!(node.is_signed_by(ca.public_key()));
+        assert_eq!(
+            Certificate::from_der(node.to_der()).unwrap().to_pem(),
+            OPENSSL_V3_NODE.trim()
+        );
+    }
+
+    #[test]
+    fn rejects_a_certificate_of_another_algorithm() {
+        assert_eq!(
+            Certificate::from_pem(OPENSSL_P256).unwrap_err(),
+            ParseCertificateError::NotEd25519
+        );
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(
+            Certificate::from_pem("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----")
+                .unwrap_err(),
+            ParseCertificateError::InvalidPem
+        );
+        assert_eq!(
+            Certificate::from_der(&[0x30, 0x00]).unwrap_err(),
+            ParseCertificateError::InvalidDer
+        );
+    }
+}

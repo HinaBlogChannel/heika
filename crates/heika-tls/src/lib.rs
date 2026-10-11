@@ -356,7 +356,7 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    use heika_cert::certificate::Template;
+    use heika_cert::certificate::{Template, Version};
     use rustls::pki_types::UnixTime;
     use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
     use rustls::{DistinguishedName, ServerConfig, ServerConnection};
@@ -372,6 +372,7 @@ mod tests {
             not_before: now - Duration::from_secs(60),
             not_after: now + Duration::from_secs(24 * 60 * 60),
             serial_number: &[1],
+            version: Version::V1,
         }
     }
 

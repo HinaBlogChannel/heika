@@ -8,10 +8,9 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: 秘密鍵の生成と、公開鍵とアドレスの導出
 - ✅DONE: 鍵の PEM と16進の相互変換
 - ✅DONE: catapult と同じ判定の署名の検証（ライブラリのみ）
-- ✅DONE: CA とノードの証明書の発行（DN と有効期間を指定できる。今は v1 のみ）
+- ✅DONE: CA とノードの証明書の発行（DN と有効期間を指定できる。v3 は shoestring と同じ拡張、v1 も選べる）
 - ✅DONE: 証明書の確認（有効期間、catapult がつなぐときの条件、CA の公開鍵のアドレス）
 - ✅DONE: ノードが実際に出している証明書の確認（TLS でつなぎ、こちらの証明書が受け付けられるかも確かめる）
-- 🚧WIP: v3 の証明書（shoestring と同じ拡張）
 - 🚧WIP: shoestring や symbol-bootstrap のフォルダーへの証明書の配置
 - 🚧WIP: OpenSSL の形（/CN=node）の DN
 - 🚧WIP: VRF キーなどを紐づけるリンクのトランザクション

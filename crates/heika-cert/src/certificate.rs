@@ -1,17 +1,21 @@
 //! X.509 の証明書。catapult のノードが TLS でつなぐときに使う、Ed25519 の鍵の証明書だけを扱う。
 //!
-//! 発行するのは今は v1（拡張なし）の証明書だけ。読むほうは v1 も v3 も受け付ける。
+//! 発行するのは v1（拡張なし）と v3（shoestring が OpenSSL 3 で作るのと同じ拡張）。読むほうも v1 と v3 を受け付ける。
 //! catapult は DN を見ないので、subject と issuer には RFC 4514 の DN を自由に書ける。
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use der::asn1::{BitString, ObjectIdentifier};
+use der::asn1::{AnyRef, BitString, ObjectIdentifier, OctetString};
+use der::oid::AssociatedOid;
 use der::pem::LineEnding;
 use der::{Decode, Encode, EncodePem, Sequence};
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::signature::Signature;
-use x509_cert::certificate::Version;
+use sha1::{Digest, Sha1};
+use x509_cert::certificate::Version as RawVersion;
+use x509_cert::ext::Extension;
+use x509_cert::ext::pkix::{AuthorityKeyIdentifier, BasicConstraints, SubjectKeyIdentifier};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
@@ -33,11 +37,38 @@ struct TbsCertificateV1 {
     subject_public_key_info: SubjectPublicKeyInfoOwned,
 }
 
+/// v3 の TBSCertificate。
 #[derive(Sequence)]
-struct CertificateV1 {
-    tbs_certificate: TbsCertificateV1,
+struct TbsCertificateV3 {
+    #[asn1(context_specific = "0", tag_mode = "EXPLICIT")]
+    version: RawVersion,
+    serial_number: SerialNumber,
+    signature: AlgorithmIdentifierOwned,
+    issuer: Name,
+    validity: Validity,
+    subject: Name,
+    subject_public_key_info: SubjectPublicKeyInfoOwned,
+    #[asn1(context_specific = "3", tag_mode = "EXPLICIT")]
+    extensions: Vec<Extension>,
+}
+
+/// 署名した証明書。TBSCertificate は署名したバイト列をそのまま入れる。
+#[derive(Sequence)]
+struct SignedCertificate<'a> {
+    tbs_certificate: AnyRef<'a>,
     signature_algorithm: AlgorithmIdentifierOwned,
     signature: BitString,
+}
+
+/// 発行する証明書のバージョン。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    /// 拡張なし
+    V1,
+    /// shoestring が OpenSSL 3 で作るのと同じ拡張を付ける。
+    /// CA には basicConstraints（critical、CA:TRUE）と SKI と AKI、ノードには SKI と AKI。
+    /// 鍵の識別子は OpenSSL と同じく公開鍵の SHA-1
+    V3,
 }
 
 /// 発行する証明書の中身。
@@ -51,6 +82,7 @@ pub struct Template<'a> {
     pub not_after: SystemTime,
     /// 符号なしの大きな整数として読む。20バイトまで
     pub serial_number: &'a [u8],
+    pub version: Version,
 }
 
 /// Ed25519 の鍵の X.509 の証明書。
@@ -65,13 +97,13 @@ impl Certificate {
     /// 自己署名の証明書を発行する。ノードの CA の証明書になる。
     pub fn self_signed(key: &PrivateKey, template: &Template) -> Result<Self, IssueError> {
         let subject = parse_name(template.subject)?;
-        issue(
-            subject.clone(),
+        let public_key = PublicKey::from_private_key(key);
+        let issuer = Issuer {
+            name: subject.clone(),
             key,
-            subject,
-            &PublicKey::from_private_key(key),
-            template,
-        )
+            key_identifier: key_identifier(&public_key).to_vec(),
+        };
+        issue(&issuer, subject, &public_key, true, template)
     }
 
     /// `ca` の鍵で `public_key` に証明書を発行する。issuer には `ca` の subject を使う。
@@ -86,12 +118,27 @@ impl Certificate {
         if PublicKey::from_private_key(ca_key) != ca.public_key {
             return Err(IssueError::KeyMismatch);
         }
-        let issuer = ca.inner.tbs_certificate().subject().clone();
+        // OpenSSL と同じく、CA の証明書に SKI があればそれを、なければ公開鍵の SHA-1 を使う
+        let key_identifier = ca
+            .inner
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()
+            .ok()
+            .flatten()
+            .map_or_else(
+                || self::key_identifier(&ca.public_key).to_vec(),
+                |(_, identifier)| identifier.0.as_bytes().to_vec(),
+            );
+        let issuer = Issuer {
+            name: ca.inner.tbs_certificate().subject().clone(),
+            key: ca_key,
+            key_identifier,
+        };
         issue(
-            issuer,
-            ca_key,
+            &issuer,
             parse_name(template.subject)?,
             public_key,
+            false,
             template,
         )
     }
@@ -168,9 +215,9 @@ impl Certificate {
     /// 1、2、3 のどれか。
     pub fn version(&self) -> u8 {
         match self.inner.tbs_certificate().version() {
-            Version::V1 => 1,
-            Version::V2 => 2,
-            Version::V3 => 3,
+            RawVersion::V1 => 1,
+            RawVersion::V2 => 2,
+            RawVersion::V3 => 3,
         }
     }
 
@@ -257,11 +304,19 @@ impl fmt::Debug for Certificate {
     }
 }
 
+/// 証明書を発行する側。
+struct Issuer<'a> {
+    name: Name,
+    key: &'a PrivateKey,
+    /// v3 の AKI に入れる鍵の識別子
+    key_identifier: Vec<u8>,
+}
+
 fn issue(
-    issuer: Name,
-    issuer_key: &PrivateKey,
+    issuer: &Issuer,
     subject: Name,
     public_key: &PublicKey,
+    ca: bool,
     template: &Template,
 ) -> Result<Certificate, IssueError> {
     let not_before = to_time(template.not_before)?;
@@ -278,23 +333,76 @@ fn issue(
     let subject_public_key_info =
         SubjectPublicKeyInfoOwned::from_der(&key::public_key_to_der(public_key))
             .expect("the public key DER is valid");
-    let tbs_certificate = TbsCertificateV1 {
-        serial_number,
-        signature: ed25519.clone(),
-        issuer,
-        validity: Validity::new(not_before, not_after),
-        subject,
-        subject_public_key_info,
-    };
-    let tbs = tbs_certificate.to_der().expect("a v1 certificate encodes");
-    let signature = issuer_key.sign(&[&tbs]);
-    let certificate = CertificateV1 {
-        tbs_certificate,
+    let validity = Validity::new(not_before, not_after);
+    let tbs = match template.version {
+        Version::V1 => TbsCertificateV1 {
+            serial_number,
+            signature: ed25519.clone(),
+            issuer: issuer.name.clone(),
+            validity,
+            subject,
+            subject_public_key_info,
+        }
+        .to_der(),
+        Version::V3 => TbsCertificateV3 {
+            version: RawVersion::V3,
+            serial_number,
+            signature: ed25519.clone(),
+            issuer: issuer.name.clone(),
+            validity,
+            subject,
+            subject_public_key_info,
+            extensions: extensions(public_key, &issuer.key_identifier, ca),
+        }
+        .to_der(),
+    }
+    .expect("a certificate encodes");
+    let signature = issuer.key.sign(&[&tbs]);
+    let certificate = SignedCertificate {
+        tbs_certificate: AnyRef::from_der(&tbs).expect("the TBSCertificate is DER"),
         signature_algorithm: ed25519,
         signature: BitString::from_bytes(&signature.0).expect("64 bytes fit in a bit string"),
     };
-    let der = certificate.to_der().expect("a v1 certificate encodes");
+    let der = certificate.to_der().expect("a certificate encodes");
     Ok(Certificate::from_der(&der).expect("an issued certificate parses"))
+}
+
+/// shoestring が OpenSSL 3 で作るのと同じ並びの拡張。
+fn extensions(public_key: &PublicKey, issuer_key_identifier: &[u8], ca: bool) -> Vec<Extension> {
+    let mut extensions = Vec::new();
+    if ca {
+        let constraints = BasicConstraints {
+            ca: true,
+            path_len_constraint: None,
+        };
+        extensions.push(extension(&constraints, true));
+    }
+    let subject_key_identifier = SubjectKeyIdentifier(
+        OctetString::new(key_identifier(public_key)).expect("20 bytes fit in an octet string"),
+    );
+    extensions.push(extension(&subject_key_identifier, false));
+    let authority_key_identifier = AuthorityKeyIdentifier {
+        key_identifier: Some(
+            OctetString::new(issuer_key_identifier).expect("a key identifier fits"),
+        ),
+        ..Default::default()
+    };
+    extensions.push(extension(&authority_key_identifier, false));
+    extensions
+}
+
+fn extension<T: AssociatedOid + Encode>(value: &T, critical: bool) -> Extension {
+    Extension {
+        extn_id: T::OID,
+        critical,
+        extn_value: OctetString::new(value.to_der().expect("an extension encodes"))
+            .expect("an extension fits in an octet string"),
+    }
+}
+
+/// OpenSSL の `subjectKeyIdentifier = hash` と同じく、公開鍵の BIT STRING の中身の SHA-1。
+fn key_identifier(public_key: &PublicKey) -> [u8; 20] {
+    Sha1::digest(public_key.0).into()
 }
 
 fn parse_name(text: &str) -> Result<Name, IssueError> {
@@ -408,6 +516,14 @@ mod tests {
             not_before: at(1_767_225_600),
             not_after: at(1_798_761_600),
             serial_number: &[0x01, 0x23],
+            version: Version::V1,
+        }
+    }
+
+    fn v3(subject: &str) -> Template<'_> {
+        Template {
+            version: Version::V3,
+            ..template(subject)
         }
     }
 
@@ -417,6 +533,90 @@ mod tests {
 
     fn node_key() -> PublicKey {
         PublicKey::from_private_key(&PrivateKey::from_bytes(&[2; 32]))
+    }
+
+    /// 拡張の OID と critical の並び
+    fn extension_kinds(certificate: &Certificate) -> Vec<(ObjectIdentifier, bool)> {
+        certificate
+            .inner
+            .tbs_certificate()
+            .extensions()
+            .into_iter()
+            .flatten()
+            .map(|extension| (extension.extn_id, extension.critical))
+            .collect()
+    }
+
+    fn subject_key_identifier(certificate: &Certificate) -> Vec<u8> {
+        let (_, identifier) = certificate
+            .inner
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()
+            .unwrap()
+            .unwrap();
+        identifier.0.as_bytes().to_vec()
+    }
+
+    fn authority_key_identifier(certificate: &Certificate) -> Vec<u8> {
+        let (_, identifier) = certificate
+            .inner
+            .tbs_certificate()
+            .get_extension::<AuthorityKeyIdentifier>()
+            .unwrap()
+            .unwrap();
+        identifier.key_identifier.unwrap().as_bytes().to_vec()
+    }
+
+    #[test]
+    fn issues_v3_certificates_with_the_same_extensions_as_openssl() {
+        let ca = Certificate::self_signed(&ca_key(), &v3("CN=CA heika")).unwrap();
+        let node = Certificate::issue(&ca, &ca_key(), &node_key(), &v3("CN=node")).unwrap();
+        assert_eq!((ca.version(), node.version()), (3, 3));
+        let openssl_ca = Certificate::from_pem(OPENSSL_V3_CA).unwrap();
+        let openssl_node = Certificate::from_pem(OPENSSL_V3_NODE).unwrap();
+        assert_eq!(extension_kinds(&ca), extension_kinds(&openssl_ca));
+        assert_eq!(extension_kinds(&node), extension_kinds(&openssl_node));
+        let (critical, constraints) = ca
+            .inner
+            .tbs_certificate()
+            .get_extension::<BasicConstraints>()
+            .unwrap()
+            .unwrap();
+        assert!(critical && constraints.ca);
+        assert!(ca.is_signed_by(ca.public_key()));
+        assert!(node.is_signed_by(ca.public_key()));
+    }
+
+    #[test]
+    fn uses_the_sha1_of_the_public_key_as_the_key_identifier_like_openssl() {
+        let openssl_ca = Certificate::from_pem(OPENSSL_V3_CA).unwrap();
+        let openssl_node = Certificate::from_pem(OPENSSL_V3_NODE).unwrap();
+        assert_eq!(
+            subject_key_identifier(&openssl_ca),
+            key_identifier(openssl_ca.public_key())
+        );
+        assert_eq!(
+            authority_key_identifier(&openssl_node),
+            subject_key_identifier(&openssl_ca)
+        );
+        let ca = Certificate::self_signed(&ca_key(), &v3("CN=CA heika")).unwrap();
+        let node = Certificate::issue(&ca, &ca_key(), &node_key(), &v3("CN=node")).unwrap();
+        assert_eq!(subject_key_identifier(&ca), key_identifier(ca.public_key()));
+        assert_eq!(authority_key_identifier(&ca), subject_key_identifier(&ca));
+        assert_eq!(subject_key_identifier(&node), key_identifier(&node_key()));
+        assert_eq!(authority_key_identifier(&node), subject_key_identifier(&ca));
+    }
+
+    #[test]
+    fn issues_a_v3_node_certificate_from_a_v1_ca() {
+        // v1 の CA には SKI がないので、AKI には CA の公開鍵の SHA-1 を入れる
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let node = Certificate::issue(&ca, &ca_key(), &node_key(), &v3("CN=node")).unwrap();
+        assert_eq!(
+            authority_key_identifier(&node),
+            key_identifier(ca.public_key())
+        );
+        assert_eq!(check_catapult_chain(&[node, ca]), Ok(()));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use heika_tls::{ClientCertificate, Identity};
 use crate::{Failure, Network, read_secret};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// shoestring と symbol-bootstrap の既定値
 const CA_DAYS: u32 = 7300;
 const NODE_DAYS: u32 = 375;
@@ -401,7 +401,7 @@ fn read_certificate(path: &Path) -> Result<Certificate, String> {
     Certificate::from_pem(&pem).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn read_chain(path: &Path) -> Result<Vec<Certificate>, String> {
+pub fn read_chain(path: &Path) -> Result<Vec<Certificate>, String> {
     let pem = fs::read_to_string(path)
         .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
     Certificate::from_pem_chain(&pem).map_err(|error| format!("{}: {error}", path.display()))

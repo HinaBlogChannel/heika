@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use der::DateTime;
 use heika_cert::certificate::{
     Certificate, ParseCertificateError, Template, Version, check_catapult_chain,
@@ -37,6 +37,9 @@ pub enum CertCommand {
         out: PathBuf,
         #[command(flatten)]
         validity: ValidityArgs,
+        /// X.509 のバージョン。3 なら shoestring と同じ拡張を付ける
+        #[arg(long, value_enum, default_value_t = X509Version::V3)]
+        x509_version: X509Version,
     },
     /// 標準入力から読んだ CA の秘密鍵（PEM か16進）で、公開鍵にノードの証明書を発行する
     ///
@@ -55,6 +58,9 @@ pub enum CertCommand {
         out: PathBuf,
         #[command(flatten)]
         validity: ValidityArgs,
+        /// X.509 のバージョン。3 なら shoestring と同じ拡張を付ける
+        #[arg(long, value_enum, default_value_t = X509Version::V3)]
+        x509_version: X509Version,
     },
     /// 証明書の中身を出す
     ///
@@ -86,6 +92,23 @@ pub enum CertCommand {
         #[arg(long, value_enum, default_value_t = Network::Mainnet)]
         network: Network,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum X509Version {
+    #[value(name = "1")]
+    V1,
+    #[value(name = "3")]
+    V3,
+}
+
+impl From<X509Version> for Version {
+    fn from(version: X509Version) -> Self {
+        match version {
+            X509Version::V1 => Self::V1,
+            X509Version::V3 => Self::V3,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -157,6 +180,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             subject,
             out,
             validity,
+            x509_version,
         } => {
             let subject = subject.check()?;
             let AnyPrivateKey(ca_key) = read_secret("CA の秘密鍵", "ca.key.pem")?;
@@ -169,7 +193,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
                     not_before,
                     not_after,
                     serial_number: &serial_number,
-                    version: Version::V1,
+                    version: x509_version.into(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -182,6 +206,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             subject,
             out,
             validity,
+            x509_version,
         } => {
             let ca = read_certificate(&ca_cert)?;
             let subject = subject.check()?;
@@ -197,7 +222,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
                     not_before,
                     not_after,
                     serial_number: &serial_number,
-                    version: Version::V1,
+                    version: x509_version.into(),
                 },
             )
             .map_err(|error| error.to_string())?;

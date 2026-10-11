@@ -12,4 +12,5 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 heika-core = { path = "../heika-core" }
+heika-transaction = { path = "../heika-transaction" }
 heika-wallet = { path = "../heika-wallet" }

@@ -75,6 +75,11 @@ impl PrivateKey {
         Ok(Self(bytes))
     }
 
+    /// 32バイトのシードとして見る。PEM などに書き出すつもりで呼ぶときだけ使う。
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// 大文字の16進にする。表示するつもりで呼ぶときだけ使う。
     pub fn to_hex(&self) -> Zeroizing<String> {
         let mut buffer = Zeroizing::new([0; 64]);

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
@@ -18,7 +19,7 @@ use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::slip10::{self, ExtendedKey};
 use zeroize::Zeroizing;
 
-/// Symbol のピアプロトコルを話すためのツールキット。
+/// Symbol のノード運営のための、鍵と証明書のツールキット。
 #[derive(Parser)]
 #[command(name = "heika", version, about)]
 struct Cli {
@@ -71,6 +72,30 @@ enum KeyCommand {
     },
     /// 標準入力から読んだ秘密鍵（16進）から公開鍵を出す
     PublicKey,
+    /// 鍵を OpenSSL と同じ PEM にする
+    ///
+    /// 秘密鍵は標準入力から16進で読み、--out のファイルに書く。
+    /// --public を付けると、引数の公開鍵（16進）を標準出力に書く。
+    ToPem {
+        /// 秘密鍵の PEM を書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH", required_unless_present = "public")]
+        out: Option<PathBuf>,
+        /// 秘密鍵の代わりにこの公開鍵（16進）を PEM にする
+        #[arg(long, value_name = "PUBLIC_KEY", conflicts_with = "out")]
+        public: Option<PublicKey>,
+    },
+    /// OpenSSL と同じ PEM の鍵を16進にする
+    ///
+    /// 秘密鍵は標準入力から PEM で読み、--out のファイルに書く。
+    /// --public を付けると、標準入力から公開鍵の PEM を読み、標準出力に書く。
+    FromPem {
+        /// 秘密鍵（16進）を書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH", required_unless_present = "public")]
+        out: Option<PathBuf>,
+        /// 秘密鍵の代わりに公開鍵の PEM を読む
+        #[arg(long, conflicts_with = "out")]
+        public: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -195,8 +220,51 @@ fn run(command: Command) -> Result<(), Failure> {
             let private_key: PrivateKey = read_secret("秘密鍵", "alice.key")?;
             outln!("{}", PublicKey::from_private_key(&private_key));
         }
+        Command::Key(KeyCommand::ToPem { out, public }) => match (out, public) {
+            (_, Some(public_key)) => outln!("{}", key::public_key_to_pem(&public_key)),
+            (Some(out), None) => {
+                let private_key: PrivateKey = read_secret("秘密鍵", "alice.key")?;
+                write_secret(&out, &key::private_key_to_pem(&private_key))?;
+                outln!("公開鍵: {}", PublicKey::from_private_key(&private_key));
+            }
+            (None, None) => unreachable!("clap requires --out or --public"),
+        },
+        Command::Key(KeyCommand::FromPem { out, public }) => match out {
+            _ if public => {
+                let PublicKeyPem(public_key) = read_secret("公開鍵の PEM", "ca.pubkey.pem")?;
+                outln!("{public_key}");
+            }
+            Some(out) => {
+                let PrivateKeyPem(private_key) = read_secret("秘密鍵の PEM", "ca.key.pem")?;
+                write_secret(&out, &private_key.to_hex())?;
+                outln!("公開鍵: {}", PublicKey::from_private_key(&private_key));
+            }
+            None => unreachable!("clap requires --out or --public"),
+        },
     }
     Ok(())
+}
+
+/// `read_secret` で秘密鍵の PEM を読むための包み。
+struct PrivateKeyPem(PrivateKey);
+
+impl FromStr for PrivateKeyPem {
+    type Err = key::ParseKeyError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        key::private_key_from_pem(text).map(Self)
+    }
+}
+
+/// `read_secret` で公開鍵の PEM を読むための包み。公開鍵は秘密ではないが、PEM は複数行なので標準入力から読む。
+struct PublicKeyPem(PublicKey);
+
+impl FromStr for PublicKeyPem {
+    type Err = key::ParseKeyError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        key::public_key_from_pem(text).map(Self)
+    }
 }
 
 /// 標準入力から秘密鍵やニーモニックを読む。前後の空白や改行は無視する。

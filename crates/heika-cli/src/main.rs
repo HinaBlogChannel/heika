@@ -35,6 +35,13 @@ enum Command {
     /// ノードの TLS の証明書
     #[command(subcommand)]
     Cert(cert::CertCommand),
+    /// ハーベストのためのリンクと委任を、署名していないトランザクションに組んで書く
+    ///
+    /// 解除、紐づけ、委任の要求の順に、1つのアグリゲートにまとめる。
+    /// --delegate を付けると、リモートアカウントと VRF の鍵をその場で作って紐づけ、委任先のノードに委任の要求を送る。
+    /// 作った秘密鍵は委任の要求に暗号化して入れるだけで、どこにも保存しない。前の委任先が知っている鍵を使い回さないためである。
+    /// 自分のノードでハーベストするなら、--link-remote と --link-vrf に、ノードに置く鍵の公開鍵を渡す。
+    Harvesting(harvesting::HarvestingArgs),
     /// トランザクション
     #[command(subcommand)]
     Tx(tx::TxCommand),
@@ -186,11 +193,13 @@ macro_rules! outln {
 
 // `outln!` を使うので、マクロより後に置く
 mod cert;
+mod harvesting;
 mod tx;
 
 fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Cert(command) => cert::run(command)?,
+        Command::Harvesting(args) => harvesting::run(args)?,
         Command::Tx(command) => tx::run(command)?,
         Command::Key(KeyCommand::Address {
             public_key,

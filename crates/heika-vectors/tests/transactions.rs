@@ -5,7 +5,8 @@ use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::signature::Signature;
 use heika_transaction::{
-    Body, KeyLink, LinkAction, Transaction, Transfer, UnresolvedAddress, UnresolvedMosaicId,
+    Aggregate, Body, Cosignature, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
+    UnresolvedAddress, UnresolvedMosaicId,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,12 +19,14 @@ struct Vector {
     descriptor: Value,
 }
 
-/// heika-transaction が扱う種類。アグリゲートの中に入っているものは、まだ扱わない。
-const SCHEMAS: [&str; 4] = [
+/// heika-transaction が扱う種類。アグリゲートはバージョン 3 で、中身がすべて扱える種類のものだけを照合する。
+const SCHEMAS: [&str; 6] = [
     "AccountKeyLinkTransactionV1",
     "NodeKeyLinkTransactionV1",
     "VrfKeyLinkTransactionV1",
     "TransferTransactionV1",
+    "AggregateCompleteTransactionV3",
+    "AggregateBondedTransactionV3",
 ];
 
 fn from_hex(text: &str) -> Vec<u8> {
@@ -70,20 +73,18 @@ fn bytes(text: &str) -> Vec<u8> {
     }
 }
 
-fn key_link(vector: &Vector) -> KeyLink {
-    let descriptor = &vector.descriptor;
+fn key_link(descriptor: &Value) -> KeyLink {
     KeyLink {
         linked_public_key: text(descriptor, "linked_public_key").parse().unwrap(),
         link_action: match text(descriptor, "link_action") {
             "link" => LinkAction::Link,
             "unlink" => LinkAction::Unlink,
-            action => panic!("{}: link_action {action}", vector.test_name),
+            action => panic!("link_action {action}"),
         },
     }
 }
 
-fn transfer(vector: &Vector) -> Transfer {
-    let descriptor = &vector.descriptor;
+fn transfer(descriptor: &Value) -> Transfer {
     let mosaics = descriptor["mosaics"]
         .as_array()
         .unwrap()
@@ -107,15 +108,57 @@ fn transfer(vector: &Vector) -> Transfer {
     .unwrap()
 }
 
-fn expected(vector: &Vector) -> Transaction {
+fn public_key(descriptor: &Value, field: &str) -> PublicKey {
+    descriptor[field]
+        .as_str()
+        .map_or(PublicKey([0; 32]), |text| text.parse().unwrap())
+}
+
+fn aggregate(descriptor: &Value) -> Option<Aggregate> {
+    let transactions = descriptor["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|embedded| {
+            // 中のトランザクションの署名者とネットワークは、descriptor にないときは0とテストネット
+            Some(EmbeddedTransaction::new(
+                public_key(embedded, "signer_public_key"),
+                NetworkIdentifier::TESTNET,
+                body(embedded)?,
+            ))
+        })
+        .collect::<Option<_>>()?;
+    let mut aggregate = Aggregate::new(transactions).unwrap();
+    for cosignature in descriptor["cosignatures"].as_array().unwrap() {
+        assert_eq!(cosignature["version"].as_u64().unwrap_or(0), 0);
+        aggregate.add_cosignature(Cosignature {
+            signer_public_key: public_key(cosignature, "signer_public_key"),
+            signature: text(cosignature, "signature").parse().unwrap(),
+        });
+    }
+    assert_eq!(
+        aggregate.transactions_hash().to_string(),
+        text(descriptor, "transactions_hash")
+    );
+    Some(aggregate)
+}
+
+/// descriptor の種類から本体を組む。heika-transaction が扱わない種類なら None。
+fn body(descriptor: &Value) -> Option<Body> {
+    Some(match text(descriptor, "type") {
+        "account_key_link_transaction_v1" => Body::AccountKeyLink(key_link(descriptor)),
+        "node_key_link_transaction_v1" => Body::NodeKeyLink(key_link(descriptor)),
+        "vrf_key_link_transaction_v1" => Body::VrfKeyLink(key_link(descriptor)),
+        "transfer_transaction_v1" => Body::Transfer(transfer(descriptor)),
+        "aggregate_complete_transaction_v3" => Body::AggregateComplete(aggregate(descriptor)?),
+        "aggregate_bonded_transaction_v3" => Body::AggregateBonded(aggregate(descriptor)?),
+        _ => return None,
+    })
+}
+
+fn expected(vector: &Vector) -> Option<Transaction> {
     let descriptor = &vector.descriptor;
-    let body = match vector.schema_name.as_str() {
-        "AccountKeyLinkTransactionV1" => Body::AccountKeyLink(key_link(vector)),
-        "NodeKeyLinkTransactionV1" => Body::NodeKeyLink(key_link(vector)),
-        "VrfKeyLinkTransactionV1" => Body::VrfKeyLink(key_link(vector)),
-        "TransferTransactionV1" => Body::Transfer(transfer(vector)),
-        schema => panic!("{}: {schema}", vector.test_name),
-    };
+    let body = body(descriptor)?;
     let signer_public_key: PublicKey = text(descriptor, "signer_public_key").parse().unwrap();
     let mut transaction = Transaction::new(
         signer_public_key,
@@ -127,7 +170,7 @@ fn expected(vector: &Vector) -> Transaction {
     );
     let signature: Signature = text(descriptor, "signature").parse().unwrap();
     transaction.signature = signature;
-    transaction
+    Some(transaction)
 }
 
 #[test]
@@ -138,12 +181,13 @@ fn reads_and_writes_transactions() {
         let vectors: Vec<_> = vectors
             .iter()
             .filter(|vector| vector.schema_name == schema)
+            .filter_map(|vector| Some((vector, expected(vector)?)))
             .collect();
         assert!(!vectors.is_empty(), "{schema}");
-        for vector in &vectors {
+        for (vector, expected) in &vectors {
             let payload = from_hex(&vector.payload);
             let transaction = Transaction::from_bytes(&payload).unwrap();
-            assert_eq!(transaction, expected(vector), "{}", vector.test_name);
+            assert_eq!(transaction, *expected, "{}", vector.test_name);
             assert_eq!(transaction.to_bytes(), payload, "{}", vector.test_name);
         }
         eprintln!("{schema}: {} vectors checked", vectors.len());

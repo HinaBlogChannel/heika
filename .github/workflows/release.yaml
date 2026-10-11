@@ -34,7 +34,6 @@ jobs:
           fi
 
   build:
-    needs: ci
     strategy:
       fail-fast: false
       matrix:
@@ -87,7 +86,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build, version]
+    needs: [ci, build, version]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     permissions:

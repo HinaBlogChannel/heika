@@ -11,6 +11,7 @@ use der::DateTime;
 use heika_cert::certificate::{
     Certificate, ParseCertificateError, Template, Version, check_catapult_chain,
 };
+use heika_cert::certs_dir::{CertsDir, Layout};
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
@@ -61,6 +62,25 @@ pub enum CertCommand {
         /// X.509 のバージョン。3 なら shoestring と同じ拡張を付ける
         #[arg(long, value_enum, default_value_t = X509Version::V3)]
         x509_version: X509Version,
+    },
+    /// shoestring か symbol-bootstrap の証明書のフォルダーで、ノードの証明書を更新する
+    ///
+    /// 標準入力から CA の秘密鍵（PEM か16進）を読み、今のノードの証明書と同じ subject、公開鍵、バージョンで発行し直す。
+    /// 書き換えるのは node.crt.pem と node.full.crt.pem だけで、元のファイルは --backup-dir にコピーしておく。
+    /// 鍵は変わらないので、symbol-bootstrap が持っている鍵の情報もそのまま使える。
+    #[command(group = clap::ArgGroup::new("certs_dir").required(true))]
+    Renew {
+        /// shoestring の証明書のフォルダー（CA の証明書は ca.crt.pem）
+        #[arg(long, value_name = "DIR", group = "certs_dir")]
+        shoestring_certs_dir: Option<PathBuf>,
+        /// symbol-bootstrap の証明書のフォルダー（CA の証明書は ca.cert.pem）
+        #[arg(long, value_name = "DIR", group = "certs_dir")]
+        bootstrap_certs_dir: Option<PathBuf>,
+        /// 元のファイルをコピーしておくフォルダー。省略すると証明書のフォルダーの隣の <名前>.<UTC の日時>.bak
+        #[arg(long, value_name = "DIR")]
+        backup_dir: Option<PathBuf>,
+        #[command(flatten)]
+        validity: ValidityArgs,
     },
     /// 証明書の中身を出す
     ///
@@ -228,6 +248,47 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             .map_err(|error| error.to_string())?;
             write_new(&out, &certificate.to_pem())?;
             describe(&certificate)?;
+        }
+        CertCommand::Renew {
+            shoestring_certs_dir,
+            bootstrap_certs_dir,
+            backup_dir,
+            validity,
+        } => {
+            let certs_dir = match (shoestring_certs_dir, bootstrap_certs_dir) {
+                (Some(path), _) => CertsDir::new(path, Layout::Shoestring),
+                (None, Some(path)) => CertsDir::new(path, Layout::Bootstrap),
+                (None, None) => unreachable!("clap requires one of the certs dirs"),
+            };
+            let ca = certs_dir
+                .ca_certificate()
+                .map_err(|error| error.to_string())?;
+            let current = certs_dir
+                .node_certificate()
+                .map_err(|error| error.to_string())?;
+            let AnyPrivateKey(ca_key) = read_secret("CA の秘密鍵", "ca.key.pem")?;
+            let serial_number = serial_number()?;
+            let (not_before, not_after) = validity.resolve(NODE_DAYS);
+            let renewed = current
+                .renew(&ca, &ca_key, not_before, not_after, &serial_number)
+                .map_err(|error| error.to_string())?;
+            let backup_dir = match backup_dir {
+                Some(path) => path,
+                None => certs_dir
+                    .default_backup_dir(SystemTime::now())
+                    .map_err(|error| format!("コピー先を決められませんでした: {error}"))?,
+            };
+            certs_dir
+                .replace_node_certificate(&renewed, &backup_dir)
+                .map_err(|error| error.to_string())?;
+            describe(&renewed)?;
+            outln!(
+                "元の node.crt.pem と node.full.crt.pem を {} にコピーしました",
+                backup_dir.display()
+            );
+            outln!(
+                "ノードを再起動するまでは古い証明書が使われます。再起動したあと heika cert show --connect で確かめられます"
+            );
         }
         CertCommand::Show {
             path,

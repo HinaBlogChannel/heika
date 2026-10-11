@@ -3,6 +3,8 @@ name = "heika-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol のノードと同じ計算をするもの。アドレス、鍵、署名、Merkle ツリー"
 
 [dependencies]
 base16ct = "1.0.0"

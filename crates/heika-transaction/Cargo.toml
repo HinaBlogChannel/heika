@@ -3,6 +3,8 @@ name = "heika-transaction"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol のトランザクションの読み書き、署名、ハッシュ"
 
 [dependencies]
 heika-core = { path = "../heika-core", default-features = false }

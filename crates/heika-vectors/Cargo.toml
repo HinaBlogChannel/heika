@@ -3,6 +3,8 @@ name = "heika-vectors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol の公式テストベクターと、公式の Python SDK で作ったベクターとの照合"
 publish = false
 
 [dependencies]

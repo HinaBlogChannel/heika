@@ -3,6 +3,8 @@ name = "heika-tls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Symbol のノードと同じ設定での TLS の接続"
 
 [dependencies]
 heika-cert = { path = "../heika-cert" }

@@ -2,8 +2,10 @@
 
 pub mod address;
 mod base32;
+mod ed25519;
 mod hex;
 pub mod key;
 pub mod network;
+pub mod signature;
 
 pub use hex::ParseHexError;

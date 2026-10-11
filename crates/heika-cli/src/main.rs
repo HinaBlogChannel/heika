@@ -48,6 +48,9 @@ enum Command {
     /// トランザクション
     #[command(subcommand)]
     Tx(tx::TxCommand),
+    /// heika と依存のライセンスと、このバイナリのソース
+    #[command(subcommand)]
+    Legal(legal::LegalCommand),
 }
 
 #[derive(Subcommand)]
@@ -197,6 +200,7 @@ macro_rules! outln {
 // `outln!` を使うので、マクロより後に置く
 mod cert;
 mod harvesting;
+mod legal;
 mod node;
 mod tx;
 
@@ -204,6 +208,7 @@ fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Cert(command) => cert::run(command)?,
         Command::Harvesting(args) => harvesting::run(args)?,
+        Command::Legal(command) => legal::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Tx(command) => tx::run(command)?,
         Command::Key(KeyCommand::Address {

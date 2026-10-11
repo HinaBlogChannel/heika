@@ -13,6 +13,9 @@ use zeroize::Zeroizing;
 /// 英語の単語リスト。アルファベット順に並んでいて、番号が単語の11ビットの値になる。
 pub static ENGLISH: [&str; 2048] = split_lines(include_str!("bip39/english.txt"));
 
+/// 単語リストの出どころと、MIT License の条件。単語リストを含むバイナリを配るときに添える。
+pub const ENGLISH_NOTICE: &str = include_str!("bip39/NOTICE");
+
 /// 改行で終わる行を2048個に分ける。数が合わなければコンパイルで止まる。
 const fn split_lines(text: &str) -> [&str; 2048] {
     let mut words = [""; 2048];

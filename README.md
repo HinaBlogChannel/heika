@@ -84,6 +84,9 @@ heika tx cosign --network mainnet --out harvesting.cosigned.bin harvesting.signe
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem harvesting.signed.bin < node.key.pem
 
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
+
+heika legal third-party
+heika legal source --out heika-source.zip
 ```
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。
@@ -106,4 +109,4 @@ cargo test -p heika-cert --all-features             # heika-cert だけを、fea
 
 ## ライセンス
 
-AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。
+AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。バイナリに入る依存のクレートのライセンスは [crates/heika-cli/THIRD-PARTY-LICENSES](crates/heika-cli/THIRD-PARTY-LICENSES) にまとめてあり、Release のアーカイブにも入れている。バイナリそのものにも、heika と依存のライセンスと、ビルドしたときのソースを入れてあり、`heika legal` で取り出せる。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。

@@ -1,5 +1,5 @@
-# master への push と PR で、整形、clippy、テスト、ベクターとの照合をする。
-# release.yaml からも、ビルドの前に呼ぶ
+# master への push と PR で、整形、clippy、テスト、ベクターとの照合、依存のライセンスの一覧の確認をする。
+# release.yaml からも、ビルドと並べて呼ぶ
 name: CI
 
 on:
@@ -19,6 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.99.0
+  CARGO_ABOUT: 0.9.2
 
 jobs:
   check:
@@ -55,4 +56,22 @@ jobs:
       - name: SDK のベクターを作り直して、コミットしたものと同じか確かめる
         run: |
           uv run crates/heika-vectors/scripts/generate-sdk-vectors.py > crates/heika-vectors/testdata/sdk-transactions.json
+          git diff --exit-code
+
+  licenses:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェイン
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo install cargo-about --version "$CARGO_ABOUT" --locked --features cli
+      - name: 依存のライセンスの一覧を作り直して、コミットしたものと同じか確かめる
+        working-directory: crates/heika-cli
+        run: |
+          cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
           git diff --exit-code

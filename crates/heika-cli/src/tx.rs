@@ -50,8 +50,8 @@ pub enum TxCommand {
         /// 手数料は、トランザクションのバイト数にこれを掛けたもの
         #[arg(long, default_value_t = 100)]
         fee_multiplier: u64,
-        /// 期限を今から何時間後にするか。ノードの設定 maxTransactionLifetime より先にはできない
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=24))]
+        /// 期限を今から何時間後にするか。ネットワークの設定 maxTransactionLifetime（メインネットもテストネットも 6h）より先にはできない
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=6))]
         deadline_hours: u64,
         /// 署名していないトランザクションを書くファイル（すでにあれば上書きしない）
         #[arg(long)]

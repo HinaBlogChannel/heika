@@ -35,6 +35,9 @@ enum Command {
     /// ノードの TLS の証明書
     #[command(subcommand)]
     Cert(cert::CertCommand),
+    /// トランザクション
+    #[command(subcommand)]
+    Tx(tx::TxCommand),
 }
 
 #[derive(Subcommand)]
@@ -183,10 +186,12 @@ macro_rules! outln {
 
 // `outln!` を使うので、マクロより後に置く
 mod cert;
+mod tx;
 
 fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Cert(command) => cert::run(command)?,
+        Command::Tx(command) => tx::run(command)?,
         Command::Key(KeyCommand::Address {
             public_key,
             network,

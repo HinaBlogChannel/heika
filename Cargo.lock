@@ -351,6 +351,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+ "rand_core",
 ]
 
 [[package]]
@@ -391,7 +392,9 @@ dependencies = [
  "heika-cert",
  "heika-core",
  "heika-tls",
+ "heika-transaction",
  "heika-wallet",
+ "rand_core",
  "zeroize",
 ]
 

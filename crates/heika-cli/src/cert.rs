@@ -178,7 +178,7 @@ impl FromStr for Timestamp {
 }
 
 /// `read_secret` で秘密鍵を PEM でも16進でも読むための包み。
-struct AnyPrivateKey(PrivateKey);
+pub struct AnyPrivateKey(pub PrivateKey);
 
 impl FromStr for AnyPrivateKey {
     type Err = String;

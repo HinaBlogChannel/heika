@@ -7,6 +7,26 @@ pub fn encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
+/// 定数を書くための、大文字の16進だけを受け付ける const 版。間違っていればコンパイル時に止まる。
+pub const fn decode_const<const N: usize>(text: &[u8]) -> [u8; N] {
+    assert!(text.len() == N * 2, "wrong length");
+    let mut bytes = [0; N];
+    let mut index = 0;
+    while index < N {
+        bytes[index] = upper_nibble(text[2 * index]) << 4 | upper_nibble(text[2 * index + 1]);
+        index += 1;
+    }
+    bytes
+}
+
+const fn upper_nibble(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'A'..=b'F' => digit - b'A' + 10,
+        _ => panic!("not an upper-case hex digit"),
+    }
+}
+
 pub fn decode<const N: usize>(text: &str) -> Result<[u8; N], ParseHexError> {
     if let Some((index, character)) = text
         .chars()

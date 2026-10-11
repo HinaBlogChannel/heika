@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use clap::{Args, Subcommand};
 use der::DateTime;
-use heika_cert::certificate::{Certificate, ParseCertificateError, Template, check_catapult_chain};
+use heika_cert::certificate::{
+    Certificate, ParseCertificateError, Template, Version, check_catapult_chain,
+};
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
@@ -167,6 +169,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
                     not_before,
                     not_after,
                     serial_number: &serial_number,
+                    version: Version::V1,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -194,6 +197,7 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
                     not_before,
                     not_after,
                     serial_number: &serial_number,
+                    version: Version::V1,
                 },
             )
             .map_err(|error| error.to_string())?;

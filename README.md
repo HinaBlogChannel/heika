@@ -12,13 +12,14 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: DN は RFC 4514 の形（CN=node,O=example）でも OpenSSL の形（/O=example/CN=node）でも書ける
 - ✅DONE: 証明書の確認（有効期間、catapult がつなぐときの条件、CA の公開鍵のアドレス）
 - ✅DONE: ノードが実際に出している証明書の確認（TLS でつなぎ、こちらの証明書が受け付けられるかも確かめる）
-- 🚧WIP: shoestring や symbol-bootstrap のフォルダーへの証明書の配置
+- ✅DONE: shoestring や symbol-bootstrap の証明書のフォルダーでのノードの証明書の更新（元のファイルは日時つきのフォルダーにコピーして残す）
+- 🚧WIP: 鍵を交換したときの、証明書のフォルダーへの配置
 - 🚧WIP: VRF キーなどを紐づけるリンクのトランザクション
 
 ## 構成
 
 - `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名
-- `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書
+- `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10
 - `heika-cli`: コマンドラインツール `heika`
@@ -42,6 +43,7 @@ heika key to-pem --public <公開鍵>
 
 heika cert ca --subject "CN=CA example" --out ca.crt.pem < ca.key.pem
 heika cert node --ca-cert ca.crt.pem --public-key <公開鍵> --subject "CN=node example" --out node.crt.pem < ca.key.pem
+heika cert renew --shoestring-certs-dir <フォルダー> < ca.key.pem
 heika cert show node.full.crt.pem
 heika cert show --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 ```
@@ -55,6 +57,7 @@ DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の�
 ```sh
 cargo test
 cargo test -p heika-vectors -- --ignored  # 公式ベクターとの照合。ネットワークを使う
+cargo test -p heika-cert --all-features    # heika-cert だけを、feature つきのモジュールも含めて
 ```
 
 方針は [docs/testing.md](docs/testing.md) にある。

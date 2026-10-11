@@ -11,3 +11,9 @@ heika-core = { path = "../heika-core", default-features = false }
 sha1 = { version = "0.11.0", default-features = false }
 x509-cert = "0.3.0"
 zeroize = "1.9.1"
+
+[features]
+# shoestring が作るノードの証明書のフォルダーを扱う heika_cert::certs_dir
+shoestring-compat = []
+# symbol-bootstrap が作るノードの証明書のフォルダーを扱う heika_cert::certs_dir
+bootstrap-compat = []

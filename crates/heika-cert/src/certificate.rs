@@ -115,31 +115,44 @@ impl Certificate {
         public_key: &PublicKey,
         template: &Template,
     ) -> Result<Self, IssueError> {
-        if PublicKey::from_private_key(ca_key) != ca.public_key {
-            return Err(IssueError::KeyMismatch);
-        }
-        // OpenSSL と同じく、CA の証明書に SKI があればそれを、なければ公開鍵の SHA-1 を使う
-        let key_identifier = ca
-            .inner
-            .tbs_certificate()
-            .get_extension::<SubjectKeyIdentifier>()
-            .ok()
-            .flatten()
-            .map_or_else(
-                || self::key_identifier(&ca.public_key).to_vec(),
-                |(_, identifier)| identifier.0.as_bytes().to_vec(),
-            );
-        let issuer = Issuer {
-            name: ca.inner.tbs_certificate().subject().clone(),
-            key: ca_key,
-            key_identifier,
-        };
         issue(
-            &issuer,
+            &Issuer::ca(ca, ca_key)?,
             parse_name(template.subject)?,
             public_key,
             false,
             template,
+        )
+    }
+
+    /// この証明書と同じ subject、公開鍵、バージョンで、`ca` の鍵で発行し直す。ノードの証明書の更新に使う。
+    ///
+    /// `ca_key` が `ca` の公開鍵と組でなければ発行しない。v2 の証明書は v3 として発行し直す。
+    pub fn renew(
+        &self,
+        ca: &Certificate,
+        ca_key: &PrivateKey,
+        not_before: SystemTime,
+        not_after: SystemTime,
+        serial_number: &[u8],
+    ) -> Result<Self, IssueError> {
+        let template = Template {
+            // subject は下で DER のまま渡すので、ここの値は使わない
+            subject: "",
+            not_before,
+            not_after,
+            serial_number,
+            version: if self.version() == 1 {
+                Version::V1
+            } else {
+                Version::V3
+            },
+        };
+        issue(
+            &Issuer::ca(ca, ca_key)?,
+            self.inner.tbs_certificate().subject().clone(),
+            &self.public_key,
+            false,
+            &template,
         )
     }
 
@@ -310,6 +323,31 @@ struct Issuer<'a> {
     key: &'a PrivateKey,
     /// v3 の AKI に入れる鍵の識別子
     key_identifier: Vec<u8>,
+}
+
+impl<'a> Issuer<'a> {
+    /// `ca` の証明書と鍵で発行する側。`ca_key` が `ca` の公開鍵と組でなければ作らない。
+    fn ca(ca: &Certificate, ca_key: &'a PrivateKey) -> Result<Self, IssueError> {
+        if PublicKey::from_private_key(ca_key) != ca.public_key {
+            return Err(IssueError::KeyMismatch);
+        }
+        // OpenSSL と同じく、CA の証明書に SKI があればそれを、なければ公開鍵の SHA-1 を使う
+        let key_identifier = ca
+            .inner
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()
+            .ok()
+            .flatten()
+            .map_or_else(
+                || self::key_identifier(&ca.public_key).to_vec(),
+                |(_, identifier)| identifier.0.as_bytes().to_vec(),
+            );
+        Ok(Self {
+            name: ca.inner.tbs_certificate().subject().clone(),
+            key: ca_key,
+            key_identifier,
+        })
+    }
 }
 
 fn issue(
@@ -750,6 +788,56 @@ mod tests {
         let other = PrivateKey::from_bytes(&[3; 32]);
         assert_eq!(
             Certificate::issue(&ca, &other, &node_key(), &template("CN=node")).unwrap_err(),
+            IssueError::KeyMismatch
+        );
+    }
+
+    #[test]
+    fn renews_with_the_same_subject_key_and_version() {
+        for version in [Version::V1, Version::V3] {
+            let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+            let old = Certificate::issue(
+                &ca,
+                &ca_key(),
+                &node_key(),
+                &Template {
+                    version,
+                    ..template("/O=heika+OU=nodes/CN=node")
+                },
+            )
+            .unwrap();
+            // 2027-01-01T00:00:00Z から 2028-01-11T00:00:00Z
+            let renewed = old
+                .renew(
+                    &ca,
+                    &ca_key(),
+                    at(1_798_761_600),
+                    at(1_831_248_000),
+                    &[0x45],
+                )
+                .unwrap();
+            assert_eq!(
+                renewed.inner.tbs_certificate().subject(),
+                old.inner.tbs_certificate().subject()
+            );
+            assert_eq!(renewed.public_key(), old.public_key());
+            assert_eq!(renewed.version(), old.version());
+            assert_eq!(renewed.issuer(), ca.subject());
+            assert_eq!(renewed.serial_number(), [0x45]);
+            assert_eq!(renewed.not_before(), at(1_798_761_600));
+            assert_eq!(renewed.not_after(), at(1_831_248_000));
+            assert_eq!(check_catapult_chain(&[renewed, ca]), Ok(()));
+        }
+    }
+
+    #[test]
+    fn refuses_to_renew_with_a_key_other_than_the_ca() {
+        let ca = Certificate::self_signed(&ca_key(), &template("CN=CA heika")).unwrap();
+        let old = Certificate::issue(&ca, &ca_key(), &node_key(), &template("CN=node")).unwrap();
+        let other = PrivateKey::from_bytes(&[3; 32]);
+        assert_eq!(
+            old.renew(&ca, &other, at(1_798_761_600), at(1_831_248_000), &[1])
+                .unwrap_err(),
             IssueError::KeyMismatch
         );
     }

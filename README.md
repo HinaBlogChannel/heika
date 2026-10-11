@@ -110,3 +110,11 @@ cargo test -p heika-cert --all-features             # heika-cert だけを、fea
 ## ライセンス
 
 AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。バイナリに入る依存のクレートのライセンスは [crates/heika-cli/THIRD-PARTY-LICENSES](crates/heika-cli/THIRD-PARTY-LICENSES) にまとめてあり、Release のアーカイブにも入れている。バイナリそのものにも、heika と依存のライセンスと、ビルドしたときのソースを入れてあり、`heika legal` で取り出せる。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。
+
+バイナリに入れたソースは、実行しなくても取り出せる。動かせないアーキテクチャのバイナリや、実行したくないバイナリからでも取り出せるように、決まった名前のセクションに置いている。
+
+```sh
+objcopy -O binary --only-section=.heika_source heika heika-source.zip      # Linux
+segedit heika -extract __TEXT __heika_source heika-source.zip              # macOS
+llvm-objcopy --dump-section .hksrc=heika-source.zip heika.exe              # Windows
+```

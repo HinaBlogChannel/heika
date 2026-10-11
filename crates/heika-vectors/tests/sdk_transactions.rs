@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_transaction::{
-    Aggregate, Body, Cosignature, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
+    Aggregate, Body, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
     UnresolvedAddress, UnresolvedMosaicId,
 };
 use heika_wallet::bip39::Mnemonic;
@@ -190,15 +190,10 @@ fn signs_and_hashes_like_the_sdk() {
         );
         transaction.sign(&private_key, &seed).unwrap();
         let hash = transaction.hash(&seed);
-        if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) =
-            &mut transaction.body
-        {
-            for &cosigner in &vector.cosigners {
-                let cosignature = Cosignature::sign(&derive(cosigner), &hash);
-                assert!(cosignature.verify(&hash), "vector {index}");
-                aggregate.add_cosignature(cosignature);
-            }
+        for &cosigner in &vector.cosigners {
+            transaction.cosign(&derive(cosigner), &seed).unwrap();
         }
+        assert!(transaction.verify_cosignatures(&seed), "vector {index}");
         assert_eq!(
             transaction.signature.to_string(),
             vector.signature,

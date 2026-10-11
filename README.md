@@ -10,6 +10,7 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: catapult と同じ判定の署名の検証（ライブラリのみ）
 - ✅DONE: CA とノードの証明書の発行（DN と有効期間を指定できる。今は v1 のみ）
 - ✅DONE: 証明書の確認（有効期間、catapult がつなぐときの条件、CA の公開鍵のアドレス）
+- ✅DONE: ノードが実際に出している証明書の確認（TLS でつなぎ、こちらの証明書が受け付けられるかも確かめる）
 - 🚧WIP: v3 の証明書（shoestring と同じ拡張）
 - 🚧WIP: shoestring や symbol-bootstrap のフォルダーへの証明書の配置
 - 🚧WIP: OpenSSL の形（/CN=node）の DN
@@ -19,6 +20,7 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 
 - `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書
+- `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10
 - `heika-cli`: コマンドラインツール `heika`
 - `heika-vectors`: Symbol の公式テストベクターとの照合。ベクターはテスト時に取得する
@@ -42,6 +44,7 @@ heika key to-pem --public <公開鍵>
 heika cert ca --subject "CN=CA example" --out ca.crt.pem < ca.key.pem
 heika cert node --ca-cert ca.crt.pem --public-key <公開鍵> --subject "CN=node example" --out node.crt.pem < ca.key.pem
 heika cert show node.full.crt.pem
+heika cert show --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 ```
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。

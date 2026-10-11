@@ -13,8 +13,22 @@ use crate::tx::write_new;
 const LICENSE: &str = include_str!("../../../LICENSE");
 /// 依存のクレートのライセンス。about.toml の手順で作り直す
 const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD-PARTY-LICENSES");
-/// ビルドしたときの作業ツリーを、build.rs が git archive でまとめたもの。まとめられなかったときは空
-const SOURCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/source.zip"));
+/// ビルドしたときの作業ツリーを、build.rs が git archive でまとめたもの。まとめられなかったときは空。
+///
+/// 実行しなくても取り出せるように、決まった名前のセクションに置く。
+/// PE のセクションの名前は8バイトまでなので、Windows では短くする
+#[used]
+#[cfg_attr(
+    not(any(target_vendor = "apple", windows)),
+    unsafe(link_section = ".heika_source")
+)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__TEXT,__heika_source")
+)]
+#[cfg_attr(windows, unsafe(link_section = ".hksrc"))]
+static SOURCE: [u8; SOURCE_LEN] = *include_bytes!(concat!(env!("OUT_DIR"), "/source.zip"));
+const SOURCE_LEN: usize = include_bytes!(concat!(env!("OUT_DIR"), "/source.zip")).len();
 /// SOURCE をどのコミットから作ったか
 const SOURCE_DESCRIPTION: &str = env!("HEIKA_SOURCE_DESCRIPTION");
 
@@ -55,7 +69,7 @@ pub fn run(command: LegalCommand) -> Result<(), Failure> {
                         .into(),
                 );
             }
-            write_new(&out, SOURCE)?;
+            write_new(&out, &SOURCE)?;
             outln!("{} に書きました（{SOURCE_DESCRIPTION}）", out.display());
         }
     }

@@ -9,8 +9,10 @@ use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
 use sha3::{Digest, Sha3_256};
 
+mod aggregate;
 mod transfer;
 
+pub use aggregate::{Aggregate, Cosignature, EmbeddedTransaction, NestedAggregate};
 pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};
 
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
@@ -47,6 +49,10 @@ pub enum Body {
     VrfKeyLink(KeyLink),
     /// モザイクとメッセージを送る。
     Transfer(Transfer),
+    /// 必要な署名がそろっているアグリゲート。
+    AggregateComplete(Aggregate),
+    /// 連署を後から集めるアグリゲート。送る前に HashLock が要る。
+    AggregateBonded(Aggregate),
 }
 
 /// 公開鍵を紐づける、または紐づけを外すトランザクションに共通の本体。
@@ -147,19 +153,32 @@ impl Transaction {
             return Err(SignError::KeyMismatch);
         }
         let bytes = self.to_bytes();
-        self.signature =
-            private_key.sign(&[&generation_hash_seed.0, &bytes[UNSIGNED_HEADER_SIZE..]]);
+        self.signature = private_key.sign(&[&generation_hash_seed.0, self.signed_part(&bytes)]);
         Ok(())
     }
 
     /// 署名を検証する。catapult の `SignatureValidator` と同じく、
-    /// generation hash seed に続けてヘッダーの後半と本体に署名されていることを確かめる。
+    /// generation hash seed に続けて、署名の対象の部分に署名されていることを確かめる。
     pub fn verify(&self, generation_hash_seed: &GenerationHashSeed) -> bool {
         let bytes = self.to_bytes();
         self.signer_public_key.verify(
-            &[&generation_hash_seed.0, &bytes[UNSIGNED_HEADER_SIZE..]],
+            &[&generation_hash_seed.0, self.signed_part(&bytes)],
             &self.signature,
         )
+    }
+
+    /// 署名とハッシュの対象。catapult の `TransactionPlugin::dataBuffer`。
+    ///
+    /// ふつうはヘッダーの後半から最後まで。アグリゲートは、中のトランザクションのハッシュとそれらの長さまでで、
+    /// 後ろの予約の4バイト（catapult の `Footer_Size`）と、中のトランザクションと連署は含まない。
+    /// 中のトランザクションは、そのハッシュを通して署名される。
+    fn signed_part<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
+        match self.body {
+            Body::AggregateComplete(_) | Body::AggregateBonded(_) => {
+                &bytes[UNSIGNED_HEADER_SIZE..HEADER_SIZE + aggregate::FIXED_SIZE - 4]
+            }
+            _ => &bytes[UNSIGNED_HEADER_SIZE..],
+        }
     }
 
     /// ハッシュ。catapult の `model/EntityHasher.cpp` と同じく、署名を丸ごとと署名者の公開鍵、
@@ -170,7 +189,7 @@ impl Transaction {
         hasher.update(self.signature.0);
         hasher.update(self.signer_public_key.0);
         hasher.update(generation_hash_seed.0);
-        hasher.update(&bytes[UNSIGNED_HEADER_SIZE..]);
+        hasher.update(self.signed_part(&bytes));
         Hash256(hasher.finalize().into())
     }
 }
@@ -183,16 +202,20 @@ impl Body {
             Self::NodeKeyLink(_) => 0x424C,
             Self::VrfKeyLink(_) => 0x4243,
             Self::Transfer(_) => 0x4154,
+            Self::AggregateComplete(_) => 0x4141,
+            Self::AggregateBonded(_) => 0x4241,
         }
     }
 
     /// 種類ごとの構造のバージョン。どれも catbuffer の最新のものを書く。
+    /// アグリゲートはバージョン 3 で、メインネットでは高さ 4,759,100 から、それより前のバージョンは使えない。
     pub fn version(&self) -> u8 {
         match self {
             Self::AccountKeyLink(_)
             | Self::NodeKeyLink(_)
             | Self::VrfKeyLink(_)
             | Self::Transfer(_) => 1,
+            Self::AggregateComplete(_) | Self::AggregateBonded(_) => 3,
         }
     }
 
@@ -202,14 +225,19 @@ impl Body {
                 link.encode(out)
             }
             Self::Transfer(transfer) => transfer.encode(out),
+            Self::AggregateComplete(aggregate) | Self::AggregateBonded(aggregate) => {
+                aggregate.encode(out)
+            }
         }
     }
 
     fn decode(transaction_type: u16, version: u8, bytes: &[u8]) -> Result<Self, DecodeError> {
-        if !matches!(transaction_type, 0x414C | 0x424C | 0x4243 | 0x4154) {
-            return Err(DecodeError::UnknownType(transaction_type));
-        }
-        if version != 1 {
+        let expected_version = match transaction_type {
+            0x414C | 0x424C | 0x4243 | 0x4154 => 1,
+            0x4141 | 0x4241 => 3,
+            _ => return Err(DecodeError::UnknownType(transaction_type)),
+        };
+        if version != expected_version {
             return Err(DecodeError::UnsupportedVersion {
                 transaction_type,
                 version,
@@ -219,8 +247,14 @@ impl Body {
             0x414C => KeyLink::decode(bytes).map(Self::AccountKeyLink),
             0x424C => KeyLink::decode(bytes).map(Self::NodeKeyLink),
             0x4243 => KeyLink::decode(bytes).map(Self::VrfKeyLink),
-            _ => Transfer::decode(bytes).map(Self::Transfer),
+            0x4154 => Transfer::decode(bytes).map(Self::Transfer),
+            0x4141 => Aggregate::decode(bytes).map(Self::AggregateComplete),
+            _ => Aggregate::decode(bytes).map(Self::AggregateBonded),
         }
+    }
+
+    fn is_aggregate_type(transaction_type: u16) -> bool {
+        matches!(transaction_type, 0x4141 | 0x4241)
     }
 }
 
@@ -298,6 +332,10 @@ pub enum DecodeError {
     InvalidLinkAction(u8),
     /// モザイクが ID の昇順に並んでいない。同じ ID が2回出てくるものも含む
     UnsortedMosaics,
+    /// アグリゲートの中にアグリゲートが入っている
+    NestedAggregate,
+    /// アグリゲートの中のトランザクションのハッシュが、中身と合わない
+    TransactionsHashMismatch,
 }
 
 impl fmt::Display for DecodeError {
@@ -330,6 +368,10 @@ impl fmt::Display for DecodeError {
                 )
             }
             Self::UnsortedMosaics => f.write_str("モザイクが ID の昇順に並んでいません"),
+            Self::NestedAggregate => f.write_str("アグリゲートの中にアグリゲートが入っています"),
+            Self::TransactionsHashMismatch => {
+                f.write_str("アグリゲートの中のトランザクションのハッシュが、中身と合いません")
+            }
         }
     }
 }

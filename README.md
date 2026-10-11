@@ -13,17 +13,17 @@ Symbol のノード運営のための、鍵と証明書の Rust のツールキ�
 - ✅DONE: 証明書の確認（有効期間、catapult がつなぐときの条件、CA の公開鍵のアドレス）
 - ✅DONE: ノードが実際に出している証明書の確認（TLS でつなぎ、こちらの証明書が受け付けられるかも確かめる）
 - ✅DONE: shoestring や symbol-bootstrap の証明書のフォルダーでのノードの証明書の更新（元のファイルは日時つきのフォルダーにコピーして残す）
-- ✅DONE: リンク（アカウント、ノード、VRF）と Transfer のトランザクションの読み書き、署名、ハッシュ（ライブラリのみ）
+- ✅DONE: リンク（アカウント、ノード、VRF）と Transfer とアグリゲートのトランザクションの読み書き、署名、連署、ハッシュ（ライブラリのみ）
 - ✅DONE: 委任ハーベストの要求のメッセージの読み書き（ライブラリのみ）
 - 🚧WIP: 鍵を交換したときの、証明書のフォルダーへの配置
 - 🚧WIP: リンクと委任ハーベストの要求のトランザクションを組んで署名するコマンド
 
 ## 構成
 
-- `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名
+- `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名、Merkle ツリー
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
-- `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。リンクと Transfer
+- `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。リンク、Transfer、アグリゲート
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10、委任ハーベストの要求に使う公開鍵あての暗号化
 - `heika-cli`: コマンドラインツール `heika`
 - `heika-vectors`: Symbol の公式テストベクターと、公式の Python SDK で作ったベクターとの照合

@@ -260,12 +260,8 @@ pub fn send(
     timeout: Duration,
     wait: Duration,
 ) -> Result<Inspection, ConnectError> {
-    let size = u32::try_from(PACKET_HEADER_SIZE + body.len())
+    let packet = packet(packet_type, body)
         .map_err(|_| ConnectError::Io(io::Error::other("パケットが大きすぎます")))?;
-    let mut packet = Vec::with_capacity(size as usize);
-    packet.extend_from_slice(&size.to_le_bytes());
-    packet.extend_from_slice(&packet_type.to_le_bytes());
-    packet.extend_from_slice(body);
     exchange(
         address,
         identity,
@@ -279,15 +275,134 @@ pub fn send(
 /// パケットのヘッダーは、ヘッダーを含む全長 `u32` と種類 `u32` の8バイト。
 const PACKET_HEADER_SIZE: usize = 8;
 
-/// 接続してハンドシェイクを済ませ、`packet` があれば送り、`wait` のあいだ切られないか待つ。
-fn exchange(
-    address: &str,
-    identity: &Identity,
-    verification: ServerVerification,
-    packet: Option<&[u8]>,
-    timeout: Duration,
-    wait: Duration,
-) -> Result<Inspection, ConnectError> {
+/// ヘッダーを付けたパケット。全長が `u32` に収まらなければ `Err`。
+fn packet(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, ()> {
+    let size = u32::try_from(PACKET_HEADER_SIZE + body.len()).map_err(|_| ())?;
+    let mut packet = Vec::with_capacity(size as usize);
+    packet.extend_from_slice(&size.to_le_bytes());
+    packet.extend_from_slice(&packet_type.to_le_bytes());
+    packet.extend_from_slice(body);
+    Ok(packet)
+}
+
+/// ノードとの TLS の接続。Symbol のパケットで要求を送り、応答を受け取る。
+///
+/// 相手のチェーンは catapult と同じ条件で確かめる。drop すると TLS の close_notify を送って閉じる。
+pub struct Connection {
+    connection: ClientConnection,
+    socket: TcpStream,
+}
+
+impl Connection {
+    /// `address` に接続してハンドシェイクを済ませる。読み書きは `timeout` で打ち切る。
+    pub fn open(
+        address: &str,
+        identity: &Identity,
+        timeout: Duration,
+    ) -> Result<Self, ConnectError> {
+        let mut socket = tcp_connect(address, timeout)?;
+        let config = client_config(identity, ServerVerification::Catapult);
+        let mut connection = ClientConnection::new(Arc::new(config), server_name(address))
+            .expect("the config is valid");
+        while connection.is_handshaking() {
+            connection
+                .complete_io(&mut socket)
+                .map_err(ConnectError::Handshake)?;
+        }
+        Ok(Self { connection, socket })
+    }
+
+    /// 相手が出した証明書の DER。ノード、CA の順のはず。
+    pub fn peer_certificates(&self) -> Vec<Vec<u8>> {
+        peer_certificates(&self.connection).unwrap_or_default()
+    }
+
+    /// 種類が `packet_type` で本体が `body` の要求を送り、同じ種類の応答を1つ受け取って本体を返す。
+    /// 応答の本体が `max_body_size` を超えるなら、読まずに失敗する。
+    pub fn request(
+        &mut self,
+        packet_type: u32,
+        body: &[u8],
+        max_body_size: usize,
+    ) -> Result<Vec<u8>, RequestError> {
+        let packet = packet(packet_type, body).map_err(|()| RequestError::TooLarge(body.len()))?;
+        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
+        let result = (|| {
+            stream.write_all(&packet)?;
+            stream.flush()?;
+            let mut header = [0; PACKET_HEADER_SIZE];
+            stream.read_exact(&mut header)?;
+            Ok::<_, io::Error>(header)
+        })();
+        let header = result.map_err(|error| match alert(&error) {
+            Some(alert) => RequestError::Rejected(alert),
+            None => RequestError::Io(error),
+        })?;
+        let [s0, s1, s2, s3, t0, t1, t2, t3] = header;
+        let size = u32::from_le_bytes([s0, s1, s2, s3]);
+        let response_type = u32::from_le_bytes([t0, t1, t2, t3]);
+        if response_type != packet_type {
+            return Err(RequestError::UnexpectedType(response_type));
+        }
+        let body_size = (size as usize)
+            .checked_sub(PACKET_HEADER_SIZE)
+            .ok_or(RequestError::InvalidSize(size))?;
+        if body_size > max_body_size {
+            return Err(RequestError::TooLarge(body_size));
+        }
+        let mut body = vec![0; body_size];
+        stream.read_exact(&mut body).map_err(RequestError::Io)?;
+        Ok(body)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.connection.send_close_notify();
+        let _ = self.connection.complete_io(&mut self.socket);
+    }
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Connection(..)")
+    }
+}
+
+/// [`Connection::request`] が失敗した理由。
+#[derive(Debug)]
+pub enum RequestError {
+    /// こちらの証明書が TLS のアラートで弾かれた。中身はアラートの種類
+    Rejected(String),
+    /// 要求か応答の本体が大きすぎる
+    TooLarge(usize),
+    /// 応答のヘッダーの全長が、ヘッダーより短い
+    InvalidSize(u32),
+    /// 要求と違う種類の応答が来た
+    UnexpectedType(u32),
+    Io(io::Error),
+}
+
+impl fmt::Display for RequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(alert) => {
+                write!(f, "こちらの証明書が弾かれました（TLS のアラート: {alert}）")
+            }
+            Self::TooLarge(size) => write!(f, "本体が {size} バイトで、大きすぎます"),
+            Self::InvalidSize(size) => write!(f, "応答の全長 {size} がヘッダーより短いです"),
+            Self::UnexpectedType(packet_type) => {
+                write!(f, "違う種類 {packet_type:#x} の応答が来ました")
+            }
+            Self::Io(error) => write!(f, "通信できませんでした: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestError {}
+
+/// `address` を解決して TCP でつなぎ、読み書きのタイムアウトを `timeout` にする。
+fn tcp_connect(address: &str, timeout: Duration) -> Result<TcpStream, ConnectError> {
     let socket_address = address
         .to_socket_addrs()
         .map_err(ConnectError::Address)?
@@ -298,12 +413,25 @@ fn exchange(
                 "アドレスが見つかりません",
             ))
         })?;
-    let mut socket =
+    let socket =
         TcpStream::connect_timeout(&socket_address, timeout).map_err(ConnectError::Connect)?;
     socket
         .set_read_timeout(Some(timeout))
         .and_then(|()| socket.set_write_timeout(Some(timeout)))
         .map_err(ConnectError::Io)?;
+    Ok(socket)
+}
+
+/// 接続してハンドシェイクを済ませ、`packet` があれば送り、`wait` のあいだ切られないか待つ。
+fn exchange(
+    address: &str,
+    identity: &Identity,
+    verification: ServerVerification,
+    packet: Option<&[u8]>,
+    timeout: Duration,
+    wait: Duration,
+) -> Result<Inspection, ConnectError> {
+    let mut socket = tcp_connect(address, timeout)?;
     let config = client_config(identity, verification);
     let mut connection =
         ClientConnection::new(Arc::new(config), server_name(address)).expect("the config is valid");
@@ -386,7 +514,7 @@ fn peer_certificates(connection: &ClientConnection) -> Option<Vec<Vec<u8>>> {
         .map(|certificates| certificates.iter().map(|der| der.to_vec()).collect())
 }
 
-/// [`inspect`] と [`send`] が失敗した理由。
+/// [`inspect`]、[`send`]、[`Connection::open`] が失敗した理由。
 #[derive(Debug)]
 pub enum ConnectError {
     /// 接続先のアドレスを解決できない
@@ -709,6 +837,78 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, ConnectError::Handshake(_)), "{error:?}");
         assert_eq!(received.recv().unwrap(), b"");
+    }
+
+    /// 1回だけ接続を受け、パケットを1つ読んで、種類 `response_type` で本体 `response` の応答を返すサーバー
+    fn serve_and_reply(
+        identity: Identity,
+        response_type: u32,
+        response: &'static [u8],
+    ) -> (String, mpsc::Receiver<Vec<u8>>) {
+        let provider = provider();
+        let config = ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(TestClientVerifier {
+                provider,
+                accept: true,
+            }))
+            .with_cert_resolver(Arc::new(SingleCertAndKey::from(identity.certified_key)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut connection = ServerConnection::new(Arc::new(config)).unwrap();
+            let mut stream = rustls::Stream::new(&mut connection, &mut socket);
+            let mut header = [0; 8];
+            stream.read_exact(&mut header).unwrap();
+            let size = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+            let mut body = vec![0; size - 8];
+            stream.read_exact(&mut body).unwrap();
+            sender.send([&header[..], &body].concat()).unwrap();
+            stream
+                .write_all(&packet(response_type, response).unwrap())
+                .unwrap();
+            stream.flush().unwrap();
+            let _ = stream.read_to_end(&mut Vec::new());
+        });
+        (address, receiver)
+    }
+
+    #[test]
+    fn requests_and_receives_a_response() {
+        let (chain, key) = chain(1);
+        let (address, received) =
+            serve_and_reply(Identity::new(&chain, &key).unwrap(), 5, b"reply");
+        let mut connection =
+            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+        assert_eq!(connection.peer_certificates().len(), 2);
+        assert_eq!(connection.request(5, b"ask", 1024).unwrap(), b"reply");
+        assert_eq!(
+            received.recv().unwrap(),
+            [&11u32.to_le_bytes()[..], &5u32.to_le_bytes(), b"ask"].concat()
+        );
+    }
+
+    #[test]
+    fn refuses_a_response_of_another_type_or_too_large() {
+        let (chain, key) = chain(1);
+        let identity = || Identity::new(&chain, &key).unwrap();
+        let (address, _received) = serve_and_reply(identity(), 6, b"reply");
+        let mut connection =
+            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            connection.request(5, b"ask", 1024),
+            Err(RequestError::UnexpectedType(6))
+        ));
+        let (address, _received) = serve_and_reply(identity(), 5, b"reply");
+        let mut connection =
+            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            connection.request(5, b"ask", 4),
+            Err(RequestError::TooLarge(5))
+        ));
     }
     #[test]
     fn fails_to_connect_to_a_closed_port() {

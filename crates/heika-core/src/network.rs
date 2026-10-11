@@ -21,6 +21,17 @@ impl NetworkIdentifier {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GenerationHashSeed(pub [u8; 32]);
 
+impl GenerationHashSeed {
+    /// メインネット。
+    pub const MAINNET: Self = Self(hex::decode_const(
+        b"57F7DA205008026C776CB6AED843393F04CD458E0AA2D9F1D5F31A402072B2D6",
+    ));
+    /// テストネット。
+    pub const TESTNET: Self = Self(hex::decode_const(
+        b"49D6E1CE276A85B70EAFE52349AACCA389302E7A9754BCF1221E79494FC665A4",
+    ));
+}
+
 impl fmt::Display for GenerationHashSeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(&self.0))

@@ -287,3 +287,24 @@ fn encodes_harvest_requests_like_the_sdk() {
         document.harvest_requests.len()
     );
 }
+
+#[test]
+fn network_constants_match_the_sdk() {
+    let document: Document = serde_json::from_str(VECTORS).unwrap();
+    for (name, identifier, seed) in [
+        (
+            "mainnet",
+            NetworkIdentifier::MAINNET,
+            GenerationHashSeed::MAINNET,
+        ),
+        (
+            "testnet",
+            NetworkIdentifier::TESTNET,
+            GenerationHashSeed::TESTNET,
+        ),
+    ] {
+        let network = &document.networks[name];
+        assert_eq!(NetworkIdentifier(network.identifier), identifier, "{name}");
+        assert_eq!(seed.to_string(), network.generation_hash_seed, "{name}");
+    }
+}

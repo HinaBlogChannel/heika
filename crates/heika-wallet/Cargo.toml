@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
+curve25519-dalek = "5.0.0"
 getrandom = { version = "0.4.3", optional = true }
 heika-core = { path = "../heika-core", default-features = false }
 hmac = { version = "0.13.0", features = ["zeroize"] }
@@ -13,6 +15,10 @@ rand_core = { version = "0.10.1", default-features = false }
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 subtle = "2.6.1"
 zeroize = "1.9.1"
+
+[dev-dependencies]
+# 鍵の導出で、HKDF を HMAC で書いたものが RFC 5869 と同じになることを確かめる
+hkdf = "0.13.0"
 
 [features]
 default = ["getrandom"]

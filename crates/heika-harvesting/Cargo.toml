@@ -1,0 +1,15 @@
+[package]
+name = "heika-harvesting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のノードへの委任ハーベスト。ブロックから委任の要求を拾い、今も有効かを確かめる"
+
+[dependencies]
+heika-core = { path = "../heika-core", default-features = false }
+heika-transaction = { path = "../heika-transaction" }
+heika-wallet = { path = "../heika-wallet", default-features = false }
+
+[dev-dependencies]
+rand_core = { version = "0.10.1", default-features = false }

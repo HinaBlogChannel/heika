@@ -424,6 +424,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-harvesting"
+version = "0.3.0"
+dependencies = [
+ "heika-core",
+ "heika-transaction",
+ "heika-wallet",
+ "rand_core",
+]
+
+[[package]]
 name = "heika-p2p"
 version = "0.3.0"
 dependencies = [

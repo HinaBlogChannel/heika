@@ -1,16 +1,20 @@
 //! ノードに TLS でつないで調べる。
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Subcommand;
+use heika_cert::certificate::Certificate;
+use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
-use heika_p2p::{NetworkNode, Node};
+use heika_p2p::{NetworkNode, Node, NodeRoles};
 use heika_tls::Identity;
 
 use crate::cert::{AnyPrivateKey, read_chain};
+use crate::tx::write_new;
 use crate::{Failure, read_secret};
 
 /// 1つのノードにつなぐときと、1回の問い合わせを待つ時間
@@ -22,6 +26,9 @@ const PROBE_BLOCKS: u32 = 100;
 const PROBE_DEPTH: u64 = 1000;
 /// ブロックの目標間隔。メインネットもテストネットも、ネットワークの設定 blockGenerationTargetTime は 30s
 const BLOCK_TIME: Duration = Duration::from_secs(30);
+/// --peers-json に書くノードの、遅れの上限（ブロック）。遅れは目標間隔で換算した推定なので、
+/// 実際のブロックの間隔のばらつきで、遅れていないノードにも数ブロックの遅れが出ることがある
+const MAX_PEER_LAG: u64 = 5;
 
 #[derive(Subcommand)]
 pub enum NodeCommand {
@@ -32,6 +39,8 @@ pub enum NodeCommand {
     /// --crawl を付けると、測ったノードからも一覧をもらい、まだ見ていないノードをたどる。
     /// 名乗るのは --client-cert の証明書で、ノードの秘密鍵は標準入力から読む。
     /// ノードを持っていなくても、heika cert ca と heika cert node で作った証明書でつなげる。
+    /// --peers-json を付けると、遅れがなく Peer のロールのあるノードを、読み出しの速い順に、
+    /// catapult の peers-p2p.json の形式で書く。
     Find {
         /// 最初につなぐノード
         #[arg(long, value_name = "HOST:PORT")]
@@ -45,12 +54,20 @@ pub enum NodeCommand {
         /// 測ったノードからも一覧をもらい、まだ見ていないノードをたどる
         #[arg(long)]
         crawl: bool,
+        /// 測ったノードを、catapult の peers-p2p.json の形式で書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH")]
+        peers_json: Option<PathBuf>,
+        /// --peers-json に書くノードの数の上限
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=1000), requires = "peers_json")]
+        peers_count: u16,
     },
 }
 
 /// 1つのノードを測った結果。
 struct Measurement {
     node: NetworkNode,
+    /// TLS で出した CA の証明書の公開鍵。catapult が peers-p2p.json の publicKey と比べるのはこれ
+    ca_key: PublicKey,
     address: String,
     connect: Duration,
     height: u64,
@@ -66,6 +83,8 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             client_cert,
             limit,
             crawl,
+            peers_json,
+            peers_count,
         } => {
             let chain = read_chain(&client_cert)?;
             let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
@@ -87,9 +106,8 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
 
             // 最初のノードも測る。同じネットワークで、名乗るホストがあるものだけを、重ならないように選ぶ
             let network = seed_info.network_identifier;
+            let mut seen = HashSet::from([connect.clone(), seed_info.identity_key.to_string()]);
             let mut queue = VecDeque::from([(connect.clone(), seed_info)]);
-            let mut seen = HashSet::new();
-            seen.insert(connect.clone());
             enqueue(&mut queue, &mut seen, peers, network);
 
             outln!(
@@ -152,6 +170,34 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 "測れたノード: {}、測れなかったノード: {failures}。読み出しは {PROBE_BLOCKS} ブロックを読むのにかかった時間、遅れは、測った時刻をブロックの目標間隔でそろえたうえでの、一番進んでいるノードとの高さの差",
                 rows.len()
             );
+
+            if let Some(path) = peers_json {
+                // 自分のノードを載せると、catapult が自分につなごうとする
+                let own_key = *chain[1].public_key();
+                let peers: Vec<(&Measurement, Endpoint)> = rows
+                    .iter()
+                    .filter(|(m, lag)| {
+                        m.node.roles.contains(NodeRoles::PEER)
+                            && *lag <= MAX_PEER_LAG
+                            && m.ca_key != own_key
+                    })
+                    .filter_map(|(m, _)| Some((m, Endpoint::parse(&m.address)?)))
+                    .take(usize::from(peers_count))
+                    .collect();
+                if peers.is_empty() {
+                    return Err(format!(
+                        "Peer のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードがないので、{} は書きませんでした",
+                        path.display()
+                    )
+                    .into());
+                }
+                write_new(&path, peers_p2p_json(&peers).as_bytes())?;
+                outln!(
+                    "{} に {} 台を書きました。Peer のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードを、読み出しの速い順に選んでいます（自分のノードは除く）",
+                    path.display(),
+                    peers.len()
+                );
+            }
         }
     }
     Ok(())
@@ -190,6 +236,7 @@ fn measure(
     let started = Instant::now();
     let mut node = Node::connect(address, identity, TIMEOUT).map_err(|error| error.to_string())?;
     let connect = started.elapsed();
+    let ca_key = ca_key(&node)?;
     let info = node.info().map_err(|error| error.to_string())?;
     let height = node
         .chain_statistics()
@@ -211,6 +258,7 @@ fn measure(
     };
     let measurement = Measurement {
         node: info,
+        ca_key,
         address: address.to_owned(),
         connect,
         height,
@@ -218,6 +266,90 @@ fn measure(
         pull,
     };
     Ok((measurement, peers))
+}
+
+/// 相手が TLS で出した、CA の証明書の公開鍵。接続できたなら、チェーンは catapult の条件で確かめてある。
+fn ca_key(node: &Node) -> Result<PublicKey, String> {
+    let certificates = node.peer_certificates();
+    let ca = certificates
+        .get(1)
+        .ok_or_else(|| "CA の証明書がありません".to_owned())?;
+    Certificate::from_der(ca)
+        .map(|ca| *ca.public_key())
+        .map_err(|error| format!("CA の証明書を読めません: {error}"))
+}
+
+/// peers-p2p.json の endpoint。つないだ `HOST:PORT` を分けたもの。
+struct Endpoint {
+    host: String,
+    port: u16,
+}
+
+impl Endpoint {
+    /// `[::1]:7900` のように角かっこで囲んだ IPv6 のアドレスは、角かっこを外す。
+    fn parse(address: &str) -> Option<Self> {
+        let (host, port) = address.rsplit_once(':')?;
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        Some(Self {
+            host: host.to_owned(),
+            port: port.parse().ok()?,
+        })
+    }
+}
+
+/// catapult の peers-p2p.json（`config/PeersConfiguration.cpp` が読む形式）。
+///
+/// publicKey は TLS で確かめた CA の公開鍵、roles はノード自身が名乗ったロールにする。
+/// IPv4 も IPv6 も名乗っていないノードは、catapult が IPv4 とみなす（`ionet/IpProtocol.cpp`）。
+fn peers_p2p_json(peers: &[(&Measurement, Endpoint)]) -> String {
+    let mut json = String::from("{\n  \"knownPeers\": [");
+    for (i, (m, endpoint)) in peers.iter().enumerate() {
+        json.push_str(if i == 0 { "\n" } else { ",\n" });
+        write!(
+            json,
+            r#"    {{
+      "publicKey": "{}",
+      "endpoint": {{
+        "host": {},
+        "port": {}
+      }},
+      "metadata": {{
+        "name": {},
+        "roles": "{}"
+      }}
+    }}"#,
+            m.ca_key,
+            json_string(&endpoint.host),
+            endpoint.port,
+            json_string(&m.node.friendly_name),
+            m.node.roles.to_config_value(),
+        )
+        .expect("writing to a String never fails");
+    }
+    json.push_str("\n  ]\n}\n");
+    json
+}
+
+/// JSON の文字列。ホストと名前はノードが名乗ったものなので、引用符と制御文字をエスケープする。
+fn json_string(text: &str) -> String {
+    let mut json = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            c if c.is_control() => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    write!(json, "\\u{unit:04x}").expect("writing to a String never fails");
+                }
+            }
+            c => json.push(c),
+        }
+    }
+    json.push('"');
+    json
 }
 
 /// それぞれのノードを測った時刻に、一番進んでいるノードならどの高さにいたはずか。
@@ -294,6 +426,7 @@ mod tests {
                 host: String::new(),
                 friendly_name: String::new(),
             },
+            ca_key: heika_core::key::PublicKey([0; 32]),
             address: String::new(),
             connect: Duration::ZERO,
             height,
@@ -321,5 +454,90 @@ mod tests {
             without_controls(&format!("{}\n", "a".repeat(60))),
             format!("{}?", "a".repeat(60))
         );
+    }
+
+    #[test]
+    fn splits_endpoints() {
+        let endpoint = Endpoint::parse("node.example:7900").unwrap();
+        assert_eq!(
+            (endpoint.host.as_str(), endpoint.port),
+            ("node.example", 7900)
+        );
+        let endpoint = Endpoint::parse("[2001:db8::1]:7900").unwrap();
+        assert_eq!(
+            (endpoint.host.as_str(), endpoint.port),
+            ("2001:db8::1", 7900)
+        );
+        assert!(Endpoint::parse("node.example").is_none());
+        assert!(Endpoint::parse("node.example:port").is_none());
+    }
+
+    #[test]
+    fn writes_peers_p2p_json() {
+        let mut m = measurement(100, Instant::now());
+        m.ca_key = PublicKey([0xab; 32]);
+        m.node.roles = NodeRoles(0x43);
+        m.node.friendly_name = "a\"b\\c\n".to_owned();
+        let endpoint = Endpoint {
+            host: "node.example".to_owned(),
+            port: 7900,
+        };
+        let expected = format!(
+            r#"{{
+  "knownPeers": [
+    {{
+      "publicKey": "{}",
+      "endpoint": {{
+        "host": "node.example",
+        "port": 7900
+      }},
+      "metadata": {{
+        "name": "a\"b\\c\u000a",
+        "roles": "Peer,Api,IPv4"
+      }}
+    }}
+  ]
+}}
+"#,
+            "AB".repeat(32)
+        );
+        assert_eq!(peers_p2p_json(&[(&m, endpoint)]), expected);
+    }
+
+    #[test]
+    fn writes_names_and_hosts_that_a_json_parser_reads_back() {
+        let names = [
+            String::from("\"\\/"),
+            (0..0x20).map(char::from).collect(),
+            String::from("\u{7f}\u{85}\u{2028}\u{2029}"),
+            String::from("ノード🎉"),
+        ];
+        let measurements: Vec<Measurement> = names
+            .iter()
+            .map(|name| {
+                let mut m = measurement(100, Instant::now());
+                m.node.friendly_name = name.clone();
+                m
+            })
+            .collect();
+        let peers: Vec<(&Measurement, Endpoint)> = measurements
+            .iter()
+            .zip(&names)
+            .map(|(m, name)| {
+                let endpoint = Endpoint {
+                    host: name.clone(),
+                    port: 7900,
+                };
+                (m, endpoint)
+            })
+            .collect();
+        let json: serde_json::Value = serde_json::from_str(&peers_p2p_json(&peers)).unwrap();
+        let known_peers = json["knownPeers"].as_array().unwrap();
+        assert_eq!(known_peers.len(), names.len());
+        for (peer, name) in known_peers.iter().zip(&names) {
+            assert_eq!(peer["metadata"]["name"], name.as_str());
+            assert_eq!(peer["endpoint"]["host"], name.as_str());
+            assert_eq!(peer["endpoint"]["port"], 7900);
+        }
     }
 }

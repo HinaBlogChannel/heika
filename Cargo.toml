@@ -13,3 +13,8 @@ rust-version = "1.99"
 # 署名やハッシュの計算は、最適化しないと公式ベクターの照合に何十倍もかかるので、依存だけは開発中も最適化する
 [profile.dev.package."*"]
 opt-level = 3
+
+# 配るバイナリを小さくする。暗号の計算が遅くならないように、opt-level は既定の 3 のままにする
+[profile.release]
+lto = "fat"
+codegen-units = 1

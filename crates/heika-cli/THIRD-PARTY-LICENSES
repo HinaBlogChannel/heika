@@ -1768,6 +1768,8 @@ Apache License 2.0
 - base16ct 1.0.0
 - base64ct 1.8.3
 - block-buffer 0.12.1
+- chacha20 0.10.2
+- chacha20poly1305 0.11.0
 - cipher 0.5.2
 - const-oid 0.10.2
 - cpubits 0.1.1
@@ -1784,8 +1786,11 @@ Apache License 2.0
 - keccak 0.2.2
 - pbkdf2 0.13.0
 - pem-rfc7468 1.0.0
+- poly1305 0.9.1
 - polyval 0.7.3
 - ripemd 0.2.0
+- salsa20 0.11.0
+- scrypt 0.12.0
 - sha1 0.11.0
 - sha2 0.11.0
 - sha3 0.12.0

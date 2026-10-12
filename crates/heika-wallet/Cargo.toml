@@ -8,12 +8,15 @@ description = "Symbol のウォレットのための計算"
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "zeroize"] }
+base64ct = { version = "1.8.3", features = ["alloc"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 curve25519-dalek = "5.0.0"
 getrandom = { version = "0.4.3", optional = true }
 heika-core = { path = "../heika-core", default-features = false }
 hmac = { version = "0.13.0", features = ["zeroize"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 rand_core = { version = "0.10.1", default-features = false }
+scrypt = { version = "0.12.0", default-features = false }
 sha2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 subtle = "2.6.1"
 zeroize = "1.9.1"

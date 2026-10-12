@@ -120,7 +120,7 @@ fn hkdf(shared_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     hmac_sha256(&pseudo_random_key[..], &[b"catapult", &[1]])
 }
 
-fn hmac_sha256(key: &[u8], data: &[&[u8]]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[&[u8]]) -> Zeroizing<[u8; 32]> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
     for part in data {
         mac.update(part);

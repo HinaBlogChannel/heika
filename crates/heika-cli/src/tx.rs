@@ -20,6 +20,7 @@ use heika_cert::certificate::Certificate;
 use heika_tls::{ClientCertificate, Identity};
 
 use crate::cert::{AnyPrivateKey, CONNECT_TIMEOUT, read_chain};
+use crate::wallet::WalletKeyArgs;
 use crate::{Failure, Network, read_secret, show};
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
@@ -42,7 +43,7 @@ pub enum TxCommand {
         #[arg(long)]
         json: bool,
     },
-    /// 署名していないトランザクションに、標準入力から読んだ秘密鍵で署名する
+    /// 署名していないトランザクションに、標準入力から読んだ秘密鍵か、キーストアのアカウントの鍵で署名する
     Sign {
         #[arg(long, value_enum)]
         network: Network,
@@ -51,8 +52,10 @@ pub enum TxCommand {
         /// 署名したトランザクションを書くファイル（すでにあれば上書きしない）
         #[arg(long)]
         out: PathBuf,
+        #[command(flatten)]
+        key: WalletKeyArgs,
     },
-    /// 署名したアグリゲートに、標準入力から読んだ秘密鍵で連署する
+    /// 署名したアグリゲートに、標準入力から読んだ秘密鍵か、キーストアのアカウントの鍵で連署する
     ///
     /// 連署するのは外側の署名を含むハッシュなので、先に heika tx sign で署名しておく。
     /// AggregateComplete だけを扱う。
@@ -64,6 +67,8 @@ pub enum TxCommand {
         /// 連署を足したトランザクションを書くファイル（すでにあれば上書きしない）
         #[arg(long)]
         out: PathBuf,
+        #[command(flatten)]
+        key: WalletKeyArgs,
     },
     /// 署名したトランザクションを、ノードと TLS でつないで送る
     ///
@@ -157,6 +162,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             network,
             unsigned,
             out,
+            key,
         } => {
             let bytes = fs::read(&unsigned)
                 .map_err(|error| format!("{} を読めませんでした: {error}", unsigned.display()))?;
@@ -170,7 +176,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 )
                 .into());
             }
-            let AnyPrivateKey(private_key) = read_secret("秘密鍵", "main.key")?;
+            let private_key = key.private_key(network, "秘密鍵", "main.key")?;
             let seed = network.parameters().generation_hash_seed;
             transaction
                 .sign(&private_key, &seed)
@@ -185,6 +191,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             network,
             signed,
             out,
+            key,
         } => {
             let (_, mut transaction) = read_signed(&signed, network)?;
             if !matches!(transaction.body, Body::AggregateComplete(_)) {
@@ -202,7 +209,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 )
                 .into());
             }
-            let AnyPrivateKey(private_key) = read_secret("秘密鍵", "cosigner.key")?;
+            let private_key = key.private_key(network, "秘密鍵", "cosigner.key")?;
             let cosigner = PublicKey::from_private_key(&private_key);
             let seed = network.parameters().generation_hash_seed;
             transaction

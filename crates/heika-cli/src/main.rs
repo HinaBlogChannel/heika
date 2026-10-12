@@ -317,7 +317,7 @@ impl FromStr for PublicKeyPem {
 /// 標準入力から秘密鍵やニーモニックを読む。前後の空白や改行は無視する。
 ///
 /// 引数で受け取るとシェルの履歴や `/proc/<pid>/cmdline` に残るので、標準入力だけから読む。
-/// 端末からは、Unix では打った文字を画面に出さずに読む。Unix 以外では画面に出てしまうので、
+/// 端末からは、Unix と Windows では打った文字を画面に出さずに読む。ほかでは画面に出てしまうので、
 /// リダイレクトかパイプで渡されたときだけ受け付ける。
 fn read_secret<T>(name: &str, example: &str) -> Result<T, String>
 where
@@ -403,11 +403,61 @@ impl Drop for EchoOff {
     }
 }
 
-/// Unix 以外では文字を出さずに読む方法を用意していないので、端末からは受け付けない。
-#[cfg(not(unix))]
+/// Windows のコンソールから秘密を読むあいだ、打った文字を画面に出さないようにする。drop すると元に戻す。
+///
+/// Unix で ISIG を切るのと同じく、ENABLE_PROCESSED_INPUT も切って Ctrl-C で落ちないようにする。
+/// Ctrl-C は文字として入るので、そのまま終えれば読めない入力として弾かれる。
+#[cfg(windows)]
+struct EchoOff {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    original: windows_sys::Win32::System::Console::CONSOLE_MODE,
+}
+
+#[cfg(windows)]
+impl EchoOff {
+    fn new(stdin: &io::Stdin, name: &str, _example: &str) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{
+            ENABLE_ECHO_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode, SetConsoleMode,
+        };
+
+        let handle = stdin.as_raw_handle();
+        let mut original = 0;
+        // SAFETY: handle は開いている標準入力で、GetConsoleMode は成功したときに original を埋める
+        if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
+            return Err(format!(
+                "コンソールの設定を読めませんでした: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let hidden = original & !(ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+        // SAFETY: handle は GetConsoleMode が読めたコンソールの入力
+        if unsafe { SetConsoleMode(handle, hidden) } == 0 {
+            return Err(format!(
+                "コンソールの設定を変えられませんでした: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        eprintln!(
+            "{name}を貼り付けて、Enter のあと Ctrl-Z と Enter で終えてください。打った文字は画面に出ません（やめるときは、何も入れずに Ctrl-Z と Enter）"
+        );
+        Ok(Self { handle, original })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        // SAFETY: original は new で GetConsoleMode が読んだ、同じハンドルのモード
+        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(self.handle, self.original) };
+    }
+}
+
+/// Unix と Windows のほかでは文字を出さずに読む方法を用意していないので、端末からは受け付けない。
+#[cfg(not(any(unix, windows)))]
 struct EchoOff;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl EchoOff {
     fn new(_stdin: &io::Stdin, name: &str, example: &str) -> Result<Self, String> {
         Err(format!(
@@ -423,8 +473,17 @@ fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
     stdin.as_fd().try_clone_to_owned().map(File::from)
 }
 
-/// Unix 以外ではバッファを避ける方法を用意していないので、そのまま読む（build.rs で警告する）。
-#[cfg(not(unix))]
+/// Windows でも、同じハンドルを複製してバッファなしで読む。
+/// コンソールからは ReadFile で読むので、コンソールの入力のコードページのバイトになる。
+/// 秘密鍵の16進とニーモニックは ASCII なので、どのコードページでも同じバイトになる。
+#[cfg(windows)]
+fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
+    use std::os::windows::io::AsHandle;
+    stdin.as_handle().try_clone_to_owned().map(File::from)
+}
+
+/// ほかではバッファを避ける方法を用意していないので、そのまま読む（build.rs で警告する）。
+#[cfg(not(any(unix, windows)))]
 fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
     Ok(stdin)
 }

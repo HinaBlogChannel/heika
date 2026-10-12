@@ -12,7 +12,9 @@ use clap::{Args, Subcommand};
 use heika_core::key::PublicKey;
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
-use heika_transaction::{Aggregate, Body, Cosignature, EmbeddedTransaction, Transaction};
+use heika_transaction::{
+    Aggregate, AggregateVersion, Body, Cosignature, EmbeddedTransaction, Transaction,
+};
 
 use heika_cert::certificate::Certificate;
 use heika_tls::{ClientCertificate, Identity};
@@ -181,13 +183,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .map_err(|error| format!("{} を読めませんでした: {error}", unsigned.display()))?;
             let mut transaction = Transaction::from_bytes(&bytes)
                 .map_err(|error| format!("{}: {error}", unsigned.display()))?;
-            if transaction.network != NetworkIdentifier::from(network) {
-                return Err(format!(
-                    "{} は --network と違うネットワークのトランザクションです",
-                    unsigned.display()
-                )
-                .into());
-            }
+            check_sendable(&unsigned, &transaction, network)?;
             if transaction.signature != Signature([0; 64]) {
                 return Err(format!(
                     "{} はすでに署名されています。連署するなら heika tx cosign を使ってください",
@@ -355,18 +351,34 @@ fn from_hex_text(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// 署名したトランザクションを読み、ネットワークと署名を確かめる。読んだバイト列も返す。
-fn read_signed(path: &Path, network: Network) -> Result<(Vec<u8>, Transaction), String> {
-    let bytes = fs::read(path)
-        .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
-    let transaction =
-        Transaction::from_bytes(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+/// 署名や送信に進めるかを確かめる。`--network` と同じネットワークで、今のネットワークに送れる形のもの。
+/// アグリゲートのバージョン 3 より前は、チェーンにあるものを読むためだけに扱う。
+fn check_sendable(path: &Path, transaction: &Transaction, network: Network) -> Result<(), String> {
     if transaction.network != NetworkIdentifier::from(network) {
         return Err(format!(
             "{} は --network と違うネットワークのトランザクションです",
             path.display()
         ));
     }
+    if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) = &transaction.body
+        && aggregate.version() != AggregateVersion::V3
+    {
+        return Err(format!(
+            "{} は古いアグリゲート（バージョン {}）なので、今のネットワークには送れません",
+            path.display(),
+            aggregate.version().number()
+        ));
+    }
+    Ok(())
+}
+
+/// 署名したトランザクションを読み、ネットワークと署名を確かめる。読んだバイト列も返す。
+fn read_signed(path: &Path, network: Network) -> Result<(Vec<u8>, Transaction), String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
+    let transaction =
+        Transaction::from_bytes(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    check_sendable(path, &transaction, network)?;
     if transaction.signature == Signature([0; 64]) {
         return Err(format!(
             "{} はまだ署名されていません。先に heika tx sign で署名してください",

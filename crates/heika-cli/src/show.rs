@@ -11,10 +11,10 @@ use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::signature::Signature;
 use heika_transaction::{
-    AccountRestriction, AccountRestrictionFlags, AliasAction, Body, LinkAction, LockHashAlgorithm,
-    Metadata, MosaicFlags, MosaicId, MosaicRestrictionType, MosaicSupplyChangeAction, NamespaceId,
-    NamespaceRegistrationType, Transaction, UnresolvedAddress, UnresolvedMosaic,
-    UnresolvedMosaicId,
+    AccountRestriction, AccountRestrictionFlags, AggregateVersion, AliasAction, Body, LinkAction,
+    LockHashAlgorithm, Metadata, MosaicFlags, MosaicId, MosaicRestrictionType,
+    MosaicSupplyChangeAction, NamespaceId, NamespaceRegistrationType, Transaction,
+    TransactionsHashCalculation, UnresolvedAddress, UnresolvedMosaic, UnresolvedMosaicId,
 };
 use heika_wallet::harvest_request;
 
@@ -138,6 +138,30 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
     );
 
     if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) = body {
+        match aggregate.version() {
+            AggregateVersion::V3 => {}
+            version => description.push(
+                "形式",
+                format!(
+                    "バージョン {} は古く、チェーンにあるものを読むためだけのもの（今は送れない）",
+                    version.number()
+                ),
+            ),
+        }
+        if let AggregateVersion::V1 { .. } = aggregate.version() {
+            description.push(
+                "中のトランザクションのハッシュ",
+                match aggregate.transactions_hash_calculation() {
+                    TransactionsHashCalculation::Correct => "正しい求め方",
+                    TransactionsHashCalculation::Legacy => {
+                        "バージョン 1 で許されていた誤った求め方"
+                    }
+                    TransactionsHashCalculation::Unknown => {
+                        "どの求め方とも合わない（下の中身が署名されたものとは限らない）"
+                    }
+                },
+            );
+        }
         let hash = context
             .network
             .map(|network| transaction.hash(&network.generation_hash_seed()));
@@ -937,6 +961,32 @@ mod tests {
         assert_eq!(value(&good, "期間"), ["2880 ブロック（約 1 日）"]);
         let bad = describe(&transaction(registration(NamespaceId(1 << 63))), epoch());
         assert!(value(&bad, "ID")[0].ends_with("（名前と親から求めた ID と合わない）"));
+    }
+
+    #[test]
+    fn warns_about_old_aggregates() {
+        let aggregate = Aggregate::new(vec![EmbeddedTransaction::new(
+            signer(),
+            NetworkIdentifier::MAINNET,
+            transfer(own_address(), &[], b""),
+        )])
+        .unwrap();
+        let current_transaction = transaction(Body::AggregateComplete(aggregate));
+        let current = describe(&current_transaction, epoch());
+        assert!(value(&current, "形式").is_empty());
+        assert!(value(&current, "中のトランザクションのハッシュ").is_empty());
+
+        // バージョン 1 にして、中のトランザクションのハッシュを壊す
+        let mut bytes = current_transaction.to_bytes();
+        bytes[108] = 1;
+        bytes[128] ^= 1;
+        let old = describe(&Transaction::from_bytes(&bytes).unwrap(), epoch());
+        assert_eq!(old.title, "AggregateComplete（0x4141、バージョン 1）");
+        assert!(value(&old, "形式")[0].contains("今は送れない"));
+        assert_eq!(
+            value(&old, "中のトランザクションのハッシュ"),
+            ["どの求め方とも合わない（下の中身が署名されたものとは限らない）"]
+        );
     }
 
     #[test]

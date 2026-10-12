@@ -437,11 +437,19 @@ fn describe(certificate: &Certificate) -> Result<(), Failure> {
     Ok(())
 }
 
+/// 有効期間は、RFC 5280 のとおり両端を含む。
 fn remaining(certificate: &Certificate, now: SystemTime) -> String {
     let days = |duration: Duration| duration.as_secs() / DAY.as_secs();
-    if let Ok(until) = certificate.not_before().duration_since(now) {
+    if now < certificate.not_before() {
+        let until = certificate
+            .not_before()
+            .duration_since(now)
+            .unwrap_or_default();
         format!("まだ有効ではありません。あと {} 日で有効", days(until))
-    } else if let Ok(since) = now.duration_since(certificate.not_after()) {
+    } else if now > certificate.not_after() {
+        let since = now
+            .duration_since(certificate.not_after())
+            .unwrap_or_default();
         format!("期限切れです。{} 日前に切れました", days(since))
     } else {
         let left = certificate

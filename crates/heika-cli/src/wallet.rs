@@ -103,6 +103,39 @@ pub enum WalletCommand {
         #[command(flatten)]
         expert: ExpertArgs,
     },
+    /// キーストアのパスフレーズを変える。新しいパスフレーズは2回聞いて確かめる
+    ///
+    /// 前のパスフレーズで開ける .bak は消す。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限らない。
+    ChangePassphrase {
+        /// 新しいパスフレーズを、端末から聞く代わりにこのファイルの1行目から読む
+        #[arg(long, value_name = "PATH")]
+        new_passphrase_file: Option<PathBuf>,
+        #[command(flatten)]
+        keystore: KeystoreArgs,
+    },
+    /// アカウントのラベルを変える
+    Rename {
+        #[arg(long, value_name = "LABEL")]
+        label: String,
+        /// 新しいラベル。キーストアの中で重ならないもの
+        #[arg(long, value_name = "LABEL")]
+        new_label: String,
+        #[command(flatten)]
+        keystore: KeystoreArgs,
+    },
+    /// アカウントを消す
+    ///
+    /// ニーモニックや秘密鍵の最後のアカウントは、--with-secret を付けたときだけ、秘密ごと消す。
+    /// 前の中身は .bak に残る。
+    Remove {
+        #[arg(long, value_name = "LABEL")]
+        label: String,
+        /// 最後のアカウントと一緒に、そのニーモニックか秘密鍵も消す
+        #[arg(long)]
+        with_secret: bool,
+        #[command(flatten)]
+        keystore: KeystoreArgs,
+    },
 }
 
 #[derive(Args)]
@@ -196,7 +229,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             if path.exists() {
                 return Err(format!("{} はすでにあります", path.display()).into());
             }
-            let passphrase = keystore.new_passphrase()?;
+            let passphrase = new_passphrase(keystore.passphrase_file.as_deref())?;
             save(&path, &Keystore::new(), &passphrase)?;
             outln!("キーストアを作りました: {}", path.display());
         }
@@ -306,6 +339,90 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 outln!("公開鍵: {}", PublicKey::from_private_key(&private_key));
             }
         }
+        WalletCommand::ChangePassphrase {
+            new_passphrase_file,
+            keystore,
+        } => {
+            let (path, passphrase, store) = keystore.open()?;
+            let next = new_passphrase(new_passphrase_file.as_deref())?;
+            if *next == *passphrase {
+                return Err("前と同じパスフレーズです".to_owned().into());
+            }
+            save(&path, &store, &next)?;
+            outln!("パスフレーズを変えました: {}", path.display());
+            let backup = with_suffix(&path, ".bak");
+            match fs::remove_file(&backup) {
+                Ok(()) => {
+                    sync_directory(directory_of(&path))?;
+                    outln!(
+                        "前のパスフレーズで開ける {} を消しました。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限りません",
+                        backup.display()
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "{} を消せませんでした。前のパスフレーズで開けるので、手で消してください: {error}",
+                        backup.display()
+                    )
+                    .into());
+                }
+            }
+        }
+        WalletCommand::Rename {
+            label,
+            new_label,
+            keystore,
+        } => {
+            let (path, passphrase, mut store) = keystore.open()?;
+            store
+                .rename_account(&label, &new_label)
+                .map_err(|error| error.to_string())?;
+            save(&path, &store, &passphrase)?;
+            outln!("{label} を {new_label} に変えました");
+        }
+        WalletCommand::Remove {
+            label,
+            with_secret,
+            keystore,
+        } => {
+            let (path, passphrase, mut store) = keystore.open()?;
+            let (entry, _) = store
+                .remove_account(&label)
+                .map_err(|error| error.to_string())?;
+            let kind = match store.entries()[entry].secret {
+                Secret::Mnemonic(_) => "ニーモニック",
+                Secret::PrivateKey(_) => "秘密鍵",
+            };
+            let last = store.entries()[entry].accounts.is_empty();
+            if last && !with_secret {
+                return Err(format!(
+                    "{label} は、その{kind}の最後のアカウントです。{kind}ごと消すときは、控えがあるかを確かめてから --with-secret を付けてください"
+                )
+                .into());
+            }
+            if !last && with_secret {
+                return Err(format!(
+                    "{kind}にはほかのアカウントがあるので、--with-secret は付けられません"
+                )
+                .into());
+            }
+            if with_secret {
+                store
+                    .remove_entry(entry)
+                    .map_err(|error| error.to_string())?;
+            }
+            save(&path, &store, &passphrase)?;
+            if with_secret {
+                outln!("{label} を、その{kind}ごと消しました");
+            } else {
+                outln!("{label} を消しました");
+            }
+            outln!(
+                "前の中身は {} に残っています。残したくないときは、このファイルも消してください",
+                with_suffix(&path, ".bak").display()
+            );
+        }
     }
     Ok(())
 }
@@ -386,21 +503,24 @@ impl KeystoreArgs {
             None => terminal::prompt_line(prompt),
         }
     }
+}
 
-    /// 新しいパスフレーズを決める。端末からなら2回聞いて確かめる。
-    fn new_passphrase(&self) -> Result<Zeroizing<String>, String> {
-        let passphrase = self.passphrase("New passphrase: ")?;
-        if passphrase.is_empty() {
-            return Err("パスフレーズを空にはできません".to_owned());
-        }
-        if self.passphrase_file.is_none() {
-            let again = terminal::prompt_line("Repeat passphrase: ")?;
-            if *again != *passphrase {
-                return Err("2回のパスフレーズが違います".to_owned());
-            }
-        }
-        Ok(passphrase)
+/// 新しいパスフレーズを決める。`file` があればその1行目から読み、なければ端末から2回聞いて確かめる。
+fn new_passphrase(file: Option<&Path>) -> Result<Zeroizing<String>, String> {
+    let passphrase = match file {
+        Some(path) => read_passphrase_file(path)?,
+        None => terminal::prompt_line("New passphrase: ")?,
+    };
+    if passphrase.is_empty() {
+        return Err("パスフレーズを空にはできません".to_owned());
     }
+    if file.is_none() {
+        let again = terminal::prompt_line("Repeat passphrase: ")?;
+        if *again != *passphrase {
+            return Err("2回のパスフレーズが違います".to_owned());
+        }
+    }
+    Ok(passphrase)
 }
 
 impl ExpertArgs {
@@ -509,10 +629,7 @@ fn default_path() -> Result<PathBuf, String> {
 /// 同じフォルダーの一時ファイルに書いて同期し、読み戻して同じパスフレーズで開けることを確かめてから、
 /// 前のファイルを `.bak` に写し、一時ファイルを本来の名前に置き換えて、フォルダーも同期する。
 fn save(path: &Path, keystore: &Keystore, passphrase: &str) -> Result<(), String> {
-    let directory = path
-        .parent()
-        .filter(|directory| !directory.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let directory = directory_of(path);
     create_private_directory(directory)?;
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     let sealed = keystore.seal(&mut rng, passphrase.as_bytes(), age::DEFAULT_WORK_FACTOR);
@@ -552,6 +669,13 @@ fn save(path: &Path, keystore: &Keystore, passphrase: &str) -> Result<(), String
     fs::rename(&temporary, path)
         .map_err(|error| format!("{} に置き換えられませんでした: {error}", path.display()))?;
     sync_directory(directory)
+}
+
+/// キーストアを置くフォルダー。ファイルの名前だけなら、今のフォルダー
+fn directory_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {

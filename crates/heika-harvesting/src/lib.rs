@@ -1,6 +1,7 @@
 //! Symbol のノードへの委任ハーベスト。合意形成には関わらない、ノードの運営のためのもの。
 
 pub mod delegation;
+pub mod harvesters_dat;
 
 #[cfg(test)]
 mod testing {

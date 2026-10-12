@@ -41,7 +41,7 @@ enum Command {
     /// --delegate を付けると、リモートアカウントと VRF の鍵をその場で作って紐づけ、委任先のノードに委任の要求を送る。
     /// 作った秘密鍵は委任の要求に暗号化して入れるだけで、どこにも保存しない。前の委任先が知っている鍵を使い回さないためである。
     /// 自分のノードでハーベストするなら、--link-remote と --link-vrf に、ノードに置く鍵の公開鍵を渡す。
-    Harvesting(harvesting::HarvestingArgs),
+    Harvesting(Box<harvesting::HarvestingArgs>),
     /// ノードに TLS でつないで調べる
     #[command(subcommand)]
     Node(node::NodeCommand),
@@ -223,7 +223,7 @@ mod voting;
 fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Cert(command) => cert::run(command)?,
-        Command::Harvesting(args) => harvesting::run(args)?,
+        Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Tx(command) => tx::run(command)?,

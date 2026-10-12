@@ -28,7 +28,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 
 - ✅DONE: 近くて速いノードを探す（ノードと TLS でつなぎ、接続にかかる時間、高さ、ブロックの読み出しの速さを測る。REST のないノードも調べられる）
 - ✅DONE: 見つけた速いノードを、catapult の peers-p2p.json の形式で書く
-- 📝TODO: 測った結果を JSON や CSV で出す
+- ✅DONE: 測った結果を JSON で出す
 
 ### ライブラリのみ
 
@@ -103,6 +103,7 @@ heika cert check --warn-days 30 --connect <ホスト>:<ポート> --client-cert 
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --delegate <ノードの公開鍵> --out harvesting.bin
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-remote <公開鍵> --link-vrf <公開鍵> --out harvesting.bin
 heika tx show harvesting.bin
+heika tx show --json harvesting.bin
 heika tx sign --network mainnet --out harvesting.signed.bin harvesting.bin < main.key
 heika tx cosign --network mainnet --out harvesting.cosigned.bin harvesting.signed.bin < cosigner.key
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem harvesting.signed.bin < node.key.pem
@@ -110,6 +111,7 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 heika node delegations --connect <自分のノード>:<ポート> --client-cert node.full.crt.pem --from-height <高さ> < node.key.pem
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json < node.key.pem
+heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --json < node.key.pem > nodes.json
 
 heika legal third-party
 heika legal source --out heika-source.zip
@@ -121,9 +123,9 @@ DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の�
 
 `heika cert check` は、証明書のファイル、証明書のフォルダー（CA とノードの証明書）、`--connect` のノードが実際に出している証明書について、期限までの日数を1行ずつ出す。終了コードは `openssl x509 -checkend` に合わせていて、期限まで `--warn-days` 日（既定は 30 日）を切ったもの、切れたもの、まだ有効でないものがあれば 1、確かめられないものがあれば 2、どれもなければ 0 になる。heika のほかのコマンドはエラーを 1 で返すので、ここだけ違う。定期実行は cron、systemd の timer、Kubernetes の CronJob など、使っている仕組みから呼ぶ。`--connect` は、ファイルを更新したのにノードを再起動していない、という状態も見つけられる。
 
-`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。署名する前に、`heika tx show` で中身を確かめられる。`heika tx show` は秘密鍵を使わず、バイト列そのものでも16進のテキストでも読む。署名者とアドレス、手数料と期限（UTC の日時）、中のトランザクションの1件ずつを出し、署名があれば正しいかも確かめる。メッセージの文字列は、端末の表示を書き換えられないように制御文字をエスケープする。通貨以外のモザイクの量は、可分性がわからないので最小単位のまま出す。`heika tx sign` も、署名したあとに同じ中身を出す。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
+`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。署名する前に、`heika tx show` で中身を確かめられる。`heika tx show` は秘密鍵を使わず、バイト列そのものでも16進のテキストでも読む。署名者とアドレス、手数料と期限（UTC の日時）、中のトランザクションの1件ずつを出し、署名があれば正しいかも確かめる。メッセージの文字列は、端末の表示を書き換えられないように制御文字をエスケープする。通貨以外のモザイクの量は、可分性がわからないので最小単位のまま出す。`--json` を付けると、表示と同じ項目を JSON で出す。`heika tx sign` も、署名したあとに同じ中身を出す。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
 
-`heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
+`heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。`--json` を付けると、表の代わりに、測った結果と測れなかったノードを JSON で標準出力に出す。途中の経過は標準エラーに出すので、標準出力をそのままファイルに書ける。時間はミリ秒、遅れはブロックで、公開鍵はノードが名乗ったものと、TLS で確かめた CA のものの両方を出す。
 
 `--peers-json` を付けると、測ったノードのうち、Peer のロールがあって遅れが 5 ブロック以下のノードを、読み出しの速い順に `--peers-count` 台（既定は 10 台）選び、catapult の `peers-p2p.json` の形式で書く。公開鍵は、ノードが名乗ったものではなく、TLS で確かめた CA の公開鍵を書く。自分のノードの証明書で名乗っていれば、自分のノードは除く。すでにあるファイルは上書きしないので、ノードの `resources/peers-p2p.json` には、中身を確かめてから置き換える。
 

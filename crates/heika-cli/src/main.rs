@@ -2,7 +2,7 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,9 @@ enum Command {
     /// ノードに TLS でつないで調べる
     #[command(subcommand)]
     Node(node::NodeCommand),
+    /// ニーモニックや秘密鍵を、パスフレーズで暗号化したキーストアにしまって使う
+    #[command(subcommand)]
+    Wallet(wallet::WalletCommand),
     /// トランザクション
     #[command(subcommand)]
     Tx(tx::TxCommand),
@@ -216,8 +219,10 @@ mod json;
 mod legal;
 mod node;
 mod show;
+mod terminal;
 mod tx;
 mod voting;
+mod wallet;
 
 fn run(command: Command) -> Result<(), Failure> {
     match command {
@@ -225,6 +230,7 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
         Command::Node(command) => node::run(command)?,
+        Command::Wallet(command) => wallet::run(command)?,
         Command::Tx(command) => tx::run(command)?,
         Command::Key(KeyCommand::Address {
             public_key,
@@ -326,7 +332,17 @@ where
 {
     let stdin = io::stdin();
     let echo_off = if stdin.is_terminal() {
-        Some(EchoOff::new(&stdin, name, example)?)
+        if cfg!(not(any(unix, windows))) {
+            return Err(format!(
+                "{name}はリダイレクトかパイプで渡してください（例: < {example}）"
+            ));
+        }
+        let echo_off = terminal::EchoOff::stdin(&stdin)?;
+        eprintln!(
+            "{name}を貼り付けて、{} で終えてください。打った文字は画面に出ません（やめるときは、何も入れずに同じ操作）",
+            terminal::END_OF_INPUT
+        );
+        Some(echo_off)
     } else {
         None
     };
@@ -353,117 +369,6 @@ where
     let text = str::from_utf8(&buffer[..length])
         .map_err(|_| format!("{name}に UTF-8 として読めないバイトが含まれています"))?;
     text.trim().parse().map_err(|error| format!("{error}"))
-}
-
-/// 端末から秘密を読むあいだ、打った文字を画面に出さないようにする。drop すると元に戻す。
-///
-/// ISIG も切って、Ctrl-C で落ちないようにする。落ちると、文字を出さないままの端末が残るためである。
-/// Ctrl-C は ^C の文字として入るので、そのまま終えれば読めない入力として弾かれる。
-#[cfg(unix)]
-struct EchoOff {
-    fd: RawFd,
-    original: libc::termios,
-}
-
-#[cfg(unix)]
-impl EchoOff {
-    fn new(stdin: &io::Stdin, name: &str, _example: &str) -> Result<Self, String> {
-        let fd = stdin.as_raw_fd();
-        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: fd は開いている標準入力で、tcgetattr は成功したときに original を埋める
-        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
-            return Err(format!(
-                "端末の設定を読めませんでした: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: tcgetattr が成功したので埋まっている
-        let original = unsafe { original.assume_init() };
-        let mut hidden = original;
-        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ISIG);
-        // SAFETY: hidden は tcgetattr で読んだものを書き換えた、有効な termios
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
-            return Err(format!(
-                "端末の設定を変えられませんでした: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        eprintln!(
-            "{name}を貼り付けて、改行してから Ctrl-D で終えてください。打った文字は画面に出ません（やめるときは、何も入れずに Ctrl-D）"
-        );
-        Ok(Self { fd, original })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for EchoOff {
-    fn drop(&mut self) {
-        // SAFETY: original は new で tcgetattr が読んだ、有効な termios
-        unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) };
-    }
-}
-
-/// Windows のコンソールから秘密を読むあいだ、打った文字を画面に出さないようにする。drop すると元に戻す。
-///
-/// Unix で ISIG を切るのと同じく、ENABLE_PROCESSED_INPUT も切って Ctrl-C で落ちないようにする。
-/// Ctrl-C は文字として入るので、そのまま終えれば読めない入力として弾かれる。
-#[cfg(windows)]
-struct EchoOff {
-    handle: windows_sys::Win32::Foundation::HANDLE,
-    original: windows_sys::Win32::System::Console::CONSOLE_MODE,
-}
-
-#[cfg(windows)]
-impl EchoOff {
-    fn new(stdin: &io::Stdin, name: &str, _example: &str) -> Result<Self, String> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::Console::{
-            ENABLE_ECHO_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode, SetConsoleMode,
-        };
-
-        let handle = stdin.as_raw_handle();
-        let mut original = 0;
-        // SAFETY: handle は開いている標準入力で、GetConsoleMode は成功したときに original を埋める
-        if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
-            return Err(format!(
-                "コンソールの設定を読めませんでした: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        let hidden = original & !(ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
-        // SAFETY: handle は GetConsoleMode が読めたコンソールの入力
-        if unsafe { SetConsoleMode(handle, hidden) } == 0 {
-            return Err(format!(
-                "コンソールの設定を変えられませんでした: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        eprintln!(
-            "{name}を貼り付けて、Enter のあと Ctrl-Z と Enter で終えてください。打った文字は画面に出ません（やめるときは、何も入れずに Ctrl-Z と Enter）"
-        );
-        Ok(Self { handle, original })
-    }
-}
-
-#[cfg(windows)]
-impl Drop for EchoOff {
-    fn drop(&mut self) {
-        // SAFETY: original は new で GetConsoleMode が読んだ、同じハンドルのモード
-        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(self.handle, self.original) };
-    }
-}
-
-/// Unix と Windows のほかでは文字を出さずに読む方法を用意していないので、端末からは受け付けない。
-#[cfg(not(any(unix, windows)))]
-struct EchoOff;
-
-#[cfg(not(any(unix, windows)))]
-impl EchoOff {
-    fn new(_stdin: &io::Stdin, name: &str, example: &str) -> Result<Self, String> {
-        Err(format!(
-            "{name}はリダイレクトかパイプで渡してください（例: < {example}）"
-        ))
-    }
 }
 
 /// `io::stdin()` はプロセス全体で共有するバッファを通して読み、その中身は消せないので、

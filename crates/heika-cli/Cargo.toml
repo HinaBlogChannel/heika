@@ -14,14 +14,18 @@ path = "src/main.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 der = "0.8.2"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
-heika-cert = { version = "0.2.0", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
-heika-core = { version = "0.2.0", path = "../heika-core" }
-heika-p2p = { version = "0.2.0", path = "../heika-p2p" }
-heika-tls = { version = "0.2.0", path = "../heika-tls" }
-heika-transaction = { version = "0.2.0", path = "../heika-transaction" }
-heika-wallet = { version = "0.2.0", path = "../heika-wallet" }
+heika-cert = { version = "0.3.0", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
+heika-core = { version = "0.3.0", path = "../heika-core" }
+heika-p2p = { version = "0.3.0", path = "../heika-p2p" }
+heika-tls = { version = "0.3.0", path = "../heika-tls" }
+heika-transaction = { version = "0.3.0", path = "../heika-transaction" }
+heika-wallet = { version = "0.3.0", path = "../heika-wallet" }
 rand_core = "0.10.1"
 zeroize = "1.9.1"
+
+[target.'cfg(unix)'.dependencies]
+# 端末から秘密を読むあいだ、termios で打った文字を画面に出さないようにする
+libc = "0.2.190"
 
 [dev-dependencies]
 # 自前で書く peers-p2p.json を、別の実装で読み戻して確かめる

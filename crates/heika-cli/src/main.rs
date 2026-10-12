@@ -3,7 +3,7 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Read, Write};
 #[cfg(unix)]
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -304,18 +304,19 @@ impl FromStr for PublicKeyPem {
 /// 標準入力から秘密鍵やニーモニックを読む。前後の空白や改行は無視する。
 ///
 /// 引数で受け取るとシェルの履歴や `/proc/<pid>/cmdline` に残るので、標準入力だけから読む。
-/// 端末から打つと画面に出てしまうので、リダイレクトかパイプで渡されたときだけ受け付ける。
+/// 端末からは、Unix では打った文字を画面に出さずに読む。Unix 以外では画面に出てしまうので、
+/// リダイレクトかパイプで渡されたときだけ受け付ける。
 fn read_secret<T>(name: &str, example: &str) -> Result<T, String>
 where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
     let stdin = io::stdin();
-    if stdin.is_terminal() {
-        return Err(format!(
-            "{name}はリダイレクトかパイプで渡してください（例: < {example}）"
-        ));
-    }
+    let echo_off = if stdin.is_terminal() {
+        Some(EchoOff::new(&stdin, name, example)?)
+    } else {
+        None
+    };
     let mut input =
         unbuffered(stdin).map_err(|error| format!("標準入力を開けませんでした: {error}"))?;
     let mut buffer = Zeroizing::new([0; 1024]);
@@ -331,9 +332,75 @@ where
             Err(error) => return Err(format!("標準入力を読めませんでした: {error}")),
         }
     }
+    if echo_off.is_some() {
+        drop(echo_off);
+        // 最後に打った改行も画面に出ていないので、次の出力が同じ行に続かないようにする
+        eprintln!();
+    }
     let text = str::from_utf8(&buffer[..length])
         .map_err(|_| format!("{name}に UTF-8 として読めないバイトが含まれています"))?;
     text.trim().parse().map_err(|error| format!("{error}"))
+}
+
+/// 端末から秘密を読むあいだ、打った文字を画面に出さないようにする。drop すると元に戻す。
+///
+/// ISIG も切って、Ctrl-C で落ちないようにする。落ちると、文字を出さないままの端末が残るためである。
+/// Ctrl-C は ^C の文字として入るので、そのまま終えれば読めない入力として弾かれる。
+#[cfg(unix)]
+struct EchoOff {
+    fd: RawFd,
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl EchoOff {
+    fn new(stdin: &io::Stdin, name: &str, _example: &str) -> Result<Self, String> {
+        let fd = stdin.as_raw_fd();
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: fd は開いている標準入力で、tcgetattr は成功したときに original を埋める
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "端末の設定を読めませんでした: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: tcgetattr が成功したので埋まっている
+        let original = unsafe { original.assume_init() };
+        let mut hidden = original;
+        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ISIG);
+        // SAFETY: hidden は tcgetattr で読んだものを書き換えた、有効な termios
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+            return Err(format!(
+                "端末の設定を変えられませんでした: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        eprintln!(
+            "{name}を貼り付けて、改行してから Ctrl-D で終えてください。打った文字は画面に出ません（やめるときは、何も入れずに Ctrl-D）"
+        );
+        Ok(Self { fd, original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        // SAFETY: original は new で tcgetattr が読んだ、有効な termios
+        unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) };
+    }
+}
+
+/// Unix 以外では文字を出さずに読む方法を用意していないので、端末からは受け付けない。
+#[cfg(not(unix))]
+struct EchoOff;
+
+#[cfg(not(unix))]
+impl EchoOff {
+    fn new(_stdin: &io::Stdin, name: &str, example: &str) -> Result<Self, String> {
+        Err(format!(
+            "{name}はリダイレクトかパイプで渡してください（例: < {example}）"
+        ))
+    }
 }
 
 /// `io::stdin()` はプロセス全体で共有するバッファを通して読み、その中身は消せないので、

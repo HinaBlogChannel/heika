@@ -122,16 +122,25 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 }
             }
 
+            // 遅れは並べ替える前の順で計算するので、ノードと組にしてから並べ替える
             let tips = expected_heights(&measurements);
-            measurements.sort_by_key(|m| m.pull);
+            let mut rows: Vec<(Measurement, u64)> = measurements
+                .into_iter()
+                .zip(tips)
+                .map(|(m, tip)| {
+                    let lag = tip.saturating_sub(m.height);
+                    (m, lag)
+                })
+                .collect();
+            rows.sort_by_key(|(m, _)| m.pull);
             outln!();
             outln!("読み出し  接続    遅れ  バージョン  ロール            ノード");
-            for (m, tip) in measurements.iter().zip(&tips) {
+            for (m, lag) in &rows {
                 outln!(
                     "{:>6}ms {:>5}ms {:>5}  {:<10}  {:<16}  {} {}",
                     m.pull.as_millis(),
                     m.connect.as_millis(),
-                    tip.saturating_sub(m.height),
+                    lag,
                     m.node.version.to_string(),
                     m.node.roles.to_string(),
                     printable(&m.address),
@@ -141,7 +150,7 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             outln!();
             outln!(
                 "測れたノード: {}、測れなかったノード: {failures}。読み出しは {PROBE_BLOCKS} ブロックを読むのにかかった時間、遅れは、測った時刻をブロックの目標間隔でそろえたうえでの、一番進んでいるノードとの高さの差",
-                measurements.len()
+                rows.len()
             );
         }
     }

@@ -56,6 +56,15 @@ cargo test -p heika-vectors --test mainnet -- --include-ignored
 
 テストは crate のフォルダーで動くので、ファイルは絶対パスで渡す。
 
+## age のテストベクター
+
+キーストアを書く age 形式（パスフレーズのもの）は、C2SP の CCTV にある age の公式テストベクターで照合する。
+
+- `crates/heika-vectors/testdata/age/` に、heika が読む形のもの（78件）を写して置いている。ライセンスは 0BSD、CC0、Unlicense から選べて、帰属表示はいらない。写したコミットと選び方は、そのフォルダーの README.md にある。
+- パスフレーズのものはパスフレーズで開く。ヘッダー、HMAC、本文（STREAM）の形を確かめるものは鍵を X25519 で包んであるので、ベクターに書いてあるファイル鍵を直接使う。どちらも、成功したときの平文の SHA-256 と、失敗したときにどの段階（ヘッダー、パスフレーズ、HMAC、本文）で失敗するかを照合する。
+- ネットワークを使わないので `#[ignore]` は付けていない。
+- 書いたものが別の実装で開けることは、rage（pyrage）と両方向で一度手で確かめた。
+
 ## SDK で作ったベクター
 
 公式ベクターにはトランザクションの正しい署名とハッシュがないので、公式の Python SDK で署名したものを `crates/heika-vectors/testdata/sdk-transactions.json` に置いて照合する。

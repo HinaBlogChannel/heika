@@ -21,10 +21,10 @@ use std::time::Duration;
 use heika_block::{Block, BlockType};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
-use heika_core::network::NetworkIdentifier;
+use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_p2p::Node;
 use heika_tls::Identity;
-use heika_transaction::scan;
+use heika_transaction::{Body, Transaction, scan};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -34,10 +34,10 @@ const RANGES: [(&str, u64, u32); 4] = [
     ("Nemesis とその次", 1, 3),
     // 最初の Importance ブロック（importanceGrouping = 720）の前後
     ("最初の Importance ブロック", 719, 3),
-    // アグリゲートがバージョン 2 になったフォーク（strictAggregateTransactionHash、高さ 1,690,500）の直後
-    ("バージョン 2 のフォーク", 1_690_500, 10),
-    // アグリゲートがバージョン 3 になったフォーク（uniqueAggregateTransactionHash、高さ 4,759,100）の直後
-    ("バージョン 3 のフォーク", 4_759_100, 12),
+    // アグリゲートがバージョン 2 になったフォーク（strictAggregateTransactionHash、高さ 1,690,500）の前後
+    ("バージョン 2 のフォーク", 1_690_490, 20),
+    // アグリゲートがバージョン 3 になったフォーク（uniqueAggregateTransactionHash、高さ 4,759,100）の前後
+    ("バージョン 3 のフォーク", 4_759_090, 22),
 ];
 
 fn var(name: &str) -> String {
@@ -75,6 +75,7 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
         return;
     };
     let mut types = BTreeMap::new();
+    let mut aggregates = BTreeMap::new();
     for (name, start, count) in RANGES {
         let blocks = node
             .pull_blocks(start, count, 16 * 1024 * 1024)
@@ -118,6 +119,30 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
                 }) {
                     *types.entry(scanned.body.transaction_type()).or_insert(0) += 1;
                 }
+                // 丸ごと読んでも同じバイト列に書き戻せて、署名と連署はチェーンが認めたとおり正しいはず。
+                // 古いアグリゲートの署名の範囲と、中のトランザクションのハッシュの決まりもここで確かめる
+                let decoded = Transaction::from_bytes(transaction).unwrap_or_else(|error| {
+                    panic!("{name}: 高さ {height} のトランザクション: {error}")
+                });
+                assert_eq!(decoded.to_bytes(), transaction, "{name}: {height}");
+                assert!(
+                    decoded.verify(&GenerationHashSeed::MAINNET),
+                    "{name}: 高さ {height} のトランザクションの署名"
+                );
+                assert!(
+                    decoded.verify_cosignatures(&GenerationHashSeed::MAINNET),
+                    "{name}: 高さ {height} の連署"
+                );
+                if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) =
+                    &decoded.body
+                {
+                    let key = format!(
+                        "バージョン {}（{:?}）",
+                        aggregate.version().number(),
+                        aggregate.transactions_hash_calculation()
+                    );
+                    *aggregates.entry(key).or_insert(0) += 1;
+                }
             }
             if index > 0 {
                 assert_eq!(
@@ -134,5 +159,10 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
         .map(|(transaction_type, count)| format!("0x{transaction_type:04X}: {count}"))
         .collect();
     eprintln!("読んだトランザクションの種類: {}", types.join(", "));
+    let aggregates: Vec<_> = aggregates
+        .iter()
+        .map(|(version, count)| format!("{version}: {count}"))
+        .collect();
+    eprintln!("読んだアグリゲート: {}", aggregates.join(", "));
     assert!(types.len() > 1);
 }

@@ -26,8 +26,8 @@ struct Vector {
     descriptor: Value,
 }
 
-/// 照合する種類。catbuffer の25種類で、アグリゲートは heika-transaction が書くバージョン 3 だけ。
-/// それより前のアグリゲートは、走査（`scan`）だけが読む。
+/// 組んで照合する種類。catbuffer の25種類で、アグリゲートは heika-transaction が組めるバージョン 3 だけ。
+/// それより前のアグリゲートは、読んで書き戻すところを [`reads_old_aggregates`] で照合する。
 const SCHEMAS: [&str; 25] = [
     "AccountKeyLinkTransactionV1",
     "NodeKeyLinkTransactionV1",
@@ -505,6 +505,47 @@ fn reads_and_writes_transactions() {
         }
         eprintln!("{schema}: {} vectors checked", vectors.len());
     }
+}
+
+#[test]
+#[ignore = "fetches the official vectors from GitHub"]
+fn reads_old_aggregates() {
+    let vectors: Vec<Vector> = heika_vectors::fetch("models/transactions.json");
+    let mut count = 0;
+    for vector in &vectors {
+        let version = match vector.schema_name.as_str() {
+            "AggregateCompleteTransactionV1" | "AggregateBondedTransactionV1" => 1,
+            "AggregateCompleteTransactionV2" | "AggregateBondedTransactionV2" => 2,
+            _ => continue,
+        };
+        let descriptor = &vector.descriptor;
+        let payload = from_hex(&vector.payload);
+        let transaction = Transaction::from_bytes(&payload)
+            .unwrap_or_else(|error| panic!("{}: {error}", vector.test_name));
+        assert_eq!(transaction.to_bytes(), payload, "{}", vector.test_name);
+        let (Body::AggregateComplete(read) | Body::AggregateBonded(read)) = &transaction.body
+        else {
+            panic!("{}: not an aggregate", vector.test_name);
+        };
+        assert_eq!(read.version().number(), version, "{}", vector.test_name);
+        // 形はバージョン 3 と同じなので、バージョン 3 として組んだものと中身が一致する
+        let expected = aggregate(descriptor);
+        assert_eq!(
+            read.transactions(),
+            expected.transactions(),
+            "{}",
+            vector.test_name
+        );
+        assert_eq!(
+            read.cosignatures(),
+            expected.cosignatures(),
+            "{}",
+            vector.test_name
+        );
+        count += 1;
+    }
+    assert!(count > 0);
+    eprintln!("{count} old aggregates checked");
 }
 
 #[test]

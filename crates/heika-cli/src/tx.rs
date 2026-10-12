@@ -6,11 +6,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use clap::{Args, Subcommand};
 use heika_core::key::PublicKey;
-use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
+use heika_core::network::NetworkIdentifier;
 use heika_core::signature::Signature;
 use heika_transaction::{
     Aggregate, AggregateVersion, Body, Cosignature, EmbeddedTransaction, Transaction,
@@ -23,10 +23,9 @@ use crate::cert::{AnyPrivateKey, CONNECT_TIMEOUT, read_chain};
 use crate::{Failure, Network, read_secret, show};
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
-/// ネットワークの設定 maxTransactionLifetime。メインネットもテストネットも 6h
+/// `--deadline-hours` の上限。引数を読むときにはネットワークがまだわからないので、どのネットワークの
+/// maxTransactionLifetime も超えない値を定数で持つ
 const MAX_TRANSACTION_LIFETIME_HOURS: u64 = 6;
-/// ネットワークの設定 maxCosignaturesPerAggregate。外側の署名も数える。メインネットもテストネットも 25
-const MAX_COSIGNATURES_PER_AGGREGATE: usize = 25;
 /// catapult の `ionet::PacketType::Push_Transactions`
 const PUSH_TRANSACTIONS: u32 = 9;
 
@@ -140,26 +139,6 @@ impl Unsigned {
     }
 }
 
-impl Network {
-    pub(crate) fn generation_hash_seed(self) -> GenerationHashSeed {
-        match self {
-            Self::Mainnet => GenerationHashSeed::MAINNET,
-            Self::Testnet => GenerationHashSeed::TESTNET,
-        }
-    }
-
-    /// ネットワークのエポックの始まり。catapult の設定では epochAdjustment と呼ばれる。
-    pub(crate) fn epoch(self) -> SystemTime {
-        let seconds = match self {
-            // 2021-03-16T00:06:25Z
-            Self::Mainnet => 1_615_853_185,
-            // 2022-10-31T21:07:47Z
-            Self::Testnet => 1_667_250_467,
-        };
-        UNIX_EPOCH + Duration::from_secs(seconds)
-    }
-}
-
 pub fn run(command: TxCommand) -> Result<(), Failure> {
     match command {
         TxCommand::Show { transaction, json } => {
@@ -192,7 +171,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .into());
             }
             let AnyPrivateKey(private_key) = read_secret("秘密鍵", "main.key")?;
-            let seed = network.generation_hash_seed();
+            let seed = network.parameters().generation_hash_seed;
             transaction
                 .sign(&private_key, &seed)
                 .map_err(|error| error.to_string())?;
@@ -215,16 +194,17 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 )
                 .into());
             }
-            if cosignatures(&transaction).len() + 1 >= MAX_COSIGNATURES_PER_AGGREGATE {
+            let max_cosignatures = network.parameters().max_cosignatures_per_aggregate;
+            if cosignatures(&transaction).len() + 1 >= max_cosignatures {
                 return Err(format!(
-                    "{} はもう署名と連署が {MAX_COSIGNATURES_PER_AGGREGATE} 件あります",
+                    "{} はもう署名と連署が {max_cosignatures} 件あります",
                     signed.display()
                 )
                 .into());
             }
             let AnyPrivateKey(private_key) = read_secret("秘密鍵", "cosigner.key")?;
             let cosigner = PublicKey::from_private_key(&private_key);
-            let seed = network.generation_hash_seed();
+            let seed = network.parameters().generation_hash_seed;
             transaction
                 .cosign(&private_key, &seed)
                 .map_err(|error| error.to_string())?;
@@ -252,7 +232,7 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                     format!("{} は AggregateBonded なので送れません", signed.display()).into(),
                 );
             }
-            let seed = network.generation_hash_seed();
+            let seed = network.parameters().generation_hash_seed;
             if !transaction.verify_cosignatures(&seed) {
                 return Err(format!("{} の連署が正しくありません", signed.display()).into());
             }
@@ -260,11 +240,13 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             if transaction.deadline <= network_milliseconds(network, now)? {
                 return Err(format!("{} は期限が切れています", signed.display()).into());
             }
-            let latest = now + MAX_TRANSACTION_LIFETIME_HOURS as u32 * HOUR;
+            let lifetime = network.parameters().max_transaction_lifetime;
+            let latest = now + lifetime;
             if transaction.deadline > network_milliseconds(network, latest)? {
                 return Err(format!(
-                    "{} は期限が {MAX_TRANSACTION_LIFETIME_HOURS} 時間より先です",
-                    signed.display()
+                    "{} は期限が {} 時間より先です",
+                    signed.display(),
+                    lifetime.as_secs() / 3600
                 )
                 .into());
             }
@@ -385,7 +367,7 @@ fn read_signed(path: &Path, network: Network) -> Result<(Vec<u8>, Transaction), 
             path.display()
         ));
     }
-    if !transaction.verify(&network.generation_hash_seed()) {
+    if !transaction.verify(&network.parameters().generation_hash_seed) {
         return Err(format!("{} の署名が正しくありません", path.display()));
     }
     Ok((bytes, transaction))
@@ -434,7 +416,7 @@ fn show_missing_cosigners(transaction: &Transaction) -> Result<(), Failure> {
 /// ネットワークのエポックからのミリ秒。
 fn network_milliseconds(network: Network, time: SystemTime) -> Result<u64, String> {
     let elapsed = time
-        .duration_since(network.epoch())
+        .duration_since(network.parameters().epoch())
         .map_err(|_| "時計がネットワークのエポックより前になっています".to_owned())?;
     u64::try_from(elapsed.as_millis()).map_err(|_| "時刻が大きすぎます".to_owned())
 }
@@ -452,6 +434,16 @@ pub fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_deadline_limit_fits_every_network() {
+        for network in [Network::Mainnet, Network::Testnet] {
+            assert!(
+                MAX_TRANSACTION_LIFETIME_HOURS as u32 * HOUR
+                    <= network.parameters().max_transaction_lifetime
+            );
+        }
+    }
 
     #[test]
     fn reads_hex_text_or_raw_bytes() {

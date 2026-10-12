@@ -10,9 +10,11 @@ use heika_core::signature::Signature;
 use sha3::{Digest, Sha3_256};
 
 mod aggregate;
+mod scan;
 mod transfer;
 
 pub use aggregate::{Aggregate, Cosignature, EmbeddedTransaction, NestedAggregate};
+pub use scan::{Content, ScanError, Scanned, scan};
 pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};
 
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。

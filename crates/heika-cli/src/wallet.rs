@@ -13,10 +13,11 @@ use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
 use heika_wallet::age;
+use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::keystore::{Account, Entry, Keystore, KeystoreError, Secret, check_label};
 use zeroize::Zeroizing;
 
-use crate::{Failure, Network, create_secret_file, read_secret, terminal, write_secret};
+use crate::{Failure, Network, Words, create_secret_file, read_secret, terminal, write_secret};
 
 /// キーストアのファイルの名前
 const FILE_NAME: &str = "keystore.age";
@@ -25,6 +26,29 @@ const FILE_NAME: &str = "keystore.age";
 pub enum WalletCommand {
     /// 空のキーストアを作る。パスフレーズは2回聞いて確かめる
     Init {
+        #[command(flatten)]
+        keystore: KeystoreArgs,
+    },
+    /// 新しいニーモニックか秘密鍵を作って、最初のアカウントと一緒にしまう
+    ///
+    /// 作った秘密は、ファイルにも画面にも出さない。控えるときは、export で書き出すか、
+    /// age -d でキーストアを開いて見る。キーストアはバックアップの代わりにならない。
+    Add {
+        /// ニーモニックを作る
+        #[arg(
+            long,
+            conflicts_with = "private_key",
+            required_unless_present = "private_key"
+        )]
+        mnemonic: bool,
+        /// 秘密鍵を作る
+        #[arg(long)]
+        private_key: bool,
+        /// ニーモニックの単語の数
+        #[arg(long, value_enum, default_value_t = Words::W24, conflicts_with = "private_key")]
+        words: Words,
+        #[command(flatten)]
+        account: AccountArgs,
         #[command(flatten)]
         keystore: KeystoreArgs,
     },
@@ -176,6 +200,28 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             save(&path, &Keystore::new(), &passphrase)?;
             outln!("キーストアを作りました: {}", path.display());
         }
+        WalletCommand::Add {
+            mnemonic,
+            private_key: _,
+            words,
+            account,
+            keystore,
+        } => {
+            let secret = if mnemonic {
+                Secret::Mnemonic(
+                    Mnemonic::generate(WordCount::from(words))
+                        .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?,
+                )
+            } else {
+                Secret::PrivateKey(
+                    PrivateKey::generate()
+                        .map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?,
+                )
+            };
+            let account = account.account(&secret)?;
+            let (path, passphrase, store) = keystore.open()?;
+            add_entry(&path, &passphrase, store, secret, account)?;
+        }
         WalletCommand::Import {
             mnemonic,
             private_key: _,
@@ -189,20 +235,8 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 Secret::PrivateKey(private_key)
             };
             let account = account.account(&secret)?;
-            let (path, passphrase, mut store) = keystore.open()?;
-            store
-                .add(Entry {
-                    secret,
-                    accounts: vec![account.clone()],
-                })
-                .map_err(|error| error.to_string())?;
-            save(&path, &store, &passphrase)?;
-            describe(&store, &account.label, "")?;
-            if mnemonic {
-                outln!(
-                    "キーストアはバックアップの代わりになりません。ニーモニックは紙にも控えておいてください"
-                );
-            }
+            let (path, passphrase, store) = keystore.open()?;
+            add_entry(&path, &passphrase, store, secret, account)?;
         }
         WalletCommand::Derive {
             from,
@@ -272,6 +306,31 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 outln!("公開鍵: {}", PublicKey::from_private_key(&private_key));
             }
         }
+    }
+    Ok(())
+}
+
+/// 秘密を最初のアカウントと一緒にキーストアに足して書く
+fn add_entry(
+    path: &Path,
+    passphrase: &str,
+    mut store: Keystore,
+    secret: Secret,
+    account: Account,
+) -> Result<(), Failure> {
+    let is_mnemonic = matches!(secret, Secret::Mnemonic(_));
+    store
+        .add(Entry {
+            secret,
+            accounts: vec![account.clone()],
+        })
+        .map_err(|error| error.to_string())?;
+    save(path, &store, passphrase)?;
+    describe(&store, &account.label, "")?;
+    if is_mnemonic {
+        outln!(
+            "キーストアはバックアップの代わりになりません。ニーモニックは heika wallet export --mnemonic で書き出すか、age -d で開いて、紙にも控えておいてください"
+        );
     }
     Ok(())
 }
@@ -525,8 +584,6 @@ fn sync_directory(directory: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use heika_wallet::bip39::Mnemonic;
-
     use super::*;
 
     #[test]

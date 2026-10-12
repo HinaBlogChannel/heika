@@ -206,6 +206,7 @@ mod delegations;
 mod harvesting;
 mod legal;
 mod node;
+mod show;
 mod tx;
 
 fn run(command: Command) -> Result<(), Failure> {

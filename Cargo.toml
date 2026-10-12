@@ -9,3 +9,7 @@ version = "0.4.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.99"
+
+# 署名やハッシュの計算は、最適化しないと公式ベクターの照合に何十倍もかかるので、依存だけは開発中も最適化する
+[profile.dev.package."*"]
+opt-level = 3

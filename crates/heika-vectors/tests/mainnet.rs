@@ -1,4 +1,4 @@
-//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュを確かめる。
+//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュ、TransactionsHash を確かめる。
 //!
 //! 実際のチェーンが正なので、公式ベクターでは確かめられない署名とハッシュのつながりをここで見る。
 //! つなぐノードと名乗る証明書は、リポジトリに残さないように環境変数で渡す。
@@ -103,6 +103,11 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
             assert_eq!(block.height, height, "{name}");
             assert_eq!(block.network, MAINNET.identifier, "{name}: {height}");
             assert!(block.verify_signature(), "{name}: 高さ {height} の署名");
+            assert_eq!(
+                block.verify_transactions_hash(&MAINNET.generation_hash_seed),
+                Ok(true),
+                "{name}: 高さ {height} の TransactionsHash"
+            );
             let expected_type = match height {
                 1 => BlockType::Nemesis,
                 height if height % MAINNET.importance_grouping == 0 => BlockType::Importance,

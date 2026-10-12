@@ -37,7 +37,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 
 ## 構成
 
-- `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名、Merkle ツリー
+- `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名、Merkle ツリー、メインネットとテストネットで決まっている値
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-p2p`: ノードへの問い合わせ。ノードの情報、高さ、ほかのノードの一覧、ブロック

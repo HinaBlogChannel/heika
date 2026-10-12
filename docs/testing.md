@@ -8,7 +8,7 @@
   - Ed25519: RFC 8032 の 7.1 節
   - BIP 39: trezor/python-mnemonic の `vectors.json`
   - SLIP-10: SLIP-0010 の ed25519 のテストベクター 1
-  - PEM と DER: RFC 8410 の 10.1 節と 10.3 節の例
+  - PEM と DER: RFC 8410 の 10.1 節と 10.3 節の例。公開鍵だけを付けた PKCS#8 の v2 は、10.3 節の鍵から組み、OpenSSL で読めることを確かめたもの
 - 証明書は、OpenSSL 3.5 で作った v3 の証明書と P-256 の証明書（`crates/heika-cert/testdata/`）を読めることも確かめる。作るのに使った鍵は置かない。
 - TLS の接続は、テストの中に立てた rustls のサーバーで確かめる。こちらの証明書を受け付けるサーバーと弾くサーバーの両方を使う。
 - heika-cert の `certs_dir` は feature を有効にしたときだけコンパイルされる。ワークスペースの `cargo test` では heika-cli が有効にするので走る。heika-cert だけを試すときは `--all-features` を付ける。

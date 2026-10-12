@@ -12,6 +12,7 @@ SDK の bip32_path で導出する。このアカウントには何も送らな�
 鍵以外の値は、SHA-256("<ラベル>/<番号>") から切り出すので、何度動かしても同じものが出る。
 委任ハーベストの要求では、SDK が secrets.token_bytes で作る使い捨ての鍵と初期化ベクトルも、
 SHA-512("harvest-request/randomness/<番号>") の先頭から順に切り出したものに差し替える。
+投票鍵のファイルでは、SDK が PrivateKey.random で作る根と子の鍵を、決まった鍵の列に差し替える。
 """
 
 import contextlib
@@ -21,8 +22,11 @@ import secrets
 import sys
 
 from symbolchain.Bip32 import Bip32
+from symbolchain.CryptoTypes import PrivateKey
 from symbolchain.facade.SymbolFacade import SymbolFacade
+from symbolchain.symbol.KeyPair import KeyPair
 from symbolchain.symbol.MessageEncoder import MessageEncoder
+from symbolchain.symbol.VotingKeysGenerator import VotingKeysGenerator
 
 MNEMONIC = ' '.join(['test'] * 11 + ['junk'])
 SDK = 'symbol-sdk-python 3.3.3'
@@ -194,6 +198,24 @@ def harvest_request(index):
 	}
 
 
+def voting_keys(index):
+	"""根の鍵と、終わりのエポックから順に作る子の鍵は、SHA-256("voting-keys/key/<番号>/<何番目>") を順に使う。"""
+	start_epoch = 1 + draw('voting-keys/start-epoch', index)[0]
+	end_epoch = start_epoch + draw('voting-keys/length', index)[0] % 8
+	keys = [draw(f'voting-keys/key/{index}', n) for n in range(end_epoch - start_epoch + 2)]
+	remaining = iter(keys)
+	root = KeyPair(PrivateKey(next(remaining)))
+	data = VotingKeysGenerator(root, lambda: PrivateKey(next(remaining))).generate(start_epoch, end_epoch)
+	assert next(remaining, None) is None, 'keys left over'
+	return {
+		'start_epoch': start_epoch,
+		'end_epoch': end_epoch,
+		'randomness': b''.join(keys).hex().upper(),
+		'public_key': str(root.public_key),
+		'file': data.hex().upper(),
+	}
+
+
 def main():
 	document = {
 		'sdk': SDK,
@@ -207,6 +229,7 @@ def main():
 		},
 		'transactions': [vector(name, index) for name in TYPES + AGGREGATE_TYPES for index in range(COUNT)],
 		'harvest_requests': [harvest_request(index) for index in range(COUNT)],
+		'voting_keys': [voting_keys(index) for index in range(COUNT)],
 	}
 	json.dump(document, sys.stdout, ensure_ascii=False, indent='\t')
 	sys.stdout.write('\n')

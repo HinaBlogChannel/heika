@@ -5,12 +5,13 @@
 //! 大きさが 124 バイトの倍数でなければ、壊れているものとして扱う。
 //! 取り込んだあとで、リンクが合わないものやハーベストできないものを外し、ファイルを書き直す。
 
+use std::collections::HashSet;
 use std::fmt;
 
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_wallet::harvest_request;
 
-use crate::delegation::ENCRYPTED_PAYLOAD_SIZE;
+use crate::delegation::{Delegation, ENCRYPTED_PAYLOAD_SIZE, Status};
 
 /// harvesters.dat の1件。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -47,6 +48,40 @@ pub fn read(bytes: &[u8], node_private_key: &PrivateKey) -> Result<Vec<Entry>, R
         .collect()
 }
 
+/// catapult での要求の識別子。暗号化した中身の先頭の32バイト（使い捨ての公開鍵）
+fn identifier(encrypted_payload: &[u8; ENCRYPTED_PAYLOAD_SIZE]) -> [u8; 32] {
+    encrypted_payload[..32].try_into().expect("32 bytes")
+}
+
+/// 今の harvesters.dat の項目に、まだ入っていない有効な委任と、有効かわからない委任を足した並び。
+///
+/// 今の項目は、無効なものも含めてすべて、同じ順で残す。走査した範囲より前の要求で、今も使われている委任を消さないためである。
+/// 無効なものが残っていても、ノードは取り込んだあとで確かめ直して外す。有効かわからないものも、同じく合わなければ外される。
+/// catapult と同じく、識別子が同じものは1件にする。
+pub fn merge(current: &[Entry], delegations: &[Delegation]) -> Vec<[u8; ENCRYPTED_PAYLOAD_SIZE]> {
+    let mut identifiers = HashSet::new();
+    let mut merged = Vec::new();
+    let usable = delegations
+        .iter()
+        .filter(|delegation| matches!(delegation.status, Status::Active | Status::Unknown { .. }))
+        .map(|delegation| &delegation.encrypted_payload);
+    for payload in current
+        .iter()
+        .map(|entry| &entry.encrypted_payload)
+        .chain(usable)
+    {
+        if identifiers.insert(identifier(payload)) {
+            merged.push(*payload);
+        }
+    }
+    merged
+}
+
+/// harvesters.dat の中身。項目を並べるだけ
+pub fn to_bytes(payloads: &[[u8; ENCRYPTED_PAYLOAD_SIZE]]) -> Vec<u8> {
+    payloads.concat()
+}
+
 /// harvesters.dat が読めない理由。どちらも、ノードが起動しなくなるもの。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
@@ -79,6 +114,7 @@ mod tests {
     use heika_wallet::harvest_request::HarvesterKeys;
 
     use super::*;
+    use crate::delegation::LinkKind;
     use crate::testing::Replay;
 
     fn private_key(seed: u8) -> PrivateKey {
@@ -141,5 +177,48 @@ mod tests {
             read(&tampered, &node),
             Err(ReadError::Undecryptable { index: 0 })
         );
+    }
+
+    fn entry(node: &PrivateKey, seed: u8) -> Entry {
+        read(&payload(node, seed, seed + 1), node)
+            .unwrap()
+            .remove(0)
+    }
+
+    fn delegation(entry: &Entry, status: Status) -> Delegation {
+        Delegation {
+            height: 1,
+            main_account: entry.remote,
+            remote: entry.remote,
+            vrf: entry.vrf,
+            encrypted_payload: entry.encrypted_payload,
+            status,
+        }
+    }
+
+    #[test]
+    fn merges_usable_delegations_into_the_current_entries() {
+        let node = private_key(100);
+        let [a, b, c, d, e] = [1, 3, 5, 7, 9].map(|seed| entry(&node, seed));
+        let unknown = Status::Unknown {
+            unseen: vec![LinkKind::Remote],
+        };
+        let inactive = Status::Inactive {
+            mismatched: vec![LinkKind::Node],
+        };
+        // b と識別子だけが同じもの。catapult は同じ要求とみなす
+        let mut same_identifier = c.clone();
+        same_identifier.encrypted_payload[..32].copy_from_slice(&b.encrypted_payload[..32]);
+        let delegations = [
+            delegation(&a, inactive.clone()),
+            delegation(&same_identifier, Status::Active),
+            delegation(&c, Status::Active),
+            delegation(&d, unknown),
+            delegation(&e, inactive),
+        ];
+        let merged = merge(&[a.clone(), b.clone()], &delegations);
+        // 今の項目は無効でも残し、有効と不明だけを足す
+        assert_eq!(merged, [a, b, c, d].map(|entry| entry.encrypted_payload));
+        assert_eq!(read(&to_bytes(&merged), &node).unwrap().len(), 4);
     }
 }

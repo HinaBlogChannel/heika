@@ -84,6 +84,12 @@ pub enum NodeCommand {
         /// ノードの harvesters.dat。渡すと、見つけた要求が入っているかを突き合わせる。読むだけで書き換えない
         #[arg(long, value_name = "PATH")]
         harvesters_dat: Option<PathBuf>,
+        /// --harvesters-dat の今のファイルに、入っていない有効な委任と有効かわからない委任を足して書くファイル
+        ///
+        /// 今の項目は無効なものも含めてすべて残す。すでにあるファイルは上書きせず、ノードのファイルも書き換えない。
+        /// ノードを止め、元のファイルを残したうえで置き換える。ノードに harvesters.dat がなければ、空のファイルを --harvesters-dat に渡す。
+        #[arg(long, value_name = "PATH", requires = "harvesters_dat")]
+        write_harvesters_dat: Option<PathBuf>,
     },
 }
 
@@ -108,12 +114,14 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             from_height,
             to_height,
             harvesters_dat,
+            write_harvesters_dat,
         } => crate::delegations::run(crate::delegations::Args {
             connect: &connect,
             client_cert: &client_cert,
             from_height,
             to_height,
             harvesters_dat: harvesters_dat.as_deref(),
+            write_harvesters_dat: write_harvesters_dat.as_deref(),
         })?,
         NodeCommand::Find {
             connect,

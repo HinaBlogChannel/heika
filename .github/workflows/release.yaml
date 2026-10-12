@@ -84,7 +84,17 @@ jobs:
       - name: まとめる
         run: |
           mkdir -p "dist/$PACKAGE"
-          cp LICENSE README.md crates/heika-cli/THIRD-PARTY-LICENSES "dist/$PACKAGE/"
+          if [ "$RUNNER_OS" = Windows ]; then archive="$PACKAGE.zip"; else archive="$PACKAGE.tar.gz"; fi
+          sed -e "s|{{VERSION}}|$GITHUB_REF_NAME|g" \
+              -e "s|{{REPOSITORY}}|$GITHUB_REPOSITORY|g" \
+              -e "s|{{ARCHIVE}}|$archive|g" \
+              crates/heika-cli/assets/README.txt > "dist/$PACKAGE/README.txt"
+          if grep -n '{{' "dist/$PACKAGE/README.txt"; then
+            echo "::error::README.txt に埋めていない {{ }} があります"
+            exit 1
+          fi
+          cp -r docs "dist/$PACKAGE/"
+          cp LICENSE crates/heika-cli/THIRD-PARTY-LICENSES "dist/$PACKAGE/"
           cp crates/heika-wallet/src/bip39/NOTICE "dist/$PACKAGE/NOTICE-BIP39"
           if [ "$RUNNER_OS" = Windows ]; then
             cp "target/$TARGET/release/heika.exe" "dist/$PACKAGE/"

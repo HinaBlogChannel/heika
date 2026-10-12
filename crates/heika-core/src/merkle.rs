@@ -29,6 +29,42 @@ pub fn root(leaves: &[Hash256]) -> Hash256 {
     level[0]
 }
 
+/// catapult の `crypto/InvalidMerkleHashBuilder.cpp` の、誤った根の求め方。
+///
+/// 組にしたハッシュを書き戻すときに、同じ段の後ろのハッシュを1つずつずらしてしまうので、
+/// 2組目からは隣どうしではないハッシュを組にする。そのため、根が守らない葉ができる。
+/// 初期のアグリゲート（バージョン 1）には、この求め方で中のトランザクションのハッシュを書いたものがあり、
+/// チェーンはそれも認めている。新しく使ってはいけない。
+pub fn invalid_root(leaves: &[Hash256]) -> Hash256 {
+    if leaves.is_empty() {
+        return Hash256([0; 32]);
+    }
+    let mut hashes = leaves.to_vec();
+    let mut remaining = hashes.len();
+    while remaining > 1 {
+        let mut i = 0;
+        while i < remaining {
+            let odd = i + 1 >= remaining;
+            let right = if odd { hashes[i] } else { hashes[i + 1] };
+            let mut hasher = Sha3_256::new();
+            hasher.update(hashes[i].0);
+            hasher.update(right.0);
+            // この段の数までの範囲で、書き戻す位置より後ろを1つずつずらす
+            for j in (i / 2 + 1..remaining.min(hashes.len())).rev() {
+                hashes[j] = hashes[j - 1];
+            }
+            hashes[i / 2] = Hash256(hasher.finalize().into());
+            if odd {
+                // 複製した分を数に足して、この段を終える
+                remaining += 1;
+            }
+            i += 2;
+        }
+        remaining /= 2;
+    }
+    hashes[0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +102,33 @@ mod tests {
         let expected = pair(&pair(&level[0], &level[1]), &pair(&level[2], &level[2]));
         let leaves: Vec<_> = (1..=5).map(leaf).collect();
         assert_eq!(root(&leaves), expected);
+    }
+
+    #[test]
+    fn the_invalid_root_agrees_for_up_to_two_leaves() {
+        assert_eq!(invalid_root(&[]), Hash256([0; 32]));
+        assert_eq!(invalid_root(&[leaf(1)]), leaf(1));
+        assert_eq!(invalid_root(&[leaf(1), leaf(2)]), root(&[leaf(1), leaf(2)]));
+    }
+
+    /// catapult の `InvalidMerkleHashBuilderTests.cpp` が示している形。8つなら、後ろの3つの葉は根に効かない
+    #[test]
+    fn the_invalid_root_pairs_shifted_hashes() {
+        let leaves: Vec<_> = (0..8).map(leaf).collect();
+        let level: Vec<_> = (0..4).map(|i| pair(&leaves[i], &leaves[i + 1])).collect();
+        let expected = pair(&pair(&level[0], &level[1]), &pair(&level[1], &level[2]));
+        assert_eq!(invalid_root(&leaves), expected);
+        let mut changed = leaves.clone();
+        changed[7] = leaf(0xFF);
+        assert_eq!(invalid_root(&changed), expected);
+
+        let leaves: Vec<_> = (0..5).map(leaf).collect();
+        let level = [
+            pair(&leaves[0], &leaves[1]),
+            pair(&leaves[1], &leaves[2]),
+            pair(&leaves[2], &leaves[2]),
+        ];
+        let expected = pair(&pair(&level[0], &level[1]), &pair(&level[1], &level[1]));
+        assert_eq!(invalid_root(&leaves), expected);
     }
 }

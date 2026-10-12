@@ -1,0 +1,468 @@
+//! ブロック。catapult の `model/Block.h` と `model/Block.cpp` のレイアウトで読む。
+//!
+//! ```text
+//!   0  u32 Size  u32 Reserved  [64] Signature  [32] SignerPublicKey  u32 Reserved
+//! 108  u8 Version  u8 Network  u16 Type
+//! 112  u64 Height  u64 Timestamp  u64 Difficulty
+//! 136  VrfProof（Gamma 32、VerificationHash 16、Scalar 32）
+//! 216  PreviousBlockHash  TransactionsHash  ReceiptsHash  StateHash（各 32）
+//! 344  BeneficiaryAddress（24）  u32 FeeMultiplier
+//! 372  通常のブロックは u32 のパディング（376 まで）。
+//!      Nemesis と Importance のブロックは u32 VotingEligibleAccountsCount、
+//!      u64 HarvestingEligibleAccountsCount、u64 TotalVotingBalance、[32] PreviousImportanceBlockHash（424 まで）
+//!      この後ろにトランザクションが並ぶ
+//! ```
+//!
+//! ブロックは作らずに読むだけなので、catapult が確かめない予約の部分は確かめない。
+
+use std::fmt;
+use std::ops::Range;
+
+use heika_core::address::Address;
+use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
+use heika_core::network::NetworkIdentifier;
+use heika_core::signature::Signature;
+use sha3::{Digest, Sha3_256};
+
+/// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
+/// サイズ、予約、署名、署名者の公開鍵、予約の順に並ぶ。
+const UNSIGNED_HEADER_SIZE: usize = 4 + 4 + 64 + 32 + 4;
+/// トランザクションのヘッダーの大きさ（catapult の `sizeof(Transaction)`）。ブロックの中のトランザクションはこれより小さくできない
+const TRANSACTION_HEADER_SIZE: usize = UNSIGNED_HEADER_SIZE + 1 + 1 + 2 + 8 + 8;
+
+/// 通常のブロックのヘッダー。末尾の4バイトは8バイト境界に合わせるためのパディング
+const NORMAL_HEADER_SIZE: usize = 376;
+/// Nemesis と Importance のブロックのヘッダー
+const IMPORTANCE_HEADER_SIZE: usize = 424;
+/// ヘッダーのうち、フッターの前まで
+const FOOTER_OFFSET: usize = 372;
+
+/// ブロックの種類。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockType {
+    Nemesis,
+    Normal,
+    Importance,
+}
+
+impl BlockType {
+    fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0x8043 => Some(Self::Nemesis),
+            0x8143 => Some(Self::Normal),
+            0x8243 => Some(Self::Importance),
+            _ => None,
+        }
+    }
+
+    fn header_size(self) -> usize {
+        match self {
+            Self::Normal => NORMAL_HEADER_SIZE,
+            Self::Nemesis | Self::Importance => IMPORTANCE_HEADER_SIZE,
+        }
+    }
+}
+
+/// ブロックを作る権利を示す VRF の証明。catapult の `crypto::VrfProof`。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VrfProof {
+    pub gamma: [u8; 32],
+    pub verification_hash: [u8; 16],
+    pub scalar: [u8; 32],
+}
+
+/// Nemesis と Importance のブロックのフッター。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ImportanceFooter {
+    pub voting_eligible_accounts_count: u32,
+    pub harvesting_eligible_accounts_count: u64,
+    /// 投票に使える残高の合計。通貨のモザイクの最小単位で数える。
+    pub total_voting_balance: u64,
+    pub previous_importance_block_hash: Hash256,
+}
+
+/// ブロック。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Block {
+    pub signature: Signature,
+    /// ハーベストしたアカウントの公開鍵。リモートハーベストならリモートアカウントのもの
+    pub signer_public_key: PublicKey,
+    pub version: u8,
+    pub network: NetworkIdentifier,
+    pub block_type: BlockType,
+    pub height: u64,
+    /// ネメシスのブロックからのミリ秒
+    pub timestamp: u64,
+    pub difficulty: u64,
+    pub generation_hash_proof: VrfProof,
+    pub previous_block_hash: Hash256,
+    pub transactions_hash: Hash256,
+    pub receipts_hash: Hash256,
+    pub state_hash: Hash256,
+    pub beneficiary_address: Address,
+    pub fee_multiplier: u32,
+    /// Nemesis と Importance のブロックだけにある
+    pub importance_footer: Option<ImportanceFooter>,
+    bytes: Vec<u8>,
+    transactions: Vec<Range<usize>>,
+}
+
+impl Block {
+    /// バイト列から読む。トランザクションは中身を読まずに、1件ずつの範囲だけを確かめる。
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BlockDecodeError> {
+        let type_at = bytes.get(110..112).ok_or(BlockDecodeError::TooShort)?;
+        let raw_type = u16::from_le_bytes(type_at.try_into().expect("2 bytes"));
+        let block_type =
+            BlockType::from_u16(raw_type).ok_or(BlockDecodeError::UnknownType(raw_type))?;
+        let header_size = block_type.header_size();
+        if bytes.len() < header_size {
+            return Err(BlockDecodeError::TooShort);
+        }
+
+        // 長さは確かめたので、ここから先の切り出しは失敗しない
+        let array = |offset: usize| -> [u8; 32] {
+            bytes[offset..offset + 32].try_into().expect("32 bytes")
+        };
+        let u32_at = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
+        };
+        let u64_at = |offset: usize| {
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("8 bytes"))
+        };
+
+        let size = u32_at(0);
+        if size as usize != bytes.len() {
+            return Err(BlockDecodeError::SizeMismatch {
+                stated: size,
+                actual: bytes.len(),
+            });
+        }
+        let importance_footer = (header_size == IMPORTANCE_HEADER_SIZE).then(|| ImportanceFooter {
+            voting_eligible_accounts_count: u32_at(FOOTER_OFFSET),
+            harvesting_eligible_accounts_count: u64_at(376),
+            total_voting_balance: u64_at(384),
+            previous_importance_block_hash: Hash256(array(392)),
+        });
+        Ok(Self {
+            signature: Signature(bytes[8..72].try_into().expect("64 bytes")),
+            signer_public_key: PublicKey(array(72)),
+            version: bytes[108],
+            network: NetworkIdentifier(bytes[109]),
+            block_type,
+            height: u64_at(112),
+            timestamp: u64_at(120),
+            difficulty: u64_at(128),
+            generation_hash_proof: VrfProof {
+                gamma: array(136),
+                verification_hash: bytes[168..184].try_into().expect("16 bytes"),
+                scalar: array(184),
+            },
+            previous_block_hash: Hash256(array(216)),
+            transactions_hash: Hash256(array(248)),
+            receipts_hash: Hash256(array(280)),
+            state_hash: Hash256(array(312)),
+            beneficiary_address: Address(bytes[344..368].try_into().expect("24 bytes")),
+            fee_multiplier: u32_at(368),
+            importance_footer,
+            transactions: split_transactions(bytes, header_size)?,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// 署名の対象。ヘッダーのうちバージョンから後ろで、通常のブロックでは末尾のパディングを除く
+    /// （catapult の `GetBlockHeaderDataBuffer`）。トランザクションは TransactionsHash を通して間接的に入る。
+    fn signed_data(&self) -> &[u8] {
+        let end = match self.block_type {
+            BlockType::Normal => FOOTER_OFFSET,
+            BlockType::Nemesis | BlockType::Importance => IMPORTANCE_HEADER_SIZE,
+        };
+        &self.bytes[UNSIGNED_HEADER_SIZE..end]
+    }
+
+    /// ハーベストしたアカウントの署名を確かめる。
+    pub fn verify_signature(&self) -> bool {
+        self.signer_public_key
+            .verify(&[self.signed_data()], &self.signature)
+    }
+
+    /// ブロックのハッシュ。catapult の `model::CalculateHash(const Block&)` と同じく、
+    /// 署名、署名者の公開鍵、署名の対象を続けた SHA3-256。トランザクションと違い generation hash seed は入らない。
+    /// 次のブロックの PreviousBlockHash がこれになる。
+    pub fn hash(&self) -> Hash256 {
+        Hash256(
+            Sha3_256::new()
+                .chain_update(self.signature.0)
+                .chain_update(self.signer_public_key.0)
+                .chain_update(self.signed_data())
+                .finalize()
+                .into(),
+        )
+    }
+
+    /// 中のトランザクションのバイト列。パディングは含まない。
+    pub fn transactions(&self) -> impl Iterator<Item = &[u8]> {
+        self.transactions
+            .iter()
+            .map(|range| &self.bytes[range.clone()])
+    }
+
+    /// ブロック全体のバイト列。
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// ヘッダーの後ろに並ぶトランザクションを、1件ずつの範囲に分ける。
+///
+/// catapult の `ContiguousEntityContainer` と同じく、最後のもの以外は後ろを8バイト境界までパディングする。
+/// 1件の大きさは、トランザクションのヘッダー以上で、ブロックの中に収まっていなければならない。
+/// 最後のものの後ろにパディングがあっても、ちょうど8バイト境界で終わっていれば catapult と同じく受け付ける。
+fn split_transactions(
+    bytes: &[u8],
+    header_size: usize,
+) -> Result<Vec<Range<usize>>, BlockDecodeError> {
+    let mut transactions = Vec::new();
+    let mut offset = header_size;
+    while offset < bytes.len() {
+        let size = bytes
+            .get(offset..offset + 4)
+            .map(|size| u32::from_le_bytes(size.try_into().expect("4 bytes")) as usize)
+            .ok_or(BlockDecodeError::InvalidTransaction { offset })?;
+        let end = offset
+            .checked_add(size)
+            .filter(|&end| size >= TRANSACTION_HEADER_SIZE && end <= bytes.len())
+            .ok_or(BlockDecodeError::InvalidTransaction { offset })?;
+        transactions.push(offset..end);
+        let next = if end == bytes.len() {
+            end
+        } else {
+            end + (size.next_multiple_of(8) - size)
+        };
+        // パディングの途中で終わっている
+        if next > bytes.len() {
+            return Err(BlockDecodeError::InvalidTransaction { offset: end });
+        }
+        offset = next;
+    }
+    Ok(transactions)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockDecodeError {
+    /// ヘッダーの長さに足りない
+    TooShort,
+    /// 先頭のサイズが、実際の長さと合わない
+    SizeMismatch { stated: u32, actual: usize },
+    /// ブロックの種類ではない
+    UnknownType(u16),
+    /// `offset` から始まるトランザクションの大きさが、小さすぎるかブロックからはみ出している
+    InvalidTransaction { offset: usize },
+}
+
+impl fmt::Display for BlockDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooShort => f.write_str("ブロックのヘッダーの長さに足りません"),
+            Self::SizeMismatch { stated, actual } => write!(
+                f,
+                "サイズは {stated} バイトとありますが、実際は {actual} バイトでした"
+            ),
+            Self::UnknownType(block_type) => {
+                write!(f, "種類 0x{block_type:04X} はブロックではありません")
+            }
+            Self::InvalidTransaction { offset } => write!(
+                f,
+                "{offset} バイト目からのトランザクションの大きさが、小さすぎるかブロックからはみ出しています"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BlockDecodeError {}
+
+#[cfg(test)]
+mod tests {
+    use heika_core::key::PrivateKey;
+
+    use super::*;
+
+    /// 中身を問わない、大きさ `size` のトランザクションの代わり
+    fn transaction(size: usize, fill: u8) -> Vec<u8> {
+        let mut transaction = vec![fill; size];
+        transaction[..4].copy_from_slice(&(size as u32).to_le_bytes());
+        transaction
+    }
+
+    /// `header_size` のヘッダーに `transactions` を並べ、`private_key` で署名したブロック。
+    fn block(block_type: u16, transactions: &[Vec<u8>], private_key: &PrivateKey) -> Vec<u8> {
+        let header_size = BlockType::from_u16(block_type).unwrap().header_size();
+        let mut bytes = vec![0; header_size];
+        for (index, transaction) in transactions.iter().enumerate() {
+            bytes.extend_from_slice(transaction);
+            if index + 1 < transactions.len() {
+                bytes.resize(bytes.len().next_multiple_of(8), 0);
+            }
+        }
+        let size = bytes.len() as u32;
+        bytes[..4].copy_from_slice(&size.to_le_bytes());
+        bytes[72..104].copy_from_slice(&PublicKey::from_private_key(private_key).0);
+        bytes[108] = 1;
+        bytes[109] = NetworkIdentifier::MAINNET.0;
+        bytes[110..112].copy_from_slice(&block_type.to_le_bytes());
+        bytes[112..120].copy_from_slice(&720_u64.to_le_bytes());
+        bytes[344] = 0x68;
+        let signed_end = if header_size == NORMAL_HEADER_SIZE {
+            FOOTER_OFFSET
+        } else {
+            header_size
+        };
+        let signature = private_key.sign(&[&bytes[UNSIGNED_HEADER_SIZE..signed_end]]);
+        bytes[8..72].copy_from_slice(&signature.0);
+        bytes
+    }
+
+    fn private_key() -> PrivateKey {
+        PrivateKey::from_bytes(&[7; 32])
+    }
+
+    #[test]
+    fn splits_transactions_padded_except_the_last() {
+        let transactions = [
+            transaction(130, 1),
+            transaction(128, 2),
+            transaction(133, 3),
+        ];
+        let block = Block::from_bytes(&block(0x8143, &transactions, &private_key())).unwrap();
+        assert_eq!(block.block_type, BlockType::Normal);
+        assert_eq!(block.height, 720);
+        assert_eq!(block.importance_footer, None);
+        assert!(
+            block
+                .transactions()
+                .eq(transactions.iter().map(Vec::as_slice))
+        );
+        // 130 バイトのものの後ろだけ、6バイトのパディングが入る
+        assert_eq!(block.as_bytes().len(), 376 + 136 + 128 + 133);
+    }
+
+    #[test]
+    fn verifies_the_signature_and_hashes_like_catapult() {
+        let bytes = block(0x8143, &[transaction(128, 1)], &private_key());
+        let block = Block::from_bytes(&bytes).unwrap();
+        assert!(block.verify_signature());
+        let expected: [u8; 32] = Sha3_256::new()
+            .chain_update(&bytes[8..104])
+            .chain_update(&bytes[108..372])
+            .finalize()
+            .into();
+        assert_eq!(block.hash(), Hash256(expected));
+
+        // 署名の対象はトランザクションを含まず、パディングも含まない
+        let mut changed = bytes.clone();
+        changed[372] = 0xFF;
+        changed[400] ^= 1;
+        let changed = Block::from_bytes(&changed).unwrap();
+        assert!(changed.verify_signature());
+        assert_eq!(changed.hash(), block.hash());
+
+        let mut tampered = bytes;
+        tampered[112] ^= 1;
+        assert!(!Block::from_bytes(&tampered).unwrap().verify_signature());
+    }
+
+    #[test]
+    fn reads_the_importance_footer_and_signs_it() {
+        let mut bytes = block(0x8243, &[], &private_key());
+        let block = Block::from_bytes(&bytes).unwrap();
+        assert_eq!(block.block_type, BlockType::Importance);
+        assert_eq!(block.transactions().count(), 0);
+        assert!(block.verify_signature());
+        assert_eq!(
+            block
+                .importance_footer
+                .as_ref()
+                .unwrap()
+                .voting_eligible_accounts_count,
+            0
+        );
+        // フッターは署名の対象に入る
+        bytes[FOOTER_OFFSET] = 1;
+        let block = Block::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            block
+                .importance_footer
+                .as_ref()
+                .unwrap()
+                .voting_eligible_accounts_count,
+            1
+        );
+        assert!(!block.verify_signature());
+    }
+
+    #[test]
+    fn rejects_broken_blocks() {
+        let bytes = block(
+            0x8143,
+            &[transaction(130, 1), transaction(128, 2)],
+            &private_key(),
+        );
+        assert_eq!(
+            Block::from_bytes(&bytes[..300]),
+            Err(BlockDecodeError::TooShort)
+        );
+        assert_eq!(
+            Block::from_bytes(&bytes[..bytes.len() - 1]),
+            Err(BlockDecodeError::SizeMismatch {
+                stated: bytes.len() as u32,
+                actual: bytes.len() - 1
+            })
+        );
+
+        let mut unknown = bytes.clone();
+        unknown[110..112].copy_from_slice(&0x4154_u16.to_le_bytes());
+        assert_eq!(
+            Block::from_bytes(&unknown),
+            Err(BlockDecodeError::UnknownType(0x4154))
+        );
+
+        // 大きさがトランザクションのヘッダーより小さい
+        let mut small = bytes.clone();
+        small[376..380].copy_from_slice(&127_u32.to_le_bytes());
+        assert_eq!(
+            Block::from_bytes(&small),
+            Err(BlockDecodeError::InvalidTransaction { offset: 376 })
+        );
+
+        // 2件目がブロックからはみ出す
+        let mut overflowing = bytes;
+        overflowing[512..516].copy_from_slice(&129_u32.to_le_bytes());
+        assert_eq!(
+            Block::from_bytes(&overflowing),
+            Err(BlockDecodeError::InvalidTransaction { offset: 512 })
+        );
+    }
+
+    #[test]
+    fn handles_padding_after_the_last_transaction_like_catapult() {
+        let padded = |padding: usize| {
+            let mut bytes = block(0x8143, &[transaction(130, 1)], &private_key());
+            bytes.resize(bytes.len() + padding, 0);
+            let size = bytes.len() as u32;
+            bytes[..4].copy_from_slice(&size.to_le_bytes());
+            Block::from_bytes(&bytes)
+        };
+        // 8バイト境界まで埋まっていれば、パディングを飛ばした先がちょうど終わりになるので受け付ける
+        assert_eq!(padded(6).unwrap().transactions().count(), 1);
+        // 途中で終わっていれば、飛ばした先が終わりを越えるので弾く
+        assert_eq!(
+            padded(3),
+            Err(BlockDecodeError::InvalidTransaction { offset: 506 })
+        );
+        // 8バイト境界を越えて残っていれば、次のトランザクションとして読んで、小さすぎるので弾く
+        assert_eq!(
+            padded(10),
+            Err(BlockDecodeError::InvalidTransaction { offset: 512 })
+        );
+    }
+}

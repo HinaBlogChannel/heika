@@ -40,9 +40,10 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-p2p`: ノードへの問い合わせ。ノードの情報、高さ、ほかのノードの一覧、ブロック
 - `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。リンク、Transfer、アグリゲート
+- `heika-block`: ブロックの読み込み、署名の確認、ハッシュ。中のトランザクションの切り分け
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10、委任ハーベストの要求に使う公開鍵あての暗号化
 - `heika-cli`: コマンドラインツール `heika`
-- `heika-vectors`: Symbol の公式テストベクターと、公式の Python SDK で作ったベクターとの照合
+- `heika-vectors`: Symbol の公式テストベクター、公式の Python SDK で作ったベクター、メインネットのブロックとの照合
 
 ## インストール
 
@@ -125,7 +126,7 @@ DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の�
 
 ```sh
 cargo test
-cargo test -p heika-vectors -- --include-ignored  # 公式ベクターと SDK のベクターとの照合。公式ベクターはネットワークから取る
+cargo test -p heika-vectors -- --include-ignored  # 公式ベクターと SDK のベクターとの照合。公式ベクターはネットワークから取る。メインネットのブロックは docs/testing.md の手順で
 cargo test -p heika-cert --all-features             # heika-cert だけを、feature つきのモジュールも含めて
 ```
 

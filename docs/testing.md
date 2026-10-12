@@ -33,6 +33,26 @@
 | `crypto/4.test-cipher.json` | 共有鍵での AES-GCM の暗号化と復号 |
 | `crypto/6.test-hd-derivation.json` | ニーモニックからシード、シードから子の鍵、ネットワークごとのパス |
 | `models/transactions.json` | トランザクションのバイト列と中身の読み書き（リンク、Transfer、中身がそれらだけのバージョン 3 のアグリゲート）。ここの署名はレイアウトを試すための値で、検証は通らない |
+| `models/blocks.json` | 通常、Nemesis、Importance のブロックのヘッダーの各フィールドと、中のトランザクションの切り分け。ここの署名も検証は通らない |
+
+## メインネットのブロック
+
+公式ベクターのブロックの署名は検証が通らないので、署名とハッシュのつながりは、メインネットのノードから取ったブロックで確かめる。実際のチェーンが正なので、ブロックはリポジトリに置かず、テストのたびに heika でノードから取る。
+
+- `crates/heika-vectors/tests/mainnet.rs` にある。下のように、つなぐノードと名乗る証明書を環境変数で渡す。ノードのアドレスをリポジトリに残さないためである。
+- `HEIKA_TEST_NODE` がなければ、何も確かめずに成功する。CI はこちらになる。
+- 取る高さは決まった規則で選んでいる。Nemesis とその次、最初の Importance ブロック（720）の前後、アグリゲートのバージョンが変わった2つのフォーク（1,690,500 と 4,759,100）の直後。
+- それぞれの署名と、PreviousBlockHash が1つ前のブロックのハッシュと一致することを確かめる。
+- 同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
+
+```sh
+HEIKA_TEST_NODE=<ホスト>:<ポート> \
+HEIKA_TEST_CLIENT_CERT=$PWD/node.full.crt.pem \
+HEIKA_TEST_CLIENT_KEY=$PWD/node.key.pem \
+cargo test -p heika-vectors --test mainnet -- --include-ignored
+```
+
+テストは crate のフォルダーで動くので、ファイルは絶対パスで渡す。
 
 ## SDK で作ったベクター
 

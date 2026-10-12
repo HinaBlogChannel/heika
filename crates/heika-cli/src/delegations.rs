@@ -1,8 +1,10 @@
 //! `heika node delegations`: ノードあての委任の要求をブロックから拾い、今も有効かを出す。
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,6 +36,8 @@ pub struct Args<'a> {
     pub from_height: u64,
     pub to_height: Option<u64>,
     pub harvesters_dat: Option<&'a Path>,
+    /// 今の harvesters.dat（`harvesters_dat`）に、入っていない委任を足して書くファイル
+    pub write_harvesters_dat: Option<&'a Path>,
 }
 
 pub fn run(args: Args) -> Result<(), Failure> {
@@ -41,6 +45,12 @@ pub fn run(args: Args) -> Result<(), Failure> {
     let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
     let identity = Identity::new(&chain, &key)
         .map_err(|error| format!("{}: {error}", args.client_cert.display()))?;
+    // 走査を終えてから書けないとわかるのを避ける。書くときにも上書きしないように確かめる
+    if let Some(path) = args.write_harvesters_dat
+        && path.exists()
+    {
+        return Err(format!("{} はすでにあります。上書きはしません", path.display()).into());
+    }
     // 壊れていれば走査に時間をかける前に止まれるように、先に読む
     let harvesters = match args.harvesters_dat {
         Some(path) => {
@@ -226,7 +236,52 @@ pub fn run(args: Args) -> Result<(), Failure> {
             report.namespace_recipients
         );
     }
+
+    if let (Some(path), Some(current)) = (args.write_harvesters_dat, &harvesters) {
+        let merged = harvesters_dat::merge(current, &report.delegations);
+        let added = merged.len() - current.len();
+        outln!();
+        if added == 0 {
+            outln!(
+                "今の harvesters.dat に足す委任がないので、{} は書きませんでした",
+                path.display()
+            );
+            return Ok(());
+        }
+        // ノードは1件でも復号できない項目があると起動しないので、書く前と書いたあとに全部を復号してみる
+        let bytes = harvesters_dat::to_bytes(&merged);
+        harvesters_dat::read(&bytes, &key).map_err(|error| format!("書く前の確認: {error}"))?;
+        write_private(path, &bytes)?;
+        let written = fs::read(path)
+            .map_err(|error| format!("{} を読み直せませんでした: {error}", path.display()))?;
+        let entries = harvesters_dat::read(&written, &key)
+            .map_err(|error| format!("書いたあとの確認: {}: {error}", path.display()))?;
+        if entries.len() != merged.len() {
+            return Err(format!("{} を読み直すと、件数が合いません", path.display()).into());
+        }
+        outln!(
+            "{} に {} 件を書きました（今の {} 件に、{added} 件を足しました）。どれもノードの鍵で復号できることを、書いたあとに確かめました",
+            path.display(),
+            merged.len(),
+            current.len()
+        );
+        outln!(
+            "ノードを止め、元の harvesters.dat を残したうえで、このファイルに置き換えてから起動してください。合わない委任は、ノードが起動したあとで外します"
+        );
+    }
     Ok(())
+}
+
+/// 委任の秘密鍵を暗号化したものを書く。すでにあるファイルは上書きせず、Unix では自分だけが読み書きできるようにする。
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(bytes))
+        .map_err(|error| format!("{} に書けませんでした: {error}", path.display()))
 }
 
 fn status_label(status: &Status) -> &'static str {

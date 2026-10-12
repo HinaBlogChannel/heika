@@ -11,6 +11,7 @@ use std::time::Duration;
 use heika_block::Block;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
+use heika_core::network::NetworkParameters;
 use heika_harvesting::delegation::{DelegationTracker, LinkKind, Status};
 use heika_harvesting::harvesters_dat;
 use heika_p2p::Node;
@@ -68,7 +69,13 @@ pub fn run(args: Args) -> Result<(), Failure> {
 
     let mut node = connect(args.connect)?;
     let query = |error| format!("{}: {error}", args.connect);
-    let network = node.info().map_err(query)?.network_identifier;
+    let info = node.info().map_err(query)?;
+    let network = info.network_identifier;
+    // 知っているネットワークなら、ノードが名乗るものではなく、heika が持っている値を使う
+    let seed = NetworkParameters::from_identifier(network)
+        .map_or(info.network_generation_hash_seed, |parameters| {
+            parameters.generation_hash_seed
+        });
     let height = node.chain_statistics().map_err(query)?.height;
     let to_height = args.to_height.unwrap_or(height);
     if args.from_height == 0 || args.from_height > to_height {
@@ -123,6 +130,17 @@ pub fn run(args: Args) -> Result<(), Failure> {
             if previous_hash.is_some_and(|hash| hash != block.previous_block_hash) {
                 return Err(format!(
                     "高さ {next} のブロックが、1つ前のブロックとつながっていません"
+                )
+                .into());
+            }
+            // 中のトランザクションが、ヘッダーの TransactionsHash と合っているか。ヘッダーはブロックのハッシュで
+            // 次のブロックとつながるので、これで中身もチェーンにつながる
+            if !block
+                .verify_transactions_hash(&seed)
+                .map_err(|error| format!("高さ {next}: {error}"))?
+            {
+                return Err(format!(
+                    "高さ {next} のブロックの中身が、ヘッダーの TransactionsHash と合いません"
                 )
                 .into());
             }

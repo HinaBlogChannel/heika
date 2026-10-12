@@ -8,4 +8,5 @@ description = "Symbol のブロックの読み込み、署名の確認、ハッ�
 
 [dependencies]
 heika-core = { path = "../heika-core", default-features = false }
+heika-transaction = { path = "../heika-transaction" }
 sha3 = "0.12.0"

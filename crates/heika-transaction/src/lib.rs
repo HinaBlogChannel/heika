@@ -273,6 +273,28 @@ impl Transaction {
         Hash256(hasher.finalize().into())
     }
 
+    /// ブロックの TransactionsHash の葉。catapult の `CalculateMerkleComponentHash`。
+    ///
+    /// ふつうはハッシュそのもの。アグリゲートは、ハッシュに連署者の公開鍵を並んだ順に続けた SHA3-256
+    /// （aggregate プラグインの `merkleSupplementaryBuffers`）。連署はハッシュに入らないので、
+    /// ブロックはこちらで連署の取り違えを防ぐ。
+    pub fn merkle_component_hash(&self, generation_hash_seed: &GenerationHashSeed) -> Hash256 {
+        let hash = self.hash(generation_hash_seed);
+        let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) = &self.body
+        else {
+            return hash;
+        };
+        if aggregate.cosignatures().is_empty() {
+            return hash;
+        }
+        let mut hasher = Sha3_256::new();
+        hasher.update(hash.0);
+        for cosignature in aggregate.cosignatures() {
+            hasher.update(cosignature.signer_public_key.0);
+        }
+        Hash256(hasher.finalize().into())
+    }
+
     /// アグリゲートに `private_key` の連署を足す。
     ///
     /// 連署するのは外側の署名を含むハッシュなので、先に署名されていなければならない。
@@ -961,6 +983,27 @@ mod tests {
         );
         assert!(transaction.verify_cosignatures(&seed()));
         assert!(!transaction.verify_cosignatures(&GenerationHashSeed([0; 32])));
+    }
+
+    #[test]
+    fn mixes_cosigners_into_the_merkle_component_hash() {
+        let mut transaction = vrf_key_link();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        assert_eq!(
+            transaction.merkle_component_hash(&seed()),
+            transaction.hash(&seed())
+        );
+
+        let mut transaction = aggregate_complete();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        let hash = transaction.hash(&seed());
+        assert_eq!(transaction.merkle_component_hash(&seed()), hash);
+        transaction.cosign(&cosigner_key(), &seed()).unwrap();
+        let cosigner = PublicKey::from_private_key(&cosigner_key());
+        assert_eq!(
+            transaction.merkle_component_hash(&seed()),
+            Hash256(Sha3_256::digest([hash.0, cosigner.0].concat()).into())
+        );
     }
 
     #[test]

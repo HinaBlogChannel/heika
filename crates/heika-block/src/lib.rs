@@ -21,8 +21,10 @@ use std::ops::Range;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::key::PublicKey;
-use heika_core::network::NetworkIdentifier;
+use heika_core::merkle;
+use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
+use heika_transaction::{DecodeError, Transaction};
 use sha3::{Digest, Sha3_256};
 
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
@@ -207,10 +209,63 @@ impl Block {
             .map(|range| &self.bytes[range.clone()])
     }
 
+    /// 中のトランザクションから TransactionsHash を求める。catapult の `CalculateBlockTransactionsHash`。
+    ///
+    /// それぞれの [`Transaction::merkle_component_hash`] を葉にした Merkle ツリーの根。
+    /// トランザクションのハッシュには generation hash seed が入るので、ブロックのネットワークのものを渡す。
+    /// 葉を求めるにはトランザクションを丸ごと読むので、読めないものがあれば、そのエラーを返す。
+    ///
+    /// Nemesis のブロックだけは求め方が違う。nemgen はトランザクションの種類ごとの決まりを使わずに
+    /// （catapult の `BlockExtensions` を `TransactionRegistry` なしで作る）、署名の範囲を種類で切らずに
+    /// ヘッダーの後半から最後までを丸ごとハッシュし、連署者も混ぜない。ノードは Nemesis をファイルから読み、
+    /// 同期してきたブロックにしか TransactionsHash を確かめないので、この違いはそのまま残っている。
+    pub fn calculate_transactions_hash(
+        &self,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<Hash256, DecodeError> {
+        let leaves = if self.block_type == BlockType::Nemesis {
+            self.transactions()
+                .map(|bytes| whole_transaction_hash(bytes, generation_hash_seed))
+                .collect()
+        } else {
+            self.transactions()
+                .map(|bytes| {
+                    Transaction::from_bytes(bytes)
+                        .map(|transaction| transaction.merkle_component_hash(generation_hash_seed))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(merkle::root(&leaves))
+    }
+
+    /// ヘッダーの TransactionsHash が、中のトランザクションと合うか。
+    /// ブロックの署名は TransactionsHash に掛かるので、署名と合わせて確かめれば、中のトランザクションもブロックの署名者が認めたものになる。
+    pub fn verify_transactions_hash(
+        &self,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<bool, DecodeError> {
+        Ok(self.calculate_transactions_hash(generation_hash_seed)? == self.transactions_hash)
+    }
+
     /// ブロック全体のバイト列。
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+/// トランザクションを、種類を問わずに丸ごとハッシュする。catapult の `model::CalculateHash(const Transaction&, ...)` の
+/// 既定の対象（`TransactionDataBuffer`）で、署名、署名者の公開鍵、generation hash seed、ヘッダーの後半から最後まで。
+/// アグリゲート以外は [`Transaction::hash`] と同じになる。
+fn whole_transaction_hash(bytes: &[u8], generation_hash_seed: &GenerationHashSeed) -> Hash256 {
+    Hash256(
+        Sha3_256::new()
+            .chain_update(&bytes[8..72])
+            .chain_update(&bytes[72..UNSIGNED_HEADER_SIZE - 4])
+            .chain_update(generation_hash_seed.0)
+            .chain_update(&bytes[UNSIGNED_HEADER_SIZE..])
+            .finalize()
+            .into(),
+    )
 }
 
 /// ヘッダーの後ろに並ぶトランザクションを、1件ずつの範囲に分ける。
@@ -284,6 +339,7 @@ impl std::error::Error for BlockDecodeError {}
 #[cfg(test)]
 mod tests {
     use heika_core::key::PrivateKey;
+    use heika_transaction::{Aggregate, Body, EmbeddedTransaction, KeyLink, LinkAction};
 
     use super::*;
 
@@ -344,6 +400,90 @@ mod tests {
         );
         // 130 バイトのものの後ろだけ、6バイトのパディングが入る
         assert_eq!(block.as_bytes().len(), 376 + 136 + 128 + 133);
+    }
+
+    /// 署名した VrfKeyLink と、連署のあるアグリゲート
+    fn signed_transactions(seed: &GenerationHashSeed) -> Vec<Transaction> {
+        let signer = PublicKey::from_private_key(&private_key());
+        let link = |byte| {
+            Body::VrfKeyLink(KeyLink {
+                linked_public_key: PublicKey([byte; 32]),
+                link_action: LinkAction::Link,
+            })
+        };
+        let mut single = Transaction::new(signer, NetworkIdentifier::MAINNET, 0, 0, link(1));
+        single.sign(&private_key(), seed).unwrap();
+        let aggregate = Aggregate::new(vec![EmbeddedTransaction::new(
+            signer,
+            NetworkIdentifier::MAINNET,
+            link(2),
+        )])
+        .unwrap();
+        let mut aggregate = Transaction::new(
+            signer,
+            NetworkIdentifier::MAINNET,
+            0,
+            0,
+            Body::AggregateComplete(aggregate),
+        );
+        aggregate.sign(&private_key(), seed).unwrap();
+        aggregate
+            .cosign(&PrivateKey::from_bytes(&[8; 32]), seed)
+            .unwrap();
+        vec![single, aggregate]
+    }
+
+    #[test]
+    fn calculates_the_transactions_hash_from_merkle_component_hashes() {
+        let seed = GenerationHashSeed::MAINNET;
+        let transactions = signed_transactions(&seed);
+        let bytes: Vec<_> = transactions.iter().map(Transaction::to_bytes).collect();
+        let mut block_bytes = block(0x8143, &bytes, &private_key());
+        let leaves: Vec<_> = transactions
+            .iter()
+            .map(|transaction| transaction.merkle_component_hash(&seed))
+            .collect();
+        // 連署のあるアグリゲートの葉は、ハッシュそのものではない
+        assert_ne!(leaves[1], transactions[1].hash(&seed));
+        let expected = merkle::root(&leaves);
+        block_bytes[248..280].copy_from_slice(&expected.0);
+
+        let block = Block::from_bytes(&block_bytes).unwrap();
+        assert_eq!(block.calculate_transactions_hash(&seed), Ok(expected));
+        assert_eq!(block.verify_transactions_hash(&seed), Ok(true));
+        assert_eq!(
+            block.verify_transactions_hash(&GenerationHashSeed::TESTNET),
+            Ok(false)
+        );
+
+        let empty = Block::from_bytes(&self::block(0x8143, &[], &private_key())).unwrap();
+        assert_eq!(empty.verify_transactions_hash(&seed), Ok(true));
+
+        let unknown =
+            Block::from_bytes(&self::block(0x8143, &[transaction(128, 0)], &private_key()))
+                .unwrap();
+        assert!(unknown.calculate_transactions_hash(&seed).is_err());
+    }
+
+    #[test]
+    fn hashes_nemesis_transactions_whole() {
+        let seed = GenerationHashSeed::MAINNET;
+        let transactions = signed_transactions(&seed);
+        let bytes: Vec<_> = transactions.iter().map(Transaction::to_bytes).collect();
+        let leaves: Vec<_> = bytes
+            .iter()
+            .map(|bytes| whole_transaction_hash(bytes, &seed))
+            .collect();
+        // アグリゲート以外は、ふつうのハッシュと同じ
+        assert_eq!(leaves[0], transactions[0].hash(&seed));
+        // アグリゲートは、中のトランザクションと連署まで丸ごと入る
+        assert_ne!(leaves[1], transactions[1].hash(&seed));
+        assert_ne!(leaves[1], transactions[1].merkle_component_hash(&seed));
+
+        let mut block_bytes = block(0x8043, &bytes, &private_key());
+        block_bytes[248..280].copy_from_slice(&merkle::root(&leaves).0);
+        let nemesis = Block::from_bytes(&block_bytes).unwrap();
+        assert_eq!(nemesis.verify_transactions_hash(&seed), Ok(true));
     }
 
     #[test]

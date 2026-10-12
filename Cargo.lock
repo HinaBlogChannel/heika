@@ -395,6 +395,7 @@ dependencies = [
  "heika-tls",
  "heika-transaction",
  "heika-wallet",
+ "libc",
  "rand_core",
  "serde_json",
  "zeroize",

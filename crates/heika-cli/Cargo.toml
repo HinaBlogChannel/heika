@@ -23,6 +23,10 @@ heika-wallet = { version = "0.2.0", path = "../heika-wallet" }
 rand_core = "0.10.1"
 zeroize = "1.9.1"
 
+[target.'cfg(unix)'.dependencies]
+# 端末から秘密を読むあいだ、termios で打った文字を画面に出さないようにする
+libc = "0.2.190"
+
 [dev-dependencies]
 # 自前で書く peers-p2p.json を、別の実装で読み戻して確かめる
 serde_json = "1.0.151"

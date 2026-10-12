@@ -23,6 +23,7 @@ use heika_cert::key;
 use heika_core::network::NetworkIdentifier;
 use heika_p2p::Node;
 use heika_tls::Identity;
+use heika_transaction::{Content, scan};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,10 +69,11 @@ fn connect() -> Option<Node> {
 
 #[test]
 #[ignore = "環境変数で指定したメインネットのノードにつなぐ"]
-fn mainnet_blocks_are_signed_and_chained() {
+fn mainnet_blocks_are_signed_chained_and_scannable() {
     let Some(mut node) = connect() else {
         return;
     };
+    let (mut read, mut skipped) = (0, 0);
     for (name, start, count) in RANGES {
         let blocks = node
             .pull_blocks(start, count, 16 * 1024 * 1024)
@@ -108,6 +110,17 @@ fn mainnet_blocks_are_signed_and_chained() {
                 _ => BlockType::Normal,
             };
             assert_eq!(block.block_type, expected_type, "{name}: {height}");
+            // 中のトランザクションは、どれも知っている種類とバージョンで、読む種類は読めるはず
+            for transaction in block.transactions() {
+                for scanned in scan(transaction).unwrap_or_else(|error| {
+                    panic!("{name}: 高さ {height} のトランザクション: {error}")
+                }) {
+                    match scanned.content {
+                        Content::Read(_) => read += 1,
+                        Content::Skipped { .. } => skipped += 1,
+                    }
+                }
+            }
             if index > 0 {
                 assert_eq!(
                     block.previous_block_hash,
@@ -117,4 +130,7 @@ fn mainnet_blocks_are_signed_and_chained() {
             }
         }
     }
+    // 走査が空回りしていないことを確かめる
+    eprintln!("トランザクション: 読んだ {read} 件、飛ばした {skipped} 件");
+    assert!(read > 0 && skipped > 0);
 }

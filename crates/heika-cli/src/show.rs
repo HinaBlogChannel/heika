@@ -18,7 +18,7 @@ use heika_transaction::{
 };
 use heika_wallet::harvest_request;
 
-use crate::Network;
+use crate::{Network, json};
 
 /// ネットワークの設定 blockGenerationTargetTime。メインネットもテストネットも 30s
 const BLOCK_TIME: Duration = Duration::from_secs(30);
@@ -63,6 +63,31 @@ impl Description {
         let mut out = String::new();
         self.render_into(&mut out, 0);
         out
+    }
+
+    /// JSON にする。項目の名前と値は、表示と同じ文字列のまま入れる
+    pub fn to_json(&self) -> json::Value {
+        json::Value::Object(vec![
+            ("title", self.title.as_str().into()),
+            (
+                "fields",
+                json::Value::Array(
+                    self.fields
+                        .iter()
+                        .map(|field| {
+                            json::Value::Object(vec![
+                                ("label", field.label.into()),
+                                ("value", field.value.as_str().into()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "embedded",
+                json::Value::Array(self.embedded.iter().map(Description::to_json).collect()),
+            ),
+        ])
     }
 
     fn render_into(&self, out: &mut String, depth: usize) {
@@ -944,6 +969,21 @@ mod tests {
         let rendered = description.render();
         assert!(rendered.contains("\n  中のトランザクション 1/2"));
         assert!(rendered.contains("\n    メッセージ: 平文 \"a\"\n"));
+    }
+
+    #[test]
+    fn writes_the_same_fields_as_json() {
+        let description = describe(&transaction(transfer(own_address(), &[], b"\0hi")), epoch());
+        let json: serde_json::Value =
+            serde_json::from_str(&description.to_json().render()).unwrap();
+        assert_eq!(json["title"], description.title);
+        let fields = json["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), description.fields.len());
+        for (field, expected) in fields.iter().zip(&description.fields) {
+            assert_eq!(field["label"], expected.label);
+            assert_eq!(field["value"], expected.value);
+        }
+        assert_eq!(json["embedded"], serde_json::json!([]));
     }
 
     #[test]

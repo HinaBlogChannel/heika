@@ -1,5 +1,6 @@
 //! ウォレットのための計算。合意形成には関わらない、鍵を作ったり覚えやすくしたり、ノードに鍵を渡したりするもの。
 
+pub mod age;
 pub mod bip39;
 pub mod cipher;
 pub mod harvest_request;

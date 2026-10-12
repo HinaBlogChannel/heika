@@ -1,5 +1,14 @@
 # ノード
 
+## できること
+
+- 近くて速いノードを探す（ノードと TLS でつなぎ、接続にかかる時間、高さ、ブロックの読み出しの速さを測る。REST のないノードも調べられる）
+- 見つけた速いノードを、catapult の peers-p2p.json の形式で書く
+- 測った結果を JSON で出す
+- ノードあての委任の一覧（ブロックから委任の要求を拾い、メインアカウントのリンクと比べて、今も有効かを出す。harvesters.dat と突き合わせて、入っていない有効な委任を足した harvesters.dat を書ける）
+
+## コマンドの例
+
 ```sh
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json < node.key.pem

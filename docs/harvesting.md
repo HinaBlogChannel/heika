@@ -1,5 +1,14 @@
 # ハーベストとトランザクション
 
+## できること
+
+- ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）
+- 投票鍵のファイルの作成と確認、チェーンへの紐づけ（catapult の votingkey と同じファイルを書き、公式の Python SDK と照合している）
+- トランザクションの中身の表示（25種類すべてと、チェーンにある古いバージョンのアグリゲート）
+- トランザクションへの署名と連署と、ノードへの送信（ノードの証明書で名乗って、ノードと TLS でつなぐ）
+
+## コマンドの例
+
 ```sh
 heika key voting generate --network mainnet --start-epoch <エポック> --end-epoch <エポック> --out private_key_tree1.dat
 heika key voting show private_key_tree1.dat

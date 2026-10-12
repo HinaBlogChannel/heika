@@ -453,7 +453,10 @@ name = "heika-vectors"
 version = "0.3.0"
 dependencies = [
  "heika-block",
+ "heika-cert",
  "heika-core",
+ "heika-p2p",
+ "heika-tls",
  "heika-transaction",
  "heika-wallet",
  "rand_core",

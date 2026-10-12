@@ -33,7 +33,7 @@ use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use crate::age::{self, AgeError};
-use crate::bip39::Mnemonic;
+use crate::bip39::{InvalidPassphrase, Mnemonic};
 use crate::slip10::{self, ExtendedKey};
 
 const VERSION: &str = "1";
@@ -113,21 +113,32 @@ impl Keystore {
     }
 
     /// ラベルでアカウントを探し、その秘密鍵を求める。
-    pub fn private_key(&self, label: &str) -> Option<(&Account, PrivateKey)> {
+    ///
+    /// ニーモニックのアカウントは、`bip39_passphrase` を BIP39 のパスフレーズにして導出する。
+    /// 公式ウォレットと同じ鍵になるのは空のときだけで、それ以外は同じ番号でも別の鍵（隠しウォレット）になる。
+    /// 秘密鍵のアカウントには関係しない。
+    pub fn private_key(
+        &self,
+        label: &str,
+        bip39_passphrase: &str,
+    ) -> Result<(&Account, PrivateKey), KeystoreError> {
         let (entry, account) = self
             .accounts()
-            .find(|(_, account)| account.label == label)?;
+            .find(|(_, account)| account.label == label)
+            .ok_or_else(|| KeystoreError::UnknownLabel(label.to_owned()))?;
         let private_key = match &self.entries[entry].secret {
             Secret::PrivateKey(private_key) => PrivateKey::from_bytes(private_key.as_bytes()),
             Secret::Mnemonic(mnemonic) => {
-                let seed = mnemonic.to_seed("").expect("the empty passphrase is valid");
+                let seed = mnemonic
+                    .to_seed(bip39_passphrase)
+                    .map_err(KeystoreError::Bip39Passphrase)?;
                 let index = account.index.expect("checked when added or read");
                 ExtendedKey::from_seed(seed.as_bytes())
                     .derive_path(&slip10::symbol_path(account.network, index))
                     .private_key()
             }
         };
-        Some((account, private_key))
+        Ok((account, private_key))
     }
 
     /// 開いた中身のテキスト。秘密が入るので、消えるようにして返す。
@@ -327,6 +338,10 @@ pub enum KeystoreError {
     InvalidLabel(String),
     /// 同じラベルのアカウントがすでにある
     DuplicateLabel(String),
+    /// そのラベルのアカウントがない
+    UnknownLabel(String),
+    /// BIP39 のパスフレーズに使えない
+    Bip39Passphrase(InvalidPassphrase),
 }
 
 impl fmt::Display for KeystoreError {
@@ -344,6 +359,8 @@ impl fmt::Display for KeystoreError {
                 "ラベルは1文字以上で、制御文字を含まず、前後に空白がないものにしてください",
             ),
             Self::DuplicateLabel(label) => write!(f, "ラベル {label:?} のアカウントはもうあります"),
+            Self::UnknownLabel(label) => write!(f, "ラベル {label:?} のアカウントはありません"),
+            Self::Bip39Passphrase(error) => write!(f, "BIP39 のパスフレーズ: {error}"),
         }
     }
 }
@@ -428,20 +445,39 @@ mod tests {
     #[test]
     fn derives_keys_like_heika_key_derive() {
         let keystore = keystore();
-        let (account, main) = keystore.private_key("main").unwrap();
+        let (account, main) = keystore.private_key("main", "").unwrap();
         assert_eq!(account.index, Some(0));
         let seed = MNEMONIC.parse::<Mnemonic>().unwrap().to_seed("").unwrap();
         let expected = ExtendedKey::from_seed(seed.as_bytes())
             .derive_path(&slip10::symbol_path(NetworkIdentifier::MAINNET, 0))
             .private_key();
         assert_eq!(main.as_bytes(), expected.as_bytes());
-        let (_, cold) = keystore.private_key("cold").unwrap();
+        let (_, cold) = keystore.private_key("cold", "").unwrap();
         assert_eq!(*cold.to_hex(), PRIVATE_KEY);
         assert_ne!(
-            PublicKey::from_private_key(&keystore.private_key("テスト用 3").unwrap().1),
+            PublicKey::from_private_key(&keystore.private_key("テスト用 3", "").unwrap().1),
             PublicKey::from_private_key(&main)
         );
-        assert!(keystore.private_key("none").is_none());
+        assert_eq!(
+            keystore.private_key("none", "").unwrap_err(),
+            KeystoreError::UnknownLabel("none".to_owned())
+        );
+        // BIP39 のパスフレーズを変えると、同じ番号でも別の鍵になる。秘密鍵のアカウントは変わらない
+        let hidden = keystore.private_key("main", "hidden").unwrap().1;
+        assert_ne!(hidden.as_bytes(), main.as_bytes());
+        let seed = MNEMONIC
+            .parse::<Mnemonic>()
+            .unwrap()
+            .to_seed("hidden")
+            .unwrap();
+        let expected = ExtendedKey::from_seed(seed.as_bytes())
+            .derive_path(&slip10::symbol_path(NetworkIdentifier::MAINNET, 0))
+            .private_key();
+        assert_eq!(hidden.as_bytes(), expected.as_bytes());
+        assert_eq!(
+            *keystore.private_key("cold", "hidden").unwrap().1.to_hex(),
+            PRIVATE_KEY
+        );
     }
 
     #[test]

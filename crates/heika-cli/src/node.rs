@@ -81,6 +81,9 @@ pub enum NodeCommand {
         /// 走査を終える高さ。省略するとノードの今の高さ
         #[arg(long, value_name = "HEIGHT")]
         to_height: Option<u64>,
+        /// ノードの harvesters.dat。渡すと、見つけた要求が入っているかを突き合わせる。読むだけで書き換えない
+        #[arg(long, value_name = "PATH")]
+        harvesters_dat: Option<PathBuf>,
     },
 }
 
@@ -104,11 +107,13 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             client_cert,
             from_height,
             to_height,
+            harvesters_dat,
         } => crate::delegations::run(crate::delegations::Args {
             connect: &connect,
             client_cert: &client_cert,
             from_height,
             to_height,
+            harvesters_dat: harvesters_dat.as_deref(),
         })?,
         NodeCommand::Find {
             connect,

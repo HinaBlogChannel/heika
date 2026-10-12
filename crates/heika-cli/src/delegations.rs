@@ -1,5 +1,7 @@
 //! `heika node delegations`: ノードあての委任の要求をブロックから拾い、今も有効かを出す。
 
+use std::collections::HashSet;
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -8,6 +10,7 @@ use heika_block::Block;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_harvesting::delegation::{DelegationTracker, LinkKind, Status};
+use heika_harvesting::harvesters_dat;
 use heika_p2p::Node;
 use heika_tls::Identity;
 use heika_transaction::scan;
@@ -30,6 +33,7 @@ pub struct Args<'a> {
     pub client_cert: &'a Path,
     pub from_height: u64,
     pub to_height: Option<u64>,
+    pub harvesters_dat: Option<&'a Path>,
 }
 
 pub fn run(args: Args) -> Result<(), Failure> {
@@ -37,6 +41,17 @@ pub fn run(args: Args) -> Result<(), Failure> {
     let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
     let identity = Identity::new(&chain, &key)
         .map_err(|error| format!("{}: {error}", args.client_cert.display()))?;
+    // 壊れていれば走査に時間をかける前に止まれるように、先に読む
+    let harvesters = match args.harvesters_dat {
+        Some(path) => {
+            let bytes = fs::read(path)
+                .map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?;
+            let entries = harvesters_dat::read(&bytes, &key)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            Some(entries)
+        }
+        None => None,
+    };
     let connect = |address: &str| {
         Node::connect(address, &identity, TIMEOUT).map_err(|error| format!("{address}: {error}"))
     };
@@ -118,12 +133,31 @@ pub fn run(args: Args) -> Result<(), Failure> {
     drop(node);
 
     let report = tracker.finish();
-    outln!("高さ        状態  メインアカウント");
+    let in_harvesters: Option<HashSet<_>> = harvesters.as_ref().map(|entries| {
+        entries
+            .iter()
+            .map(|entry| entry.encrypted_payload)
+            .collect()
+    });
+    let column = |payload| match &in_harvesters {
+        None => "",
+        Some(payloads) if payloads.contains(payload) => "入っている  ",
+        Some(_) => "            ",
+    };
+    outln!(
+        "高さ        状態  {}メインアカウント",
+        if in_harvesters.is_some() {
+            "harvesters.dat  "
+        } else {
+            ""
+        }
+    );
     for delegation in &report.delegations {
         outln!(
-            "{:<10}  {}  {}{}",
+            "{:<10}  {}  {}{}{}",
             delegation.height,
             status_label(&delegation.status),
+            column(&delegation.encrypted_payload),
             Address::from_public_key(&delegation.main_account, network),
             status_detail(&delegation.status),
         );
@@ -146,6 +180,40 @@ pub fn run(args: Args) -> Result<(), Failure> {
     outln!(
         "有効はリンクが3つとも要求と合っているもの、無効は合わないリンクがあるもの、不明は走査した範囲でリンクを見ていないものです。同じアカウントの要求が複数あるときは、最新のリンクに合うものだけが有効になります"
     );
+    if let (Some(entries), Some(payloads)) = (&harvesters, &in_harvesters) {
+        let found: HashSet<_> = report
+            .delegations
+            .iter()
+            .map(|delegation| delegation.encrypted_payload)
+            .collect();
+        let missing = |predicate: fn(&Status) -> bool| {
+            report
+                .delegations
+                .iter()
+                .filter(|delegation| {
+                    predicate(&delegation.status)
+                        && !payloads.contains(&delegation.encrypted_payload)
+                })
+                .count()
+        };
+        outln!(
+            "harvesters.dat の {} 件のうち、走査で見つけた要求にあるもの {}、ないもの {}",
+            entries.len(),
+            entries
+                .iter()
+                .filter(|entry| found.contains(&entry.encrypted_payload))
+                .count(),
+            entries
+                .iter()
+                .filter(|entry| !found.contains(&entry.encrypted_payload))
+                .count(),
+        );
+        outln!(
+            "harvesters.dat に入っていない要求: 有効 {}、不明 {}。有効なものは、harvesters.dat に入れればノードがまた使えます",
+            missing(|status| matches!(status, Status::Active)),
+            missing(|status| matches!(status, Status::Unknown { .. })),
+        );
+    }
     if report.undecryptable > 0 {
         outln!(
             "このノードあてなのに、ノードの鍵で復号できない要求が {} 件ありました。ノードも捨てるものです",

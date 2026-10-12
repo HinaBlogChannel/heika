@@ -105,11 +105,19 @@ pub enum WalletCommand {
     },
     /// キーストアのパスフレーズを変える。新しいパスフレーズは2回聞いて確かめる
     ///
-    /// 前のパスフレーズで開ける .bak は消す。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限らない。
+    /// 前のパスフレーズで開ける .bak を消すかは、端末で聞く。--new-passphrase-file のときは聞かずに残す。
+    /// 消すと漏れたときの心配は減るが、新しいパスフレーズを忘れたときに戻せなくなる。
+    /// また、ファイルを消しても、ディスクの上から読めなくなるとは限らない。
     ChangePassphrase {
         /// 新しいパスフレーズを、端末から聞く代わりにこのファイルの1行目から読む
         #[arg(long, value_name = "PATH")]
         new_passphrase_file: Option<PathBuf>,
+        /// 前のパスフレーズで開ける .bak を、聞かずに消す
+        #[arg(long, conflicts_with = "keep_backup")]
+        remove_backup: bool,
+        /// 前のパスフレーズで開ける .bak を、聞かずに残す
+        #[arg(long)]
+        keep_backup: bool,
         #[command(flatten)]
         keystore: KeystoreArgs,
     },
@@ -341,6 +349,8 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
         }
         WalletCommand::ChangePassphrase {
             new_passphrase_file,
+            remove_backup,
+            keep_backup,
             keystore,
         } => {
             let (path, passphrase, store) = keystore.open()?;
@@ -348,26 +358,38 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             if *next == *passphrase {
                 return Err("前と同じパスフレーズです".to_owned().into());
             }
+            let backup = with_suffix(&path, ".bak");
+            // 書くと、前のファイルが .bak になる。消すかは、書く前に決めておく
+            let remove_backup = if remove_backup || keep_backup || new_passphrase_file.is_some() {
+                remove_backup
+            } else {
+                eprintln!(
+                    "変えたあとも、前のパスフレーズで開ける {} が残ります。消すと漏れたときの心配は減りますが、新しいパスフレーズを忘れたときに戻せなくなります",
+                    backup.display()
+                );
+                terminal::confirm("Remove it? [y/N]: ")?
+            };
             save(&path, &store, &next)?;
             outln!("パスフレーズを変えました: {}", path.display());
-            let backup = with_suffix(&path, ".bak");
-            match fs::remove_file(&backup) {
-                Ok(()) => {
-                    sync_directory(directory_of(&path))?;
-                    outln!(
-                        "前のパスフレーズで開ける {} を消しました。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限りません",
-                        backup.display()
-                    );
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!(
+            if !remove_backup {
+                outln!(
+                    "前のパスフレーズで開ける {} を残しました。要らなくなったら消してください",
+                    backup.display()
+                );
+                return Ok(());
+            }
+            fs::remove_file(&backup)
+                .and_then(|()| sync_directory(directory_of(&path)).map_err(io::Error::other))
+                .map_err(|error| {
+                    format!(
                         "{} を消せませんでした。前のパスフレーズで開けるので、手で消してください: {error}",
                         backup.display()
                     )
-                    .into());
-                }
-            }
+                })?;
+            outln!(
+                "前のパスフレーズで開ける {} を消しました。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限りません",
+                backup.display()
+            );
         }
         WalletCommand::Rename {
             label,

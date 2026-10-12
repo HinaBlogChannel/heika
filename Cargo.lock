@@ -452,6 +452,7 @@ dependencies = [
 name = "heika-vectors"
 version = "0.3.0"
 dependencies = [
+ "heika-block",
  "heika-core",
  "heika-transaction",
  "heika-wallet",

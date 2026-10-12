@@ -6,6 +6,7 @@
 - 鍵の PEM と16進の相互変換（秘密鍵は PKCS#8 の v1 と、公開鍵だけが付いた v2 を読める）
 - 端末から秘密鍵を入れるときに、画面に出さない（Unix と Windows）
 - ニーモニックと秘密鍵を、パスフレーズで暗号化したキーストアにしまう（age 形式なので、heika がなくても `age -d` で開ける）。署名と連署にそのまま使える
+- キーストアのパスフレーズの変更と、アカウントのラベルの変更、削除
 
 秘密鍵とニーモニックは標準入力からのみ読む。キーストアのパスフレーズだけは、標準入力とは別に端末から聞く。扱いの方針は [secrets.md](secrets.md) にある。
 
@@ -33,7 +34,12 @@ heika wallet import --mnemonic --label old --network mainnet < alice.mnemonic
 heika wallet derive --from main --label sub --network mainnet --account 1
 heika wallet list
 heika wallet export --label main --out main.key
+heika wallet rename --label sub --new-label savings
+heika wallet remove --label savings
+heika wallet change-passphrase
 heika tx sign --network mainnet harvesting.bin --out harvesting.signed --wallet-account main
 ```
 
 `heika wallet` は、ニーモニックや秘密鍵を、パスフレーズで暗号化した1つのファイル（キーストア）にしまう。`heika wallet add` はニーモニックか秘密鍵をその場で作ってキーストアに入れるので、作った秘密が平文のファイルになることがない。すでにあるものは `heika wallet import` で標準入力から取り込む。置き場所は、Linux では `~/.local/share/heika/keystore.age`、macOS では `~/Library/Application Support/heika/keystore.age`、Windows では `%LOCALAPPDATA%\heika\keystore.age` で、`--keystore` で変えられる。ファイルは age 形式で、heika がなくても `age -d` で開け、中身は人が読めるテキストである（形式は [keystore.md](docs/keystore.md)）。ニーモニックからは、公式ウォレットと同じパスでアカウントを増やせる。`heika tx sign` と `heika tx cosign` に `--wallet-account <ラベル>` を付けると、標準入力の代わりにキーストアの鍵で署名する。パスフレーズは端末から聞き、スクリプトから動かすときは `--passphrase-file` で渡せる。`--expert` を付けると、続けて BIP39 のパスフレーズも聞く。空なら公式ウォレットと同じ鍵、何か入れると同じ番号のまま別の鍵（隠しウォレット）になる。BIP39 のパスフレーズはどこにも保存しないので、隠しウォレットがあることはキーストアからはわからない。その代わり、忘れると取り戻せず、公式ウォレットでも開けない。キーストアはバックアップの代わりにならないので、ニーモニックは紙にも控えておく。
+
+`heika wallet rename` はアカウントのラベルを、`heika wallet change-passphrase` はキーストアのパスフレーズを変える。パスフレーズを変えると、前のパスフレーズで開ける `.bak` を消すかを聞く。`heika wallet remove` はアカウントを消すが、ニーモニックや秘密鍵の最後のアカウントは、`--with-secret` を付けたときだけ秘密ごと消す。どちらの場合も、消す前の中身は `.bak` に残るので、残したくなければそれも消す。

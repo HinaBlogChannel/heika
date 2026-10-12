@@ -135,6 +135,17 @@ pub fn prompt_line(prompt: &str) -> Result<Zeroizing<String>, String> {
     line
 }
 
+/// 端末で、はいかいいえを聞く。秘密ではないので、打った文字は出す。y か yes のときだけ、はいにする。
+pub fn confirm(prompt: &str) -> Result<bool, String> {
+    let mut terminal = Terminal::open()?;
+    eprint!("{prompt}");
+    let answer = terminal.read_line()?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 #[cfg(unix)]
 struct Terminal(File);
 

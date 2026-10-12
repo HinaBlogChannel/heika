@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use der::DateTime;
 use heika_cert::certificate::{
     Certificate, ParseCertificateError, Template, Version, check_catapult_chain,
@@ -21,6 +21,8 @@ use crate::{Failure, Network, read_secret};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// heika cert check --connect で、ハンドシェイクのあと待つ時間
+const CHECK_WAIT: Duration = Duration::from_secs(1);
 /// shoestring と symbol-bootstrap の既定値
 const CA_DAYS: u32 = 7300;
 const NODE_DAYS: u32 = 375;
@@ -111,6 +113,41 @@ pub enum CertCommand {
         wait: u64,
         #[arg(long, value_enum, default_value_t = Network::Mainnet)]
         network: Network,
+    },
+    /// 証明書の期限が近いかを確かめ、終了コードで知らせる
+    ///
+    /// 証明書のファイル、shoestring か symbol-bootstrap の証明書のフォルダー（CA とノードの証明書）、
+    /// --connect のノードが実際に出している証明書について、期限までの日数を1行ずつ出す。
+    /// 終了コードは、どれも --warn-days 日より先なら 0。
+    /// 期限まで --warn-days 日を切ったもの、切れたもの、まだ有効でないものがあれば 1（openssl x509 -checkend と同じ）。
+    /// 確かめられないものがあれば 2 で、引数の誤りも 2 になる。1 と 2 の両方にあたるときは 1 にする。
+    /// heika のほかのコマンドは、エラーを 1 で返すので注意する。
+    /// 定期実行（cron、systemd の timer など）から呼ぶためのもので、対話はしない。
+    /// --connect では --client-cert のチェーンで名乗り、その秘密鍵（PEM か16進）を標準入力から読む。
+    #[command(group(
+        ArgGroup::new("targets")
+            .args(["paths", "shoestring_certs_dir", "bootstrap_certs_dir", "connect"])
+            .required(true)
+            .multiple(true)
+    ))]
+    Check {
+        /// 証明書のファイル（PEM）。何枚つないであってもよい
+        paths: Vec<PathBuf>,
+        /// shoestring の証明書のフォルダー（CA の証明書は ca.crt.pem）。何度でも指定できる
+        #[arg(long, value_name = "DIR")]
+        shoestring_certs_dir: Vec<PathBuf>,
+        /// symbol-bootstrap の証明書のフォルダー（CA の証明書は ca.cert.pem）。何度でも指定できる
+        #[arg(long, value_name = "DIR")]
+        bootstrap_certs_dir: Vec<PathBuf>,
+        /// 調べるノード（ホスト:ポート）。何度でも指定できる
+        #[arg(long, value_name = "HOST:PORT", requires = "client_cert")]
+        connect: Vec<String>,
+        /// --connect で名乗る証明書のチェーン（ノード、CA の順の PEM）
+        #[arg(long, value_name = "PATH", requires = "connect")]
+        client_cert: Option<PathBuf>,
+        /// 期限まで何日を切ったら知らせるか
+        #[arg(long, value_name = "DAYS", default_value_t = 30)]
+        warn_days: u32,
     },
 }
 
@@ -344,8 +381,224 @@ pub fn run(command: CertCommand) -> Result<(), Failure> {
             }
             _ => unreachable!("clap requires a path or --connect with --client-cert"),
         },
+        CertCommand::Check {
+            paths,
+            shoestring_certs_dir,
+            bootstrap_certs_dir,
+            connect,
+            client_cert,
+            warn_days,
+        } => {
+            let dirs = shoestring_certs_dir
+                .into_iter()
+                .map(|path| CertsDir::new(path, Layout::Shoestring))
+                .chain(
+                    bootstrap_certs_dir
+                        .into_iter()
+                        .map(|path| CertsDir::new(path, Layout::Bootstrap)),
+                )
+                .collect::<Vec<_>>();
+            let code = match check(&paths, &dirs, &connect, client_cert.as_deref(), warn_days) {
+                Ok(code) => code,
+                // 1 は期限が近いことに使うので、途中で確かめられなくなったときも 2 で終わる
+                Err(Failure::Message(message)) => {
+                    eprintln!("error: {message}");
+                    Some(2)
+                }
+                Err(failure) => return Err(failure),
+            };
+            if let Some(code) = code {
+                return Err(Failure::Code(code));
+            }
+        }
     }
     Ok(())
+}
+
+/// heika cert check の本体。終了コードを返し、成功なら None。
+fn check(
+    paths: &[PathBuf],
+    dirs: &[CertsDir],
+    connect: &[String],
+    client_cert: Option<&Path>,
+    warn_days: u32,
+) -> Result<Option<u8>, Failure> {
+    let now = SystemTime::now();
+    let warn = DAY * warn_days;
+    let mut check = Check::default();
+    for path in paths {
+        match read_chain(path) {
+            Ok(chain) => check.chain(
+                &path.display().to_string(),
+                chain.into_iter().map(Ok).collect(),
+                now,
+                warn,
+            )?,
+            Err(error) => check.error(&error)?,
+        }
+    }
+    for dir in dirs {
+        for (path, certificate) in [
+            (dir.ca_certificate_path(), dir.ca_certificate()),
+            (dir.node_certificate_path(), dir.node_certificate()),
+        ] {
+            match certificate {
+                Ok(certificate) => {
+                    check.certificate(&path.display().to_string(), &certificate, now, warn)?
+                }
+                Err(error) => check.error(&error.to_string())?,
+            }
+        }
+    }
+    if let Some(client_cert) = client_cert {
+        let chain = read_chain(client_cert)?;
+        let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
+        let identity = Identity::new(&chain, &key)
+            .map_err(|error| format!("{}: {error}", client_cert.display()))?;
+        drop(key);
+        for address in connect {
+            // 期限の切れた証明書も取り出せるように、catapult の条件では確かめずにつなぐ。
+            // こちらの証明書が受け付けられたかは見ないが、待つ時間に 0 は渡せないので短く待つ
+            match heika_tls::inspect(address, &identity, CONNECT_TIMEOUT, CHECK_WAIT) {
+                Ok(inspection) => check.chain(
+                    address,
+                    inspection
+                        .peer_certificates
+                        .iter()
+                        .map(|der| Certificate::from_der(der))
+                        .collect(),
+                    now,
+                    warn,
+                )?,
+                Err(error) => check.error(&format!("{address}: {error}"))?,
+            }
+        }
+    }
+    Ok(check.exit_code())
+}
+
+/// heika cert check の、確かめた結果の集計。
+#[derive(Default)]
+struct Check {
+    errors: usize,
+    attentions: usize,
+}
+
+impl Check {
+    /// 2枚以上つないだものは、1枚ずつ何枚目かを付けて確かめる。
+    fn chain(
+        &mut self,
+        label: &str,
+        certificates: Vec<Result<Certificate, ParseCertificateError>>,
+        now: SystemTime,
+        warn: Duration,
+    ) -> Result<(), Failure> {
+        let count = certificates.len();
+        for (index, certificate) in certificates.into_iter().enumerate() {
+            let label = if count > 1 {
+                format!("{label} {}枚目", index + 1)
+            } else {
+                label.to_owned()
+            };
+            match certificate {
+                Ok(certificate) => self.certificate(&label, &certificate, now, warn)?,
+                Err(error) => self.error(&format!("{label}: {error}"))?,
+            }
+        }
+        Ok(())
+    }
+
+    fn certificate(
+        &mut self,
+        label: &str,
+        certificate: &Certificate,
+        now: SystemTime,
+        warn: Duration,
+    ) -> Result<(), Failure> {
+        let days = |duration: Duration| duration.as_secs() / DAY.as_secs();
+        let not_after = format_time(certificate.not_after());
+        let (tag, detail) = match expiry(certificate, now, warn) {
+            Expiry::Valid(left) => ("ok", format!("あと {} 日（{not_after} まで）", days(left))),
+            Expiry::Expiring(left) => (
+                "expiring",
+                format!("あと {} 日（{not_after} まで）", days(left)),
+            ),
+            Expiry::Expired(since) => (
+                "expired",
+                format!("{} 日前に切れました（{not_after} まで）", days(since)),
+            ),
+            Expiry::NotYetValid(until) => (
+                "notyet",
+                format!(
+                    "あと {} 日で有効（{} から）",
+                    days(until),
+                    format_time(certificate.not_before())
+                ),
+            ),
+        };
+        if tag != "ok" {
+            self.attentions += 1;
+        }
+        outln!("{tag:<8} {label}: {detail}");
+        Ok(())
+    }
+
+    /// `error` には、どの証明書かがわかるように、パスかアドレスを入れておく。
+    fn error(&mut self, error: &str) -> Result<(), Failure> {
+        self.errors += 1;
+        outln!("{:<8} {error}", "error");
+        Ok(())
+    }
+
+    /// 期限の近いものがあれば 1、確かめられないものがあれば 2。どちらもなければ成功。
+    ///
+    /// `openssl x509 -checkend` と同じく、期限が近いことを 1 で知らせる。2 は clap が引数の誤りに使うのと同じ。
+    /// 両方あれば、更新が要るとはっきりしている 1 を優先する。
+    fn exit_code(&self) -> Option<u8> {
+        if self.attentions > 0 {
+            Some(1)
+        } else if self.errors > 0 {
+            Some(2)
+        } else {
+            None
+        }
+    }
+}
+
+/// 証明書の期限までの余裕。
+#[derive(Debug, PartialEq, Eq)]
+enum Expiry {
+    /// 期限まで `warn` 以上ある
+    Valid(Duration),
+    /// 期限まで `warn` を切った
+    Expiring(Duration),
+    /// 期限が切れてから、これだけたった
+    Expired(Duration),
+    /// 有効になるまで、まだこれだけある
+    NotYetValid(Duration),
+}
+
+/// 有効期間は、RFC 5280 のとおり両端を含む。
+fn expiry(certificate: &Certificate, now: SystemTime, warn: Duration) -> Expiry {
+    if now < certificate.not_before() {
+        Expiry::NotYetValid(
+            certificate
+                .not_before()
+                .duration_since(now)
+                .unwrap_or_default(),
+        )
+    } else if let Ok(left) = certificate.not_after().duration_since(now) {
+        if left < warn {
+            Expiry::Expiring(left)
+        } else {
+            Expiry::Valid(left)
+        }
+    } else {
+        Expiry::Expired(
+            now.duration_since(certificate.not_after())
+                .unwrap_or_default(),
+        )
+    }
 }
 
 /// 証明書を1枚ずつ出し、2枚以上なら catapult の条件も出す。
@@ -439,20 +692,81 @@ fn describe(certificate: &Certificate) -> Result<(), Failure> {
 
 fn remaining(certificate: &Certificate, now: SystemTime) -> String {
     let days = |duration: Duration| duration.as_secs() / DAY.as_secs();
-    if let Ok(until) = certificate.not_before().duration_since(now) {
-        format!("まだ有効ではありません。あと {} 日で有効", days(until))
-    } else if let Ok(since) = now.duration_since(certificate.not_after()) {
-        format!("期限切れです。{} 日前に切れました", days(since))
-    } else {
-        let left = certificate
-            .not_after()
-            .duration_since(now)
-            .unwrap_or_default();
-        format!("あと {} 日", days(left))
+    match expiry(certificate, now, Duration::ZERO) {
+        Expiry::NotYetValid(until) => {
+            format!("まだ有効ではありません。あと {} 日で有効", days(until))
+        }
+        Expiry::Expired(since) => format!("期限切れです。{} 日前に切れました", days(since)),
+        Expiry::Valid(left) | Expiry::Expiring(left) => format!("あと {} 日", days(left)),
     }
 }
 
 fn format_time(time: SystemTime) -> String {
     DateTime::from_system_time(time)
         .map_or_else(|_| "（表せない時刻）".to_owned(), |time| time.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-01-01T00:00:00Z から 100 日だけ有効な証明書
+    fn certificate() -> (Certificate, SystemTime) {
+        let not_before = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_225_600);
+        let key = PrivateKey::from_bytes(&[1; 32]);
+        let certificate = Certificate::self_signed(
+            &key,
+            &Template {
+                subject: "CN=ca",
+                not_before,
+                not_after: not_before + DAY * 100,
+                serial_number: &[1],
+                version: Version::V1,
+            },
+        )
+        .unwrap();
+        (certificate, not_before)
+    }
+
+    #[test]
+    fn classifies_expiry_at_the_boundaries() {
+        let (certificate, not_before) = certificate();
+        let not_after = not_before + DAY * 100;
+        let warn = DAY * 30;
+        let second = Duration::from_secs(1);
+        assert_eq!(
+            expiry(&certificate, not_before - second, warn),
+            Expiry::NotYetValid(second)
+        );
+        assert_eq!(
+            expiry(&certificate, not_before, warn),
+            Expiry::Valid(DAY * 100)
+        );
+        // ちょうど warn だけ残っているうちは知らせず、1秒でも切ったら知らせる
+        assert_eq!(
+            expiry(&certificate, not_after - warn, warn),
+            Expiry::Valid(warn)
+        );
+        assert_eq!(
+            expiry(&certificate, not_after - warn + second, warn),
+            Expiry::Expiring(warn - second)
+        );
+        assert_eq!(
+            expiry(&certificate, not_after, warn),
+            Expiry::Expiring(Duration::ZERO)
+        );
+        assert_eq!(
+            expiry(&certificate, not_after + second, warn),
+            Expiry::Expired(second)
+        );
+    }
+
+    #[test]
+    fn prefers_attention_over_errors_in_the_exit_code() {
+        let check = |errors, attentions| Check { errors, attentions }.exit_code();
+        assert_eq!(check(0, 0), None);
+        assert_eq!(check(1, 0), Some(2));
+        assert_eq!(check(0, 1), Some(1));
+        assert_eq!(check(1, 1), Some(1));
+    }
 }

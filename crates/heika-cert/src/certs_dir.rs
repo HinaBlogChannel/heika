@@ -59,6 +59,16 @@ impl CertsDir {
         self.read_certificate(NODE_CERTIFICATE)
     }
 
+    /// CA の証明書のファイル。
+    pub fn ca_certificate_path(&self) -> PathBuf {
+        self.path.join(self.layout.ca_certificate())
+    }
+
+    /// ノードの証明書のファイル。
+    pub fn node_certificate_path(&self) -> PathBuf {
+        self.path.join(NODE_CERTIFICATE)
+    }
+
     /// 置き換える前のファイルをコピーしておく既定の場所。
     /// フォルダーの隣の `<フォルダーの名前>.<UTC の日時>.bak`。
     ///

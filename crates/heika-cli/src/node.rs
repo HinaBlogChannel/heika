@@ -15,7 +15,7 @@ use heika_tls::Identity;
 
 use crate::cert::{AnyPrivateKey, read_chain};
 use crate::tx::write_new;
-use crate::{Failure, read_secret};
+use crate::{Failure, json, read_secret};
 
 /// 1つのノードにつなぐときと、1回の問い合わせを待つ時間
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +60,9 @@ pub enum NodeCommand {
         /// --peers-json に書くノードの数の上限
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=1000), requires = "peers_json")]
         peers_count: u16,
+        /// 測った結果を、表の代わりに JSON で標準出力に出す。途中の経過は標準エラーに出す
+        #[arg(long)]
+        json: bool,
     },
     /// ノードあての委任の要求をブロックから拾い、今も有効かを出す
     ///
@@ -130,7 +133,17 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             crawl,
             peers_json,
             peers_count,
+            json,
         } => {
+            // JSON を出すときは、標準出力を JSON だけにする
+            let progress = |text: &str| -> Result<(), Failure> {
+                if json {
+                    eprintln!("{text}");
+                } else {
+                    outln!("{text}");
+                }
+                Ok(())
+            };
             let chain = read_chain(&client_cert)?;
             let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
             let identity = Identity::new(&chain, &key)
@@ -155,14 +168,14 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             let mut queue = VecDeque::from([(connect.clone(), seed_info)]);
             enqueue(&mut queue, &mut seen, peers, network);
 
-            outln!(
+            progress(&format!(
                 "確定済みの高さ {probe_height} から {PROBE_BLOCKS} ブロックを読んで測ります（上限 {limit} 台{}）",
                 if crawl { "、一覧をたどる" } else { "" }
-            );
+            ))?;
             let mut measurements = Vec::new();
-            let mut failures = 0;
+            let mut failures = Vec::new();
             while let Some((address, node)) = queue.pop_front() {
-                if measurements.len() + failures >= usize::from(limit) {
+                if measurements.len() + failures.len() >= usize::from(limit) {
                     break;
                 }
                 match measure(&address, &identity, probe_height, crawl) {
@@ -172,16 +185,20 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                         enqueue(&mut queue, &mut seen, peers, network);
                     }
                     Err(error) => {
-                        failures += 1;
-                        outln!("  {}: {}", printable(&address), without_controls(&error));
+                        progress(&format!(
+                            "  {}: {}",
+                            printable(&address),
+                            without_controls(&error)
+                        ))?;
+                        failures.push((address, error));
                     }
                 }
-                let done = measurements.len() + failures;
+                let done = measurements.len() + failures.len();
                 if done % 50 == 0 {
-                    outln!(
+                    progress(&format!(
                         "  {done} 台を測りました（残り {} 台が待っています）",
                         queue.len()
-                    );
+                    ))?;
                 }
             }
 
@@ -196,25 +213,35 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 })
                 .collect();
             rows.sort_by_key(|(m, _)| m.pull);
-            outln!();
-            outln!("読み出し  接続    遅れ  バージョン  ロール            ノード");
-            for (m, lag) in &rows {
+            if json {
                 outln!(
-                    "{:>6}ms {:>5}ms {:>5}  {:<10}  {:<16}  {} {}",
-                    m.pull.as_millis(),
-                    m.connect.as_millis(),
-                    lag,
-                    m.node.version.to_string(),
-                    m.node.roles.to_string(),
-                    printable(&m.address),
-                    printable(&m.node.friendly_name),
+                    "{}",
+                    find_json(probe_height, &rows, &failures)
+                        .render()
+                        .trim_end()
+                );
+            } else {
+                outln!();
+                outln!("読み出し  接続    遅れ  バージョン  ロール            ノード");
+                for (m, lag) in &rows {
+                    outln!(
+                        "{:>6}ms {:>5}ms {:>5}  {:<10}  {:<16}  {} {}",
+                        m.pull.as_millis(),
+                        m.connect.as_millis(),
+                        lag,
+                        m.node.version.to_string(),
+                        m.node.roles.to_string(),
+                        printable(&m.address),
+                        printable(&m.node.friendly_name),
+                    );
+                }
+                outln!();
+                outln!(
+                    "測れたノード: {}、測れなかったノード: {}。読み出しは {PROBE_BLOCKS} ブロックを読むのにかかった時間、遅れは、測った時刻をブロックの目標間隔でそろえたうえでの、一番進んでいるノードとの高さの差",
+                    rows.len(),
+                    failures.len()
                 );
             }
-            outln!();
-            outln!(
-                "測れたノード: {}、測れなかったノード: {failures}。読み出しは {PROBE_BLOCKS} ブロックを読むのにかかった時間、遅れは、測った時刻をブロックの目標間隔でそろえたうえでの、一番進んでいるノードとの高さの差",
-                rows.len()
-            );
 
             if let Some(path) = peers_json {
                 // 自分のノードを載せると、catapult が自分につなごうとする
@@ -237,11 +264,11 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                     .into());
                 }
                 write_new(&path, peers_p2p_json(&peers).as_bytes())?;
-                outln!(
+                progress(&format!(
                     "{} に {} 台を書きました。Peer のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードを、読み出しの速い順に選んでいます（自分のノードは除く）",
                     path.display(),
                     peers.len()
-                );
+                ))?;
             }
         }
     }
@@ -324,6 +351,50 @@ fn ca_key(node: &Node) -> Result<PublicKey, String> {
         .map_err(|error| format!("CA の証明書を読めません: {error}"))
 }
 
+/// `heika node find --json` の中身。表と同じものを、読み出しの速い順に並べる。
+/// 時間はミリ秒、遅れはブロック。名前やエラーはノードが返したものなので、文字列としてエスケープするだけにする
+fn find_json(
+    probe_height: u64,
+    rows: &[(Measurement, u64)],
+    failures: &[(String, String)],
+) -> json::Value {
+    let nodes = rows
+        .iter()
+        .map(|(m, lag)| {
+            json::Value::Object(vec![
+                ("address", m.address.as_str().into()),
+                ("name", m.node.friendly_name.as_str().into()),
+                ("version", m.node.version.to_string().into()),
+                (
+                    "roles",
+                    json::Value::Array(m.node.roles.names().into_iter().map(Into::into).collect()),
+                ),
+                ("height", m.height.into()),
+                ("lag", (*lag).into()),
+                ("connectMs", (m.connect.as_millis() as u64).into()),
+                ("pullMs", (m.pull.as_millis() as u64).into()),
+                ("nodePublicKey", m.node.identity_key.to_string().into()),
+                ("caPublicKey", m.ca_key.to_string().into()),
+            ])
+        })
+        .collect();
+    let failures = failures
+        .iter()
+        .map(|(address, error)| {
+            json::Value::Object(vec![
+                ("address", address.as_str().into()),
+                ("error", error.as_str().into()),
+            ])
+        })
+        .collect();
+    json::Value::Object(vec![
+        ("probeHeight", probe_height.into()),
+        ("probeBlocks", u64::from(PROBE_BLOCKS).into()),
+        ("nodes", json::Value::Array(nodes)),
+        ("failures", json::Value::Array(failures)),
+    ])
+}
+
 /// peers-p2p.json の endpoint。つないだ `HOST:PORT` を分けたもの。
 struct Endpoint {
     host: String,
@@ -367,33 +438,14 @@ fn peers_p2p_json(peers: &[(&Measurement, Endpoint)]) -> String {
       }}
     }}"#,
             m.ca_key,
-            json_string(&endpoint.host),
+            json::string(&endpoint.host),
             endpoint.port,
-            json_string(&m.node.friendly_name),
+            json::string(&m.node.friendly_name),
             m.node.roles.to_config_value(),
         )
         .expect("writing to a String never fails");
     }
     json.push_str("\n  ]\n}\n");
-    json
-}
-
-/// JSON の文字列。ホストと名前はノードが名乗ったものなので、引用符と制御文字をエスケープする。
-fn json_string(text: &str) -> String {
-    let mut json = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '"' => json.push_str("\\\""),
-            '\\' => json.push_str("\\\\"),
-            c if c.is_control() => {
-                for unit in c.encode_utf16(&mut [0; 2]) {
-                    write!(json, "\\u{unit:04x}").expect("writing to a String never fails");
-                }
-            }
-            c => json.push(c),
-        }
-    }
-    json.push('"');
     json
 }
 
@@ -491,6 +543,30 @@ mod tests {
         ];
         assert_eq!(expected_heights(&measurements), [100, 102, 106]);
     }
+    #[test]
+    fn writes_find_results_that_a_json_parser_reads_back() {
+        let mut m = measurement(100, Instant::now());
+        m.address = "node.example:7900".to_owned();
+        m.node.friendly_name = "name \"\x1b[2J".to_owned();
+        m.connect = Duration::from_millis(12);
+        m.pull = Duration::from_millis(345);
+        let failures = [("down.example:7900".to_owned(), "timed out\n".to_owned())];
+        let rendered = find_json(99_000, &[(m, 2)], &failures).render();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["probeHeight"], 99_000);
+        assert_eq!(json["probeBlocks"], 100);
+        let node = &json["nodes"][0];
+        assert_eq!(node["address"], "node.example:7900");
+        assert_eq!(node["name"], "name \"\x1b[2J");
+        assert_eq!(node["height"], 100);
+        assert_eq!(node["roles"], serde_json::json!(["Peer"]));
+        assert_eq!(node["lag"], 2);
+        assert_eq!(node["connectMs"], 12);
+        assert_eq!(node["pullMs"], 345);
+        assert_eq!(node["caPublicKey"], "0".repeat(64));
+        assert_eq!(json["failures"][0]["error"], "timed out\n");
+    }
+
     #[test]
     fn replaces_control_characters_and_cuts_long_names() {
         assert_eq!(printable("node\x1b[2Jname"), "node?[2Jname");

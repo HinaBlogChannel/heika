@@ -158,10 +158,9 @@ impl NodeRoles {
             .collect::<Vec<_>>()
             .join(",")
     }
-}
 
-impl fmt::Display for NodeRoles {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// 立っているロールの名前。知らないビットは、まとめて `0x100` のような16進で最後に置く。
+    pub fn names(self) -> Vec<String> {
         let mut names: Vec<String> = Self::NAMES
             .iter()
             .filter(|(bit, _)| self.0 & bit != 0)
@@ -171,6 +170,13 @@ impl fmt::Display for NodeRoles {
         if self.0 & !known != 0 {
             names.push(format!("{:#x}", self.0 & !known));
         }
+        names
+    }
+}
+
+impl fmt::Display for NodeRoles {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = self.names();
         if names.is_empty() {
             f.write_str("None")
         } else {

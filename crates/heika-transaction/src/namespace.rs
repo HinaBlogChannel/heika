@@ -1,6 +1,7 @@
 //! ネームスペース。catbuffer の `namespace/`。
 
 use heika_core::address::Address;
+use sha3::{Digest, Sha3_256};
 
 use crate::bounded::BoundedVec;
 use crate::mosaic::MosaicId;
@@ -9,6 +10,20 @@ use crate::{DecodeError, Reader};
 /// ネームスペースの ID。名前と親の ID から決まる。最上位ビットは1。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct NamespaceId(pub u64);
+
+impl NamespaceId {
+    /// 名前と親の ID から ID を求める。catapult の `GenerateNamespaceId` と同じく、
+    /// 親の ID（ルートなら0）と名前を続けた SHA3-256 の先頭8バイトに、モザイクと見分ける最上位ビットを立てて使う。
+    pub fn generate(parent_id: Option<NamespaceId>, name: &[u8]) -> Self {
+        let parent_id = parent_id.map_or(0, |parent_id| parent_id.0);
+        let hash = Sha3_256::new()
+            .chain_update(parent_id.to_le_bytes())
+            .chain_update(name)
+            .finalize();
+        let id = u64::from_le_bytes(hash[..8].try_into().expect("8 bytes"));
+        Self(id | 1 << 63)
+    }
+}
 
 /// ルートか、どの親の下のサブネームスペースか。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -168,6 +183,16 @@ mod tests {
             id: NamespaceId(0x8000_0000_0000_0002),
             name: b"heika".to_vec().try_into().unwrap(),
         }
+    }
+
+    #[test]
+    fn generates_the_id_of_symbol_xym() {
+        // ネットワークの通貨のモザイクに付いている、よく知られたネームスペース
+        let symbol = NamespaceId::generate(None, b"symbol");
+        assert_eq!(
+            NamespaceId::generate(Some(symbol), b"xym"),
+            NamespaceId(0xE74B_99BA_41F4_AFEE)
+        );
     }
 
     #[test]

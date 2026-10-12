@@ -403,7 +403,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heika-block"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "heika-cert"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64ct",
  "der",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "heika-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "der",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "heika-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base16ct",
  "curve25519-dalek",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "heika-harvesting"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "heika-p2p"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-core",
  "heika-tls",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "heika-tls"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-cert",
  "heika-core",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "heika-transaction"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-core",
  "sha3",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "heika-vectors"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "heika-block",
  "heika-cert",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "heika-wallet"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "base64ct",

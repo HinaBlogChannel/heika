@@ -202,6 +202,7 @@ macro_rules! outln {
 
 // `outln!` を使うので、マクロより後に置く
 mod cert;
+mod delegations;
 mod harvesting;
 mod legal;
 mod node;

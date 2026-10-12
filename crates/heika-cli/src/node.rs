@@ -61,6 +61,27 @@ pub enum NodeCommand {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=1000), requires = "peers_json")]
         peers_count: u16,
     },
+    /// ノードあての委任の要求をブロックから拾い、今も有効かを出す
+    ///
+    /// 自分のノードに、ノード自身の証明書（--client-cert）で名乗ってつなぎ、ブロックを順に読む。
+    /// 標準入力から読むノードの秘密鍵（node.key.pem）は、名乗るのにも、委任の要求を復号するのにも使う。
+    /// 要求ごとに、走査した範囲で最後に見たメインアカウントのリンク（リモート、VRF、ノード）と比べ、
+    /// 有効（3つとも合う）、無効（合わないものがある）、不明（走査した範囲でリンクを見ていない）に分ける。
+    /// 知らない種類のトランザクションがあれば、結果が正しくないかもしれないので止める。
+    Delegations {
+        /// 走査するノード。自分のノードにする
+        #[arg(long, value_name = "HOST:PORT")]
+        connect: String,
+        /// ノード自身の証明書のチェーン（node.full.crt.pem）
+        #[arg(long, value_name = "PATH")]
+        client_cert: PathBuf,
+        /// 走査を始める高さ。ノードが委任を受け付け始めたころから
+        #[arg(long, value_name = "HEIGHT")]
+        from_height: u64,
+        /// 走査を終える高さ。省略するとノードの今の高さ
+        #[arg(long, value_name = "HEIGHT")]
+        to_height: Option<u64>,
+    },
 }
 
 /// 1つのノードを測った結果。
@@ -78,6 +99,17 @@ struct Measurement {
 
 pub fn run(command: NodeCommand) -> Result<(), Failure> {
     match command {
+        NodeCommand::Delegations {
+            connect,
+            client_cert,
+            from_height,
+            to_height,
+        } => crate::delegations::run(crate::delegations::Args {
+            connect: &connect,
+            client_cert: &client_cert,
+            from_height,
+            to_height,
+        })?,
         NodeCommand::Find {
             connect,
             client_cert,

@@ -21,6 +21,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 
 - ✅DONE: ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）
 - ✅DONE: トランザクションへの署名と連署と、ノードへの送信（ノードの証明書で名乗って、ノードと TLS でつなぐ）
+- ✅DONE: ノードあての委任の一覧（ブロックから委任の要求を拾い、メインアカウントのリンクと比べて、今も有効かを出す）
 
 ### ノード
 
@@ -105,6 +106,7 @@ heika tx cosign --network mainnet --out harvesting.cosigned.bin harvesting.signe
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem harvesting.signed.bin < node.key.pem
 
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
+heika node delegations --connect <自分のノード>:<ポート> --client-cert node.full.crt.pem --from-height <高さ> < node.key.pem
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json < node.key.pem
 
 heika legal third-party
@@ -122,6 +124,8 @@ DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の�
 `heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
 
 `--peers-json` を付けると、測ったノードのうち、Peer のロールがあって遅れが 5 ブロック以下のノードを、読み出しの速い順に `--peers-count` 台（既定は 10 台）選び、catapult の `peers-p2p.json` の形式で書く。公開鍵は、ノードが名乗ったものではなく、TLS で確かめた CA の公開鍵を書く。自分のノードの証明書で名乗っていれば、自分のノードは除く。すでにあるファイルは上書きしないので、ノードの `resources/peers-p2p.json` には、中身を確かめてから置き換える。
+
+`heika node delegations` は、自分のノードにノード自身の証明書で名乗ってつなぎ、`--from-height` から `--to-height`（省略するとノードの今の高さ）までのブロックを読んで、ノードあての委任の要求を拾う。標準入力から読む `node.key.pem` は、名乗るのにも、要求を復号するのにも使う。要求ごとに、走査した範囲で最後に見たメインアカウントのリンク（リモート、VRF、ノード）と比べ、有効（3つとも合う）、無効（合わないものがある）、不明（走査した範囲でリンクを見ていない）に分けて出す。`--from-height` は、ノードが委任を受け付け始めたころにすると、不明が減る。ネームスペースあての要求は、ネームスペースを解決できないので数えるだけにする。知らない種類のトランザクションがあれば、結果が正しくないかもしれないので止める。
 
 ## テスト
 

@@ -104,6 +104,49 @@ impl Keystore {
         Ok(())
     }
 
+    /// アカウントのラベルを変える。
+    pub fn rename_account(&mut self, label: &str, new_label: &str) -> Result<(), KeystoreError> {
+        check_label(new_label)?;
+        let (entry, position) = self.position(label)?;
+        if self
+            .accounts()
+            .any(|(_, other)| other.label == new_label && other.label != label)
+        {
+            return Err(KeystoreError::DuplicateLabel(new_label.to_owned()));
+        }
+        self.entries[entry].accounts[position].label = new_label.to_owned();
+        Ok(())
+    }
+
+    /// アカウントを外す。秘密は、アカウントがなくなっても残す。
+    pub fn remove_account(&mut self, label: &str) -> Result<(usize, Account), KeystoreError> {
+        let (entry, position) = self.position(label)?;
+        Ok((entry, self.entries[entry].accounts.remove(position)))
+    }
+
+    /// 秘密を、残っているアカウントごと消す。
+    pub fn remove_entry(&mut self, entry: usize) -> Result<Entry, KeystoreError> {
+        if entry >= self.entries.len() {
+            return Err(KeystoreError::Format);
+        }
+        Ok(self.entries.remove(entry))
+    }
+
+    /// ラベルのアカウントが、何番目の秘密の何番目にあるか。
+    fn position(&self, label: &str) -> Result<(usize, usize), KeystoreError> {
+        self.entries
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| {
+                entry
+                    .accounts
+                    .iter()
+                    .position(|account| account.label == label)
+                    .map(|position| (index, position))
+            })
+            .ok_or_else(|| KeystoreError::UnknownLabel(label.to_owned()))
+    }
+
     /// すべてのアカウントと、その秘密の番号。
     pub fn accounts(&self) -> impl Iterator<Item = (usize, &Account)> {
         self.entries
@@ -551,6 +594,42 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn renames_and_removes_accounts() {
+        let mut keystore = keystore();
+        keystore.rename_account("main", "メイン").unwrap();
+        assert_eq!(keystore.private_key("メイン", "").unwrap().0.index, Some(0));
+        // 同じラベルへの変更はそのまま通る
+        keystore.rename_account("cold", "cold").unwrap();
+        assert_eq!(
+            keystore.rename_account("メイン", "cold").unwrap_err(),
+            KeystoreError::DuplicateLabel("cold".to_owned())
+        );
+        assert_eq!(
+            keystore.rename_account("メイン", " a").unwrap_err(),
+            KeystoreError::InvalidLabel(" a".to_owned())
+        );
+        assert_eq!(
+            keystore.rename_account("main", "a").unwrap_err(),
+            KeystoreError::UnknownLabel("main".to_owned())
+        );
+
+        let (entry, account) = keystore.remove_account("テスト用 3").unwrap();
+        assert_eq!((entry, account.index), (0, Some(3)));
+        // アカウントのない秘密も、書いて読み戻せる
+        let (entry, _) = keystore.remove_account("cold").unwrap();
+        let read = Keystore::from_text(&keystore.to_text()).unwrap();
+        assert_eq!(read.entries().len(), 2);
+        assert_eq!(read.accounts().count(), 1);
+        assert!(keystore.remove_entry(entry).unwrap().accounts.is_empty());
+        assert_eq!(keystore.entries().len(), 1);
+        assert_eq!(keystore.remove_entry(1).unwrap_err(), KeystoreError::Format);
+        assert_eq!(
+            keystore.remove_account("cold").unwrap_err(),
+            KeystoreError::UnknownLabel("cold".to_owned())
+        );
     }
 
     #[test]

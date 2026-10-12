@@ -1,4 +1,4 @@
-# master への push と PR で、整形、clippy、テスト、ベクターとの照合、依存のライセンスの一覧の確認をする。
+# master への push と PR で、整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧の確認をする。
 # release.yaml からも、ビルドと並べて呼ぶ
 name: CI
 
@@ -39,6 +39,23 @@ jobs:
       - run: cargo test --locked
       - name: heika-cert を feature つきのモジュールも含めて
         run: cargo test -p heika-cert --all-features --locked
+
+  # Windows でだけ使うコードと、Unix でだけ読み込むものの取り違えを、タグを打つ前に見つける
+  windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェイン
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   vectors:
     runs-on: ubuntu-24.04

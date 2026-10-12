@@ -409,6 +409,7 @@ dependencies = [
  "libc",
  "rand_core",
  "serde_json",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

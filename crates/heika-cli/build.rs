@@ -4,11 +4,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    // Unix 以外では、標準入力から読む秘密鍵は std のバッファを通るのでメモリに残り、
-    // 書き出す秘密鍵のファイルは自分だけが読めるようにできない
-    if env::var_os("CARGO_CFG_UNIX").is_none() {
+    // Unix 以外では、書き出す秘密鍵のファイルを自分だけが読めるようにできない。
+    // Unix と Windows のほかでは、標準入力から読む秘密鍵も std のバッファを通るのでメモリに残る
+    let unix = env::var_os("CARGO_CFG_UNIX").is_some();
+    let windows = env::var_os("CARGO_CFG_WINDOWS").is_some();
+    if windows {
         println!(
-            "cargo::warning=Unix 以外では、標準入力から読んだ秘密鍵が std のバッファに残り、書き出す秘密鍵のファイルも権限が絞られません"
+            "cargo::warning=Windows では、書き出す秘密鍵のファイルの権限が絞られません（置いたフォルダーの権限を引き継ぎます）"
+        );
+    } else if !unix {
+        println!(
+            "cargo::warning=Unix と Windows のほかでは、標準入力から読んだ秘密鍵が std のバッファに残り、書き出す秘密鍵のファイルも権限が絞られません"
         );
     }
 

@@ -5,10 +5,11 @@ use std::io::{self, Write};
 use clap::Args;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
-use heika_transaction::{Body, KeyLink, LinkAction, Transfer};
+use heika_transaction::{Body, KeyLink, LinkAction, Transfer, VotingKeyLink};
 use heika_wallet::harvest_request::{self, HarvesterKeys};
 
 use crate::tx::Unsigned;
+use crate::voting::VotingLink;
 use crate::{Failure, Network};
 
 /// `heika harvesting` の引数。
@@ -29,6 +30,10 @@ pub struct HarvestingArgs {
     /// いま紐づいているノードの公開鍵を外す
     #[arg(long, value_name = "PUBLIC_KEY", group = "action")]
     unlink_node: Option<PublicKey>,
+    /// いま紐づいている投票鍵を外す。紐づけたときの期間も合わせて、<公開鍵>:<最初のエポック>-<最後のエポック> と書く。
+    /// 何本も紐づけられるので、何度でも付けられる
+    #[arg(long, value_name = "PUBLIC_KEY:START-END", group = "action")]
+    unlink_voting: Vec<VotingLink>,
     /// リモートアカウントの公開鍵を紐づける
     #[arg(long, value_name = "PUBLIC_KEY", group = "action")]
     link_remote: Option<PublicKey>,
@@ -38,6 +43,9 @@ pub struct HarvestingArgs {
     /// ノードの公開鍵を紐づける
     #[arg(long, value_name = "PUBLIC_KEY", group = "action")]
     link_node: Option<PublicKey>,
+    /// 投票鍵を紐づける。heika key voting generate が出す <公開鍵>:<最初のエポック>-<最後のエポック> を渡す
+    #[arg(long, value_name = "PUBLIC_KEY:START-END", group = "action")]
+    link_voting: Option<VotingLink>,
     /// 委任先のノードの公開鍵（ノードの node.key.pem の公開鍵）。リモートアカウント、VRF、ノードを紐づけて、委任の要求を送る
     #[arg(
         long,
@@ -57,9 +65,11 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
         unlink_remote,
         unlink_vrf,
         unlink_node,
+        unlink_voting,
         mut link_remote,
         mut link_vrf,
         mut link_node,
+        link_voting,
         delegate,
         unsigned,
     } = args;
@@ -92,9 +102,19 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
     bodies.extend(unlink_remote.map(|key| Body::AccountKeyLink(link(LinkAction::Unlink, key))));
     bodies.extend(unlink_vrf.map(|key| Body::VrfKeyLink(link(LinkAction::Unlink, key))));
     bodies.extend(unlink_node.map(|key| Body::NodeKeyLink(link(LinkAction::Unlink, key))));
+    bodies.extend(
+        unlink_voting
+            .iter()
+            .map(|link| Body::VotingKeyLink(voting_link(LinkAction::Unlink, link))),
+    );
     bodies.extend(link_remote.map(|key| Body::AccountKeyLink(link(LinkAction::Link, key))));
     bodies.extend(link_vrf.map(|key| Body::VrfKeyLink(link(LinkAction::Link, key))));
     bodies.extend(link_node.map(|key| Body::NodeKeyLink(link(LinkAction::Link, key))));
+    bodies.extend(
+        link_voting
+            .iter()
+            .map(|link| Body::VotingKeyLink(voting_link(LinkAction::Link, link))),
+    );
     if let Some((recipient, message)) = &request {
         bodies.push(Body::Transfer(
             Transfer::new((*recipient).into(), Default::default(), message.clone())
@@ -112,6 +132,9 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
     if let Some(key) = link_node {
         outln!("紐づけるノードの公開鍵: {key}");
     }
+    if let Some(link) = link_voting {
+        outln!("紐づける投票鍵: {link}");
+    }
     if let Some((recipient, _)) = &request {
         outln!("委任の要求を送るアドレス: {recipient}");
     }
@@ -122,6 +145,7 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
     ]
     .into_iter()
     .filter_map(|(flag, key)| key.map(|key| format!("{flag} {key}")))
+    .chain(link_voting.map(|link| format!("--unlink-voting {link}")))
     .collect();
     if !unlinks.is_empty() {
         outln!(
@@ -134,4 +158,13 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
 
 fn generate() -> Result<PrivateKey, String> {
     PrivateKey::generate().map_err(|error| format!("OS の乱数を取れませんでした: {error}"))
+}
+
+fn voting_link(action: LinkAction, link: &VotingLink) -> VotingKeyLink {
+    VotingKeyLink {
+        linked_public_key: link.public_key,
+        start_epoch: link.start_epoch,
+        end_epoch: link.end_epoch,
+        link_action: action,
+    }
 }

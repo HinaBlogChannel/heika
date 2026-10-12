@@ -74,6 +74,14 @@ pub struct NetworkParameters {
     pub max_transaction_lifetime: Duration,
     /// `maxCosignaturesPerAggregate`。外側の署名も数える
     pub max_cosignatures_per_aggregate: usize,
+    /// `votingSetGrouping`。ファイナライズのエポック1つぶんのブロック数
+    pub voting_set_grouping: u64,
+    /// `minVotingKeyLifetime`。投票鍵の期間（エポック数）の下限
+    pub min_voting_key_lifetime: u32,
+    /// `maxVotingKeyLifetime`。投票鍵の期間（エポック数）の上限
+    pub max_voting_key_lifetime: u32,
+    /// `maxVotingKeysPerAccount`
+    pub max_voting_keys_per_account: usize,
     /// `[fork_heights]`
     pub fork_heights: ForkHeights,
     /// `[corrupt_aggregate_transaction_hashes]`。（アグリゲートのハッシュ、その TransactionsHash）の組。
@@ -101,6 +109,10 @@ impl NetworkParameters {
         importance_grouping: 720,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,
+        voting_set_grouping: 1440,
+        min_voting_key_lifetime: 112,
+        max_voting_key_lifetime: 360,
+        max_voting_keys_per_account: 3,
         fork_heights: ForkHeights {
             strict_aggregate_transaction_hash: 1_690_500,
             unique_aggregate_transaction_hash: 4_759_100,
@@ -118,6 +130,10 @@ impl NetworkParameters {
         importance_grouping: 180,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,
+        voting_set_grouping: 720,
+        min_voting_key_lifetime: 28,
+        max_voting_key_lifetime: 720,
+        max_voting_keys_per_account: 3,
         fork_heights: ForkHeights {
             strict_aggregate_transaction_hash: 0,
             unique_aggregate_transaction_hash: 2_742_000,
@@ -135,6 +151,16 @@ impl NetworkParameters {
     /// Nemesis の時刻。
     pub fn epoch(&self) -> SystemTime {
         UNIX_EPOCH + self.epoch_adjustment
+    }
+
+    /// その高さのブロックが入る、ファイナライズのエポック。catapult の `CalculateFinalizationEpochForHeight`。
+    /// エポック 1 は高さ 1 だけで、そのあとは votingSetGrouping ごとに区切り、区切りの高さはその前のエポックに入る。
+    pub fn finalization_epoch(&self, height: u64) -> u64 {
+        if height <= 1 {
+            return 1;
+        }
+        let adjustment = u64::from(!height.is_multiple_of(self.voting_set_grouping));
+        1 + adjustment + height / self.voting_set_grouping
     }
 
     /// その高さのブロックに入れられるアグリゲートのバージョン。
@@ -343,6 +369,17 @@ mod tests {
             NetworkParameters::from_identifier(NetworkIdentifier(0)),
             None
         );
+    }
+
+    #[test]
+    fn groups_heights_into_finalization_epochs() {
+        let mainnet = NetworkParameters::MAINNET;
+        assert_eq!(mainnet.finalization_epoch(1), 1);
+        assert_eq!(mainnet.finalization_epoch(2), 2);
+        assert_eq!(mainnet.finalization_epoch(1440), 2);
+        assert_eq!(mainnet.finalization_epoch(1441), 3);
+        assert_eq!(mainnet.finalization_epoch(2880), 3);
+        assert_eq!(NetworkParameters::TESTNET.finalization_epoch(721), 3);
     }
 
     #[test]

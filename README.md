@@ -20,6 +20,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 ### ハーベストとトランザクション
 
 - ✅DONE: ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）
+- ✅DONE: 投票鍵のファイルの作成と確認、チェーンへの紐づけ（catapult の votingkey と同じファイルを書き、公式の Python SDK と照合している）
 - ✅DONE: トランザクションの中身の表示（25種類すべてと、チェーンにある古いバージョンのアグリゲート）
 - ✅DONE: トランザクションへの署名と連署と、ノードへの送信（ノードの証明書で名乗って、ノードと TLS でつなぐ）
 - ✅DONE: ノードあての委任の一覧（ブロックから委任の要求を拾い、メインアカウントのリンクと比べて、今も有効かを出す。harvesters.dat と突き合わせて、入っていない有効な委任を足した harvesters.dat を書ける）
@@ -91,6 +92,8 @@ heika key from-pem --out main.key < ca.key.pem
 heika key from-pem --public < ca.pubkey.pem
 heika key to-pem --out node.key.pem < node.key
 heika key to-pem --public <公開鍵>
+heika key voting generate --network mainnet --start-epoch <エポック> --end-epoch <エポック> --out private_key_tree1.dat
+heika key voting show private_key_tree1.dat
 
 heika cert ca --subject "CN=CA example" --out ca.crt.pem < ca.key.pem
 heika cert node --ca-cert ca.crt.pem --public-key <公開鍵> --subject "CN=node example" --out node.crt.pem < ca.key.pem
@@ -102,6 +105,7 @@ heika cert check --warn-days 30 --connect <ホスト>:<ポート> --client-cert 
 
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --delegate <ノードの公開鍵> --out harvesting.bin
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-remote <公開鍵> --link-vrf <公開鍵> --out harvesting.bin
+heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-voting <公開鍵>:<最初のエポック>-<最後のエポック> --out voting.bin
 heika tx show harvesting.bin
 heika tx show --json harvesting.bin
 heika tx sign --network mainnet --out harvesting.signed.bin harvesting.bin < main.key
@@ -119,11 +123,13 @@ heika legal source --out heika-source.zip
 
 秘密鍵とニーモニックは標準入力からのみ読む。扱いの方針は [docs/secrets.md](docs/secrets.md) にある。
 
+`heika key voting generate` は、ファイナライズの投票に使う投票鍵のファイルを、catapult の votingkey と同じ形で書く。根の鍵でエポックごとの鍵に署名したら、根の秘密鍵は捨てる。期間はネットワークの設定の範囲（メインネットは 112 から 360 エポック）で確かめる。作ったファイルは、ノードの votingkeys フォルダーに private_key_tree1.dat から順に番号を振って置く。`heika key voting show` は、ノードが使っているファイルも読み、公開鍵と期間、ノードが使って消したエポック、残っている鍵の数を出し、残っている鍵が公開鍵の署名と合うかを確かめる。
+
 DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の形（`/O=example/CN=node`）でも書ける。2 つは区切りが違い、書く順番も逆になる。証明書を表示するときは RFC 4514 の形で出す。
 
 `heika cert check` は、証明書のファイル、証明書のフォルダー（CA とノードの証明書）、`--connect` のノードが実際に出している証明書について、期限までの日数を1行ずつ出す。終了コードは `openssl x509 -checkend` に合わせていて、期限まで `--warn-days` 日（既定は 30 日）を切ったもの、切れたもの、まだ有効でないものがあれば 1、確かめられないものがあれば 2、どれもなければ 0 になる。heika のほかのコマンドはエラーを 1 で返すので、ここだけ違う。定期実行は cron、systemd の timer、Kubernetes の CronJob など、使っている仕組みから呼ぶ。`--connect` は、ファイルを更新したのにノードを再起動していない、という状態も見つけられる。
 
-`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。署名する前に、`heika tx show` で中身を確かめられる。`heika tx show` は秘密鍵を使わず、バイト列そのものでも16進のテキストでも読む。署名者とアドレス、手数料と期限（UTC の日時）、中のトランザクションの1件ずつを出し、署名があれば正しいかも確かめる。メッセージの文字列は、端末の表示を書き換えられないように制御文字をエスケープする。通貨以外のモザイクの量は、可分性がわからないので最小単位のまま出す。チェーンにある古いアグリゲート（バージョン 1 と 2）も読み、バージョン 1 なら中のトランザクションのハッシュがどの求め方で書かれているかも出す。古いアグリゲートは、署名も送信もしない。`--json` を付けると、表示と同じ項目を JSON で出す。`heika tx sign` も、署名したあとに同じ中身を出す。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
+`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。投票鍵は、`heika key voting generate` が出す `<公開鍵>:<最初のエポック>-<最後のエポック>` を `--link-voting` に渡して紐づけ、同じ書き方で `--unlink-voting` に渡して外す。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。署名する前に、`heika tx show` で中身を確かめられる。`heika tx show` は秘密鍵を使わず、バイト列そのものでも16進のテキストでも読む。署名者とアドレス、手数料と期限（UTC の日時）、中のトランザクションの1件ずつを出し、署名があれば正しいかも確かめる。メッセージの文字列は、端末の表示を書き換えられないように制御文字をエスケープする。通貨以外のモザイクの量は、可分性がわからないので最小単位のまま出す。チェーンにある古いアグリゲート（バージョン 1 と 2）も読み、バージョン 1 なら中のトランザクションのハッシュがどの求め方で書かれているかも出す。古いアグリゲートは、署名も送信もしない。`--json` を付けると、表示と同じ項目を JSON で出す。`heika tx sign` も、署名したあとに同じ中身を出す。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
 
 `heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。`--json` を付けると、表の代わりに、測った結果と測れなかったノードを JSON で標準出力に出す。途中の経過は標準エラーに出すので、標準出力をそのままファイルに書ける。時間はミリ秒、遅れはブロックで、公開鍵はノードが名乗ったものと、TLS で確かめた CA のものの両方を出す。
 

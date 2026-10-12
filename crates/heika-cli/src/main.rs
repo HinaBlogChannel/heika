@@ -41,7 +41,7 @@ enum Command {
     /// --delegate を付けると、リモートアカウントと VRF の鍵をその場で作って紐づけ、委任先のノードに委任の要求を送る。
     /// 作った秘密鍵は委任の要求に暗号化して入れるだけで、どこにも保存しない。前の委任先が知っている鍵を使い回さないためである。
     /// 自分のノードでハーベストするなら、--link-remote と --link-vrf に、ノードに置く鍵の公開鍵を渡す。
-    Harvesting(harvesting::HarvestingArgs),
+    Harvesting(Box<harvesting::HarvestingArgs>),
     /// ノードに TLS でつないで調べる
     #[command(subcommand)]
     Node(node::NodeCommand),
@@ -115,6 +115,9 @@ enum KeyCommand {
         #[arg(long, conflicts_with = "out")]
         public: bool,
     },
+    /// ファイナライズの投票に使う、投票鍵のファイル
+    #[command(subcommand)]
+    Voting(voting::VotingCommand),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -215,11 +218,12 @@ mod legal;
 mod node;
 mod show;
 mod tx;
+mod voting;
 
 fn run(command: Command) -> Result<(), Failure> {
     match command {
         Command::Cert(command) => cert::run(command)?,
-        Command::Harvesting(args) => harvesting::run(args)?,
+        Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Tx(command) => tx::run(command)?,
@@ -272,6 +276,7 @@ fn run(command: Command) -> Result<(), Failure> {
             }
             (None, None) => unreachable!("clap requires --out or --public"),
         },
+        Command::Key(KeyCommand::Voting(command)) => voting::run(command)?,
         Command::Key(KeyCommand::FromPem { out, public }) => match out {
             _ if public => {
                 let PublicKeyPem(public_key) = read_secret("公開鍵の PEM", "ca.pubkey.pem")?;
@@ -425,17 +430,23 @@ fn unbuffered(stdin: io::Stdin) -> io::Result<impl Read> {
     Ok(stdin)
 }
 
-/// 秘密鍵やニーモニックを1行で書く。ほかのユーザーから読めないように、Unix では自分だけが読み書きできるファイルにする。
+/// 秘密鍵やニーモニックを1行で書く。
 fn write_secret(path: &Path, secret: &str) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("{} を作れませんでした: {error}", path.display()))?;
+    let mut file = create_secret_file(path)?;
     // 改行を足すと String が領域を取り直して、0で上書きされない古い領域が残るので、分けて書く
     file.write_all(secret.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|error| format!("{} に書けませんでした: {error}", path.display()))
+}
+
+/// 秘密を書くファイルを新しく作る。すでにあれば上書きしない。
+/// ほかのユーザーから読めないように、Unix では自分だけが読み書きできるファイルにする。
+fn create_secret_file(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(path)
+        .map_err(|error| format!("{} を作れませんでした: {error}", path.display()))
 }

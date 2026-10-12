@@ -605,7 +605,7 @@ fn namespace_id(id: NamespaceId) -> String {
 }
 
 /// いちばん大きい単位で、だいたいの時間を出す
-fn approximate(duration: Duration) -> String {
+pub(crate) fn approximate(duration: Duration) -> String {
     let minutes = duration.as_secs() / 60;
     match minutes {
         0 => format!("{} 秒", duration.as_secs()),

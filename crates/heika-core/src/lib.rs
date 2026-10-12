@@ -9,5 +9,6 @@ pub mod key;
 pub mod merkle;
 pub mod network;
 pub mod signature;
+pub mod voting;
 
 pub use hex::ParseHexError;

@@ -2,13 +2,14 @@
 //!
 //! `models/transactions.json` の署名は検証が通らないので、署名する範囲とハッシュの取り方はこちらで照合する。
 //! JSON は `scripts/generate-sdk-vectors.py` が決定的に作ったもので、作り直せば同じものが出る。
-//! 委任ハーベストの要求のメッセージも、同じ JSON で照合する。
+//! 委任ハーベストの要求のメッセージと投票鍵のファイルも、同じ JSON で照合する。
 //! ネットワークは使わない。
 
 use std::collections::HashMap;
 
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
+use heika_core::voting::VotingKeyTree;
 use heika_transaction::{
     Aggregate, Body, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
     UnresolvedAddress, UnresolvedMosaicId,
@@ -26,6 +27,7 @@ struct Document {
     networks: HashMap<String, Network>,
     transactions: Vec<Vector>,
     harvest_requests: Vec<HarvestRequest>,
+    voting_keys: Vec<VotingKeys>,
 }
 
 #[derive(Deserialize)]
@@ -302,4 +304,40 @@ fn network_constants_match_the_sdk() {
         assert_eq!(NetworkIdentifier(network.identifier), identifier, "{name}");
         assert_eq!(seed.to_string(), network.generation_hash_seed, "{name}");
     }
+}
+
+#[derive(Deserialize)]
+struct VotingKeys {
+    start_epoch: u32,
+    end_epoch: u32,
+    randomness: String,
+    public_key: String,
+    file: String,
+}
+
+#[test]
+fn writes_voting_keys_like_the_sdk() {
+    let document: Document = serde_json::from_str(VECTORS).unwrap();
+    assert!(!document.voting_keys.is_empty());
+    for (index, vector) in document.voting_keys.iter().enumerate() {
+        // SDK と同じく、根の鍵、終わりのエポックからの子の鍵の順に乱数を使う
+        let randomness = from_hex(&vector.randomness);
+        let tree = VotingKeyTree::generate(
+            &mut Replay(&randomness),
+            vector.start_epoch,
+            vector.end_epoch,
+        )
+        .unwrap();
+        assert_eq!(*tree.to_bytes(), from_hex(&vector.file), "vector {index}");
+        assert_eq!(
+            tree.public_key().to_string(),
+            vector.public_key,
+            "vector {index}"
+        );
+
+        let read = VotingKeyTree::from_bytes(&from_hex(&vector.file)).unwrap();
+        assert_eq!(read.public_key(), tree.public_key(), "vector {index}");
+        assert_eq!(read.verify(), Ok(()), "vector {index}");
+    }
+    eprintln!("{} voting key files checked", document.voting_keys.len());
 }

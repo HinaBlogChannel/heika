@@ -4,9 +4,8 @@
 //! 形がわかるのは、catbuffer の `schemas/symbol` に載っている種類とバージョンの組だけなので、
 //! それ以外は読んだふりをせずに [`ScanError::Unknown`] にする。
 //!
-//! - Transfer と、アカウント、ノード、VRF のリンク（どれもバージョン 1）は、中身を読む
+//! - アグリゲート以外の23種類（どれもバージョン 1）は、中身を読む
 //! - アグリゲート（バージョン 1 から 3。ハッシュの取り方が違うだけで、形は同じ）は、中のトランザクションを1件ずつ読む
-//! - それ以外の知っている組は、種類だけを返して中身は読まない
 
 use std::fmt;
 
@@ -20,39 +19,6 @@ const EMBEDDED_HEADER_SIZE: usize = 4 + 4 + 32 + 4 + 1 + 1 + 2;
 /// アグリゲートの本体のうち、中のトランザクションの前まで。TransactionsHash、PayloadSize、予約。
 const AGGREGATE_FIXED_SIZE: usize = 32 + 4 + 4;
 
-const AGGREGATE_COMPLETE: u16 = 0x4141;
-const AGGREGATE_BONDED: u16 = 0x4241;
-/// 中身を読む種類。Body::decode が読める、バージョン 1 のもの
-const READ_TYPES: [u16; 4] = [0x414C, 0x424C, 0x4243, 0x4154];
-/// バージョン 1 だけがある種類。アグリゲートの中にも入れられる。
-/// catbuffer の `schemas/symbol/transaction_type.cats` と、各スキーマの `TRANSACTION_VERSION` から書き起こした
-/// （symbol/symbol のコミット dbff03b4096622d1bc1fce611358e05cfa7b0296）
-const VERSION_1_TYPES: [u16; 23] = [
-    0x414C, // ACCOUNT_KEY_LINK
-    0x424C, // NODE_KEY_LINK
-    0x4143, // VOTING_KEY_LINK
-    0x4243, // VRF_KEY_LINK
-    0x4148, // HASH_LOCK
-    0x4152, // SECRET_LOCK
-    0x4252, // SECRET_PROOF
-    0x4144, // ACCOUNT_METADATA
-    0x4244, // MOSAIC_METADATA
-    0x4344, // NAMESPACE_METADATA
-    0x414D, // MOSAIC_DEFINITION
-    0x424D, // MOSAIC_SUPPLY_CHANGE
-    0x434D, // MOSAIC_SUPPLY_REVOCATION
-    0x4155, // MULTISIG_ACCOUNT_MODIFICATION
-    0x424E, // ADDRESS_ALIAS
-    0x434E, // MOSAIC_ALIAS
-    0x414E, // NAMESPACE_REGISTRATION
-    0x4150, // ACCOUNT_ADDRESS_RESTRICTION
-    0x4250, // ACCOUNT_MOSAIC_RESTRICTION
-    0x4350, // ACCOUNT_OPERATION_RESTRICTION
-    0x4251, // MOSAIC_ADDRESS_RESTRICTION
-    0x4151, // MOSAIC_GLOBAL_RESTRICTION
-    0x4154, // TRANSFER
-];
-
 /// 走査で読んだトランザクション1件。アグリゲートは、それ自体ではなく中のトランザクションを1件ずつ返す。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Scanned {
@@ -60,15 +26,7 @@ pub struct Scanned {
     pub network: NetworkIdentifier,
     /// アグリゲートの中なら、外側の署名者
     pub aggregate_signer: Option<PublicKey>,
-    pub content: Content,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Content {
-    /// 中身を読んだもの。Transfer とリンクのどれか
-    Read(Body),
-    /// 知っている種類だが、中身は読んでいない
-    Skipped { transaction_type: u16 },
+    pub body: Body,
 }
 
 /// 1件のトランザクションのバイト列を走査する。
@@ -90,22 +48,22 @@ pub fn scan(bytes: &[u8]) -> Result<Vec<Scanned>, ScanError> {
     let transaction_type = u16::from_le_bytes(bytes[110..112].try_into().expect("2 bytes"));
     let body = &bytes[HEADER_SIZE..];
 
-    if matches!(transaction_type, AGGREGATE_COMPLETE | AGGREGATE_BONDED) {
-        if !(1..=3).contains(&version) {
-            return Err(ScanError::Unknown {
-                transaction_type,
-                version,
-                embedded: false,
-            });
-        }
+    if !Body::is_known(transaction_type, version) {
+        return Err(ScanError::Unknown {
+            transaction_type,
+            version,
+            embedded: false,
+        });
+    }
+    if Body::is_aggregate_type(transaction_type) {
         return scan_aggregate(body, signer_public_key);
     }
-    let content = content(transaction_type, version, body, false)?;
+    let body = Body::decode(transaction_type, version, body)?;
     Ok(vec![Scanned {
         signer_public_key,
         network,
         aggregate_signer: None,
-        content,
+        body,
     }])
 }
 
@@ -138,41 +96,23 @@ fn scan_aggregate(body: &[u8], aggregate_signer: PublicKey) -> Result<Vec<Scanne
             signer_public_key: PublicKey(embedded[8..40].try_into().expect("32 bytes")),
             network: NetworkIdentifier(embedded[45]),
             aggregate_signer: Some(aggregate_signer),
-            content: content(
-                transaction_type,
-                version,
-                &embedded[EMBEDDED_HEADER_SIZE..],
-                true,
-            )?,
+            body: embedded_body(transaction_type, version, &embedded[EMBEDDED_HEADER_SIZE..])?,
         });
         payload = &payload[padded_size..];
     }
     Ok(scanned)
 }
 
-/// アグリゲート以外の種類の本体を、読むか飛ばす。アグリゲートは中に入れられないので、中にあれば知らないものとする。
-fn content(
-    transaction_type: u16,
-    version: u8,
-    body: &[u8],
-    embedded: bool,
-) -> Result<Content, ScanError> {
-    if version != 1 || !VERSION_1_TYPES.contains(&transaction_type) {
+/// 中のトランザクションの本体を読む。アグリゲートは中に入れられないので、中にあれば知らないものとする。
+fn embedded_body(transaction_type: u16, version: u8, body: &[u8]) -> Result<Body, ScanError> {
+    if Body::is_aggregate_type(transaction_type) || !Body::is_known(transaction_type, version) {
         return Err(ScanError::Unknown {
             transaction_type,
             version,
-            embedded,
+            embedded: true,
         });
     }
-    if READ_TYPES.contains(&transaction_type) {
-        Ok(Content::Read(Body::decode(
-            transaction_type,
-            version,
-            body,
-        )?))
-    } else {
-        Ok(Content::Skipped { transaction_type })
-    }
+    Ok(Body::decode(transaction_type, version, body)?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,8 +166,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Aggregate, EmbeddedTransaction, KeyLink, LinkAction, Transaction, Transfer,
-        UnresolvedAddress,
+        Aggregate, AliasAction, EmbeddedTransaction, KeyLink, LinkAction, MosaicAlias, MosaicId,
+        NamespaceId, Transaction, Transfer, UnresolvedAddress,
     };
 
     fn key(seed: u8) -> PublicKey {
@@ -293,7 +233,7 @@ mod tests {
                 signer_public_key: key(1),
                 network: NetworkIdentifier::MAINNET,
                 aggregate_signer: None,
-                content: Content::Read(transfer()),
+                body: transfer(),
             }]
         );
     }
@@ -305,13 +245,13 @@ mod tests {
                 signer_public_key: key(2),
                 network: NetworkIdentifier::MAINNET,
                 aggregate_signer: Some(key(1)),
-                content: Content::Read(transfer()),
+                body: transfer(),
             },
             Scanned {
                 signer_public_key: key(3),
                 network: NetworkIdentifier::MAINNET,
                 aggregate_signer: Some(key(1)),
-                content: Content::Read(link()),
+                body: link(),
             },
         ];
         // 形はバージョン 1 から 3 で同じなので、バージョンだけ書き換えても同じように読める
@@ -328,15 +268,21 @@ mod tests {
     }
 
     #[test]
-    fn skips_known_types_without_reading_them() {
-        // MOSAIC_DEFINITION の本体の中身は読まないので、何が入っていてもよい
-        let scanned = scan(&raw(0x414D, 1, &[0xFF; 3])).unwrap();
-        assert_eq!(
-            scanned[0].content,
-            Content::Skipped {
-                transaction_type: 0x414D
-            }
-        );
+    fn reads_every_known_type_inside_an_aggregate() {
+        let alias = Body::MosaicAlias(MosaicAlias {
+            namespace_id: NamespaceId(0x8000_0000_0000_0001),
+            mosaic_id: MosaicId(7),
+            alias_action: AliasAction::Link,
+        });
+        let aggregate = Aggregate::new(vec![EmbeddedTransaction::new(
+            key(2),
+            NetworkIdentifier::MAINNET,
+            alias.clone(),
+        )])
+        .unwrap();
+        let scanned = scan(&transaction(Body::AggregateBonded(aggregate)).to_bytes()).unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].body, alias);
     }
 
     #[test]

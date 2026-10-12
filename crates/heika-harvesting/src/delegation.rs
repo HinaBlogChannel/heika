@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
-use heika_transaction::{Body, Content, KeyLink, LinkAction, Scanned};
+use heika_transaction::{Body, KeyLink, LinkAction, Scanned};
 use heika_wallet::harvest_request;
 
 /// 暗号化したままの要求の中身。harvesters.dat にはこれを並べる
@@ -111,11 +111,8 @@ impl<'a> DelegationTracker<'a> {
 
     /// 高さ `height` のブロックで走査したトランザクションを1件渡す。ブロックの順、ブロックの中の順に渡す
     pub fn observe(&mut self, height: u64, scanned: &Scanned) {
-        let Content::Read(body) = &scanned.content else {
-            return;
-        };
         let signer = scanned.signer_public_key;
-        match body {
+        match &scanned.body {
             Body::AccountKeyLink(link) => {
                 self.links.entry(signer).or_default().remote = Some(linked(link))
             }
@@ -138,7 +135,8 @@ impl<'a> DelegationTracker<'a> {
                     self.request(height, signer, message);
                 }
             }
-            Body::AggregateComplete(_) | Body::AggregateBonded(_) => {}
+            // 委任に関係しない種類。走査はアグリゲートの中を1件ずつ渡すので、アグリゲートそのものは来ない
+            _ => {}
         }
     }
 
@@ -223,7 +221,9 @@ fn linked(link: &KeyLink) -> Option<PublicKey> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use heika_transaction::{Transfer, UnresolvedAddress};
+    use heika_transaction::{
+        AliasAction, MosaicAlias, MosaicId, NamespaceId, Transfer, UnresolvedAddress,
+    };
     use heika_wallet::harvest_request::HarvesterKeys;
 
     use super::*;
@@ -244,7 +244,7 @@ mod tests {
             signer_public_key: signer,
             network: NETWORK,
             aggregate_signer: None,
-            content: Content::Read(body),
+            body,
         }
     }
 
@@ -409,15 +409,17 @@ mod tests {
                 transfer(recipient.0, message(&other, 11, 21, 3)),
             ),
         );
-        // 中身を読まなかったトランザクション
+        // 委任と関係のない種類のトランザクション
         tracker.observe(
             10,
-            &Scanned {
-                content: Content::Skipped {
-                    transaction_type: 0x414D,
-                },
-                ..scanned(public_key(1), transfer(recipient.0, Vec::new()))
-            },
+            &scanned(
+                public_key(1),
+                Body::MosaicAlias(MosaicAlias {
+                    namespace_id: NamespaceId(0x8000_0000_0000_0001),
+                    mosaic_id: MosaicId(1),
+                    alias_action: AliasAction::Link,
+                }),
+            ),
         );
 
         let report = tracker.finish();

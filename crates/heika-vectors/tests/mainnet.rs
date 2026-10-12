@@ -13,6 +13,7 @@
 //! HEIKA_TEST_NODE がなければ、何も確かめずに成功する（CI ではそうなる）。
 //! 同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use heika_cert::key;
 use heika_core::network::NetworkIdentifier;
 use heika_p2p::Node;
 use heika_tls::Identity;
-use heika_transaction::{Content, scan};
+use heika_transaction::scan;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -73,7 +74,7 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
     let Some(mut node) = connect() else {
         return;
     };
-    let (mut read, mut skipped) = (0, 0);
+    let mut types = BTreeMap::new();
     for (name, start, count) in RANGES {
         let blocks = node
             .pull_blocks(start, count, 16 * 1024 * 1024)
@@ -110,15 +111,12 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
                 _ => BlockType::Normal,
             };
             assert_eq!(block.block_type, expected_type, "{name}: {height}");
-            // 中のトランザクションは、どれも知っている種類とバージョンで、読む種類は読めるはず
+            // 中のトランザクションは、どれも知っている種類とバージョンで、中身まで読めるはず
             for transaction in block.transactions() {
                 for scanned in scan(transaction).unwrap_or_else(|error| {
                     panic!("{name}: 高さ {height} のトランザクション: {error}")
                 }) {
-                    match scanned.content {
-                        Content::Read(_) => read += 1,
-                        Content::Skipped { .. } => skipped += 1,
-                    }
+                    *types.entry(scanned.body.transaction_type()).or_insert(0) += 1;
                 }
             }
             if index > 0 {
@@ -131,6 +129,10 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
         }
     }
     // 走査が空回りしていないことを確かめる
-    eprintln!("トランザクション: 読んだ {read} 件、飛ばした {skipped} 件");
-    assert!(read > 0 && skipped > 0);
+    let types: Vec<_> = types
+        .iter()
+        .map(|(transaction_type, count)| format!("0x{transaction_type:04X}: {count}"))
+        .collect();
+    eprintln!("読んだトランザクションの種類: {}", types.join(", "));
+    assert!(types.len() > 1);
 }

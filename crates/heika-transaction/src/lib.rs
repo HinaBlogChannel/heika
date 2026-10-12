@@ -10,11 +10,34 @@ use heika_core::signature::Signature;
 use sha3::{Digest, Sha3_256};
 
 mod aggregate;
+mod bounded;
+mod lock;
+mod metadata;
+mod mosaic;
+mod multisig;
+mod namespace;
+mod restriction;
 mod scan;
 mod transfer;
 
 pub use aggregate::{Aggregate, Cosignature, EmbeddedTransaction, NestedAggregate};
-pub use scan::{Content, ScanError, Scanned, scan};
+pub use bounded::{BoundedVec, TooLong};
+pub use lock::{HashLock, LockHashAlgorithm, SecretLock, SecretProof};
+pub use metadata::{Metadata, MosaicMetadata, NamespaceMetadata};
+pub use mosaic::{
+    MosaicDefinition, MosaicFlags, MosaicId, MosaicSupplyChange, MosaicSupplyChangeAction,
+    MosaicSupplyRevocation, UnresolvedMosaic,
+};
+pub use multisig::MultisigAccountModification;
+pub use namespace::{
+    AddressAlias, AliasAction, MosaicAlias, NamespaceId, NamespaceRegistration,
+    NamespaceRegistrationType,
+};
+pub use restriction::{
+    AccountRestriction, AccountRestrictionFlags, MosaicAddressRestriction, MosaicGlobalRestriction,
+    MosaicRestrictionType, TransactionType,
+};
+pub use scan::{ScanError, Scanned, scan};
 pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};
 
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
@@ -40,15 +63,38 @@ pub struct Transaction {
     pub body: Body,
 }
 
-/// 種類ごとの本体。
+/// 種類ごとの本体。catbuffer の `schemas/symbol` にある25種類。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Body {
     /// 重要度を預けるリモートアカウントの公開鍵を紐づける。リモートハーベストと委任ハーベストに使う。
     AccountKeyLink(KeyLink),
     /// TLS の接続に使うノードの公開鍵を紐づける。委任ハーベストに使う。
     NodeKeyLink(KeyLink),
+    /// ファイナライズの投票に使う公開鍵を、エポックの範囲を決めて紐づける。
+    VotingKeyLink(VotingKeyLink),
     /// ハーベストで使う VRF の公開鍵を紐づける。
     VrfKeyLink(KeyLink),
+    HashLock(HashLock),
+    SecretLock(SecretLock),
+    SecretProof(SecretProof),
+    AccountMetadata(Metadata),
+    MosaicMetadata(MosaicMetadata),
+    NamespaceMetadata(NamespaceMetadata),
+    MosaicDefinition(MosaicDefinition),
+    MosaicSupplyChange(MosaicSupplyChange),
+    MosaicSupplyRevocation(MosaicSupplyRevocation),
+    MultisigAccountModification(MultisigAccountModification),
+    AddressAlias(AddressAlias),
+    MosaicAlias(MosaicAlias),
+    NamespaceRegistration(NamespaceRegistration),
+    /// 送受信できる相手のアドレスを制限する。
+    AccountAddressRestriction(AccountRestriction<UnresolvedAddress>),
+    /// 受け取れるモザイクを制限する。
+    AccountMosaicRestriction(AccountRestriction<UnresolvedMosaicId>),
+    /// 送れるトランザクションの種類を制限する。
+    AccountOperationRestriction(AccountRestriction<TransactionType>),
+    MosaicAddressRestriction(MosaicAddressRestriction),
+    MosaicGlobalRestriction(MosaicGlobalRestriction),
     /// モザイクとメッセージを送る。
     Transfer(Transfer),
     /// 必要な署名がそろっているアグリゲート。
@@ -64,10 +110,38 @@ pub struct KeyLink {
     pub link_action: LinkAction,
 }
 
+/// 投票の公開鍵を紐づける、または紐づけを外す本体。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VotingKeyLink {
+    pub linked_public_key: PublicKey,
+    /// 投票に使う最初のエポック
+    pub start_epoch: u32,
+    /// 投票に使う最後のエポック
+    pub end_epoch: u32,
+    pub link_action: LinkAction,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LinkAction {
     Unlink,
     Link,
+}
+
+impl LinkAction {
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::Unlink => 0,
+            Self::Link => 1,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Result<Self, DecodeError> {
+        match byte {
+            0 => Ok(Self::Unlink),
+            1 => Ok(Self::Link),
+            action => Err(DecodeError::InvalidLinkAction(action)),
+        }
+    }
 }
 
 impl Transaction {
@@ -251,7 +325,26 @@ impl Body {
         match self {
             Self::AccountKeyLink(_) => 0x414C,
             Self::NodeKeyLink(_) => 0x424C,
+            Self::VotingKeyLink(_) => 0x4143,
             Self::VrfKeyLink(_) => 0x4243,
+            Self::HashLock(_) => 0x4148,
+            Self::SecretLock(_) => 0x4152,
+            Self::SecretProof(_) => 0x4252,
+            Self::AccountMetadata(_) => 0x4144,
+            Self::MosaicMetadata(_) => 0x4244,
+            Self::NamespaceMetadata(_) => 0x4344,
+            Self::MosaicDefinition(_) => 0x414D,
+            Self::MosaicSupplyChange(_) => 0x424D,
+            Self::MosaicSupplyRevocation(_) => 0x434D,
+            Self::MultisigAccountModification(_) => 0x4155,
+            Self::AddressAlias(_) => 0x424E,
+            Self::MosaicAlias(_) => 0x434E,
+            Self::NamespaceRegistration(_) => 0x414E,
+            Self::AccountAddressRestriction(_) => 0x4150,
+            Self::AccountMosaicRestriction(_) => 0x4250,
+            Self::AccountOperationRestriction(_) => 0x4350,
+            Self::MosaicAddressRestriction(_) => 0x4251,
+            Self::MosaicGlobalRestriction(_) => 0x4151,
             Self::Transfer(_) => 0x4154,
             Self::AggregateComplete(_) => 0x4141,
             Self::AggregateBonded(_) => 0x4241,
@@ -260,13 +353,11 @@ impl Body {
 
     /// 種類ごとの構造のバージョン。どれも catbuffer の最新のものを書く。
     /// アグリゲートはバージョン 3 で、メインネットでは高さ 4,759,100 から、それより前のバージョンは使えない。
+    /// ほかの種類は、どれもバージョン 1 しかない。
     pub fn version(&self) -> u8 {
         match self {
-            Self::AccountKeyLink(_)
-            | Self::NodeKeyLink(_)
-            | Self::VrfKeyLink(_)
-            | Self::Transfer(_) => 1,
             Self::AggregateComplete(_) | Self::AggregateBonded(_) => 3,
+            _ => 1,
         }
     }
 
@@ -275,6 +366,25 @@ impl Body {
             Self::AccountKeyLink(link) | Self::NodeKeyLink(link) | Self::VrfKeyLink(link) => {
                 link.encode(out)
             }
+            Self::VotingKeyLink(link) => link.encode(out),
+            Self::HashLock(lock) => lock.encode(out),
+            Self::SecretLock(lock) => lock.encode(out),
+            Self::SecretProof(proof) => proof.encode(out),
+            Self::AccountMetadata(metadata) => metadata.encode(None, out),
+            Self::MosaicMetadata(metadata) => metadata.encode(out),
+            Self::NamespaceMetadata(metadata) => metadata.encode(out),
+            Self::MosaicDefinition(definition) => definition.encode(out),
+            Self::MosaicSupplyChange(change) => change.encode(out),
+            Self::MosaicSupplyRevocation(revocation) => revocation.encode(out),
+            Self::MultisigAccountModification(modification) => modification.encode(out),
+            Self::AddressAlias(alias) => alias.encode(out),
+            Self::MosaicAlias(alias) => alias.encode(out),
+            Self::NamespaceRegistration(registration) => registration.encode(out),
+            Self::AccountAddressRestriction(restriction) => restriction.encode(out),
+            Self::AccountMosaicRestriction(restriction) => restriction.encode(out),
+            Self::AccountOperationRestriction(restriction) => restriction.encode(out),
+            Self::MosaicAddressRestriction(restriction) => restriction.encode(out),
+            Self::MosaicGlobalRestriction(restriction) => restriction.encode(out),
             Self::Transfer(transfer) => transfer.encode(out),
             Self::AggregateComplete(aggregate) | Self::AggregateBonded(aggregate) => {
                 aggregate.encode(out)
@@ -282,11 +392,55 @@ impl Body {
         }
     }
 
+    /// 種類とバージョンの組が catbuffer にあるか。中身の形はわかっても、Body として読めるとは限らない
+    /// （アグリゲートのバージョン 1 と 2 は、読めるのは走査だけ）。
+    pub(crate) fn is_known(transaction_type: u16, version: u8) -> bool {
+        if Self::is_aggregate_type(transaction_type) {
+            (1..=3).contains(&version)
+        } else {
+            version == 1 && Self::is_version_1_type(transaction_type)
+        }
+    }
+
+    /// アグリゲート以外の23種類。どれもバージョン 1 だけがある。
+    /// catbuffer の `schemas/symbol/transaction_type.cats` と、各スキーマの `TRANSACTION_VERSION` から書き起こした
+    /// （symbol/symbol のコミット dbff03b4096622d1bc1fce611358e05cfa7b0296）
+    fn is_version_1_type(transaction_type: u16) -> bool {
+        matches!(
+            transaction_type,
+            0x414C
+                | 0x424C
+                | 0x4143
+                | 0x4243
+                | 0x4148
+                | 0x4152
+                | 0x4252
+                | 0x4144
+                | 0x4244
+                | 0x4344
+                | 0x414D
+                | 0x424D
+                | 0x434D
+                | 0x4155
+                | 0x424E
+                | 0x434E
+                | 0x414E
+                | 0x4150
+                | 0x4250
+                | 0x4350
+                | 0x4251
+                | 0x4151
+                | 0x4154
+        )
+    }
+
     fn decode(transaction_type: u16, version: u8, bytes: &[u8]) -> Result<Self, DecodeError> {
-        let expected_version = match transaction_type {
-            0x414C | 0x424C | 0x4243 | 0x4154 => 1,
-            0x4141 | 0x4241 => 3,
-            _ => return Err(DecodeError::UnknownType(transaction_type)),
+        let expected_version = if Self::is_aggregate_type(transaction_type) {
+            3
+        } else if Self::is_version_1_type(transaction_type) {
+            1
+        } else {
+            return Err(DecodeError::UnknownType(transaction_type));
         };
         if version != expected_version {
             return Err(DecodeError::UnsupportedVersion {
@@ -294,14 +448,35 @@ impl Body {
                 version,
             });
         }
-        match transaction_type {
-            0x414C => KeyLink::decode(bytes).map(Self::AccountKeyLink),
-            0x424C => KeyLink::decode(bytes).map(Self::NodeKeyLink),
-            0x4243 => KeyLink::decode(bytes).map(Self::VrfKeyLink),
-            0x4154 => Transfer::decode(bytes).map(Self::Transfer),
-            0x4141 => Aggregate::decode(bytes).map(Self::AggregateComplete),
-            _ => Aggregate::decode(bytes).map(Self::AggregateBonded),
-        }
+        Ok(match transaction_type {
+            0x414C => Self::AccountKeyLink(KeyLink::decode(bytes)?),
+            0x424C => Self::NodeKeyLink(KeyLink::decode(bytes)?),
+            0x4143 => Self::VotingKeyLink(VotingKeyLink::decode(bytes)?),
+            0x4243 => Self::VrfKeyLink(KeyLink::decode(bytes)?),
+            0x4148 => Self::HashLock(HashLock::decode(bytes)?),
+            0x4152 => Self::SecretLock(SecretLock::decode(bytes)?),
+            0x4252 => Self::SecretProof(SecretProof::decode(bytes)?),
+            0x4144 => Self::AccountMetadata(Metadata::decode(bytes, false)?.0),
+            0x4244 => Self::MosaicMetadata(MosaicMetadata::decode(bytes)?),
+            0x4344 => Self::NamespaceMetadata(NamespaceMetadata::decode(bytes)?),
+            0x414D => Self::MosaicDefinition(MosaicDefinition::decode(bytes)?),
+            0x424D => Self::MosaicSupplyChange(MosaicSupplyChange::decode(bytes)?),
+            0x434D => Self::MosaicSupplyRevocation(MosaicSupplyRevocation::decode(bytes)?),
+            0x4155 => {
+                Self::MultisigAccountModification(MultisigAccountModification::decode(bytes)?)
+            }
+            0x424E => Self::AddressAlias(AddressAlias::decode(bytes)?),
+            0x434E => Self::MosaicAlias(MosaicAlias::decode(bytes)?),
+            0x414E => Self::NamespaceRegistration(NamespaceRegistration::decode(bytes)?),
+            0x4150 => Self::AccountAddressRestriction(AccountRestriction::decode(bytes)?),
+            0x4250 => Self::AccountMosaicRestriction(AccountRestriction::decode(bytes)?),
+            0x4350 => Self::AccountOperationRestriction(AccountRestriction::decode(bytes)?),
+            0x4251 => Self::MosaicAddressRestriction(MosaicAddressRestriction::decode(bytes)?),
+            0x4151 => Self::MosaicGlobalRestriction(MosaicGlobalRestriction::decode(bytes)?),
+            0x4154 => Self::Transfer(Transfer::decode(bytes)?),
+            0x4141 => Self::AggregateComplete(Aggregate::decode(bytes)?),
+            _ => Self::AggregateBonded(Aggregate::decode(bytes)?),
+        })
     }
 
     fn is_aggregate_type(transaction_type: u16) -> bool {
@@ -314,26 +489,35 @@ impl KeyLink {
 
     fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.linked_public_key.0);
-        out.push(match self.link_action {
-            LinkAction::Unlink => 0,
-            LinkAction::Link => 1,
-        });
+        out.push(self.link_action.to_byte());
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        if bytes.len() != Self::SIZE {
-            return Err(DecodeError::InvalidBodySize);
-        }
-        let mut reader = Reader(bytes);
-        let linked_public_key = PublicKey(reader.array());
-        let link_action = match reader.u8() {
-            0 => LinkAction::Unlink,
-            1 => LinkAction::Link,
-            action => return Err(DecodeError::InvalidLinkAction(action)),
-        };
+        let mut reader = Reader::exact(bytes, Self::SIZE)?;
         Ok(Self {
-            linked_public_key,
-            link_action,
+            linked_public_key: PublicKey(reader.array()),
+            link_action: LinkAction::from_byte(reader.u8())?,
+        })
+    }
+}
+
+impl VotingKeyLink {
+    const SIZE: usize = 32 + 4 + 4 + 1;
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.linked_public_key.0);
+        out.extend_from_slice(&self.start_epoch.to_le_bytes());
+        out.extend_from_slice(&self.end_epoch.to_le_bytes());
+        out.push(self.link_action.to_byte());
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::exact(bytes, Self::SIZE)?;
+        Ok(Self {
+            linked_public_key: PublicKey(reader.array()),
+            start_epoch: reader.u32(),
+            end_epoch: reader.u32(),
+            link_action: LinkAction::from_byte(reader.u8())?,
         })
     }
 }
@@ -341,7 +525,37 @@ impl KeyLink {
 /// 長さを確かめ終えたバイト列を、先頭から順に読む。
 struct Reader<'a>(&'a [u8]);
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    /// 長さがちょうど `size` のときだけ読む
+    fn exact(bytes: &'a [u8], size: usize) -> Result<Self, DecodeError> {
+        if bytes.len() != size {
+            return Err(DecodeError::InvalidBodySize);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// 長さが `size` 以上のときだけ読む。残りは [`Reader::rest`] か [`Reader::expect_remaining`] で確かめる
+    fn at_least(bytes: &'a [u8], size: usize) -> Result<Self, DecodeError> {
+        if bytes.len() < size {
+            return Err(DecodeError::InvalidBodySize);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// 残りがちょうど `size` か
+    fn expect_remaining(&self, size: usize) -> Result<(), DecodeError> {
+        if self.0.len() != size {
+            return Err(DecodeError::InvalidBodySize);
+        }
+        Ok(())
+    }
+
+    /// 残りがちょうど `size` なら、残りを全部返す
+    fn rest(&mut self, size: usize) -> Result<&'a [u8], DecodeError> {
+        self.expect_remaining(size)?;
+        Ok(std::mem::take(&mut self.0))
+    }
+
     fn array<const N: usize>(&mut self) -> [u8; N] {
         let (head, rest) = self.0.split_first_chunk().expect("length checked");
         self.0 = rest;
@@ -354,6 +568,10 @@ impl Reader<'_> {
 
     fn u16(&mut self) -> u16 {
         u16::from_le_bytes(self.array())
+    }
+
+    fn i16(&mut self) -> i16 {
+        i16::from_le_bytes(self.array())
     }
 
     fn u32(&mut self) -> u32 {
@@ -381,6 +599,8 @@ pub enum DecodeError {
     InvalidBodySize,
     /// 紐づけの操作が、紐づけるか外すかのどちらでもない
     InvalidLinkAction(u8),
+    /// 列挙型かフラグの値が、定義されていない
+    InvalidValue { field: &'static str, value: u64 },
     /// モザイクが ID の昇順に並んでいない。同じ ID が2回出てくるものも含む
     UnsortedMosaics,
     /// アグリゲートの中にアグリゲートが入っている
@@ -417,6 +637,9 @@ impl fmt::Display for DecodeError {
                     f,
                     "紐づけの操作 {action} は、紐づけるか外すかのどちらでもありません"
                 )
+            }
+            Self::InvalidValue { field, value } => {
+                write!(f, "{field}の値 {value} は定義されていません")
             }
             Self::UnsortedMosaics => f.write_str("モザイクが ID の昇順に並んでいません"),
             Self::NestedAggregate => f.write_str("アグリゲートの中にアグリゲートが入っています"),
@@ -468,6 +691,31 @@ impl fmt::Display for CosignError {
 }
 
 impl std::error::Error for CosignError {}
+
+/// 種類ごとのモジュールのテストで使う。
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// `body` を入れたトランザクションを書いて読み戻し、同じ本体になることを確かめる。返すのは本体のバイト列
+    pub fn round_trip(body: Body) -> Vec<u8> {
+        let transaction = Transaction::new(
+            PublicKey([0x11; 32]),
+            NetworkIdentifier::TESTNET,
+            0,
+            0,
+            body,
+        );
+        let bytes = transaction.to_bytes();
+        assert_eq!(Transaction::from_bytes(&bytes).as_ref(), Ok(&transaction));
+        bytes[HEADER_SIZE..].to_vec()
+    }
+
+    /// 本体のバイト列を、バージョン 1 の種類 `transaction_type` として読む
+    pub fn decode(transaction_type: u16, body: &[u8]) -> Result<Body, DecodeError> {
+        Body::decode(transaction_type, 1, body)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -542,6 +790,21 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_epochs_of_a_voting_key_link() {
+        let link = VotingKeyLink {
+            linked_public_key: PublicKey([0xAA; 32]),
+            start_epoch: 0x0102,
+            end_epoch: 0x0304,
+            link_action: LinkAction::Link,
+        };
+        let transaction = transaction(Body::VotingKeyLink(link));
+        let bytes = transaction.to_bytes();
+        assert_eq!(bytes[110..112], [0x43, 0x41]);
+        assert_eq!(bytes[HEADER_SIZE + 32..], [2, 1, 0, 0, 4, 3, 0, 0, 1]);
+        assert_eq!(Transaction::from_bytes(&bytes), Ok(transaction));
+    }
+
+    #[test]
     fn rejects_a_short_header() {
         let bytes = vrf_key_link().to_bytes();
         assert_eq!(
@@ -579,10 +842,10 @@ mod tests {
     #[test]
     fn rejects_an_unknown_type() {
         let mut bytes = vrf_key_link().to_bytes();
-        bytes[110..112].copy_from_slice(&0x4143u16.to_le_bytes());
+        bytes[110..112].copy_from_slice(&0x4999u16.to_le_bytes());
         assert_eq!(
             Transaction::from_bytes(&bytes),
-            Err(DecodeError::UnknownType(0x4143))
+            Err(DecodeError::UnknownType(0x4999))
         );
     }
 

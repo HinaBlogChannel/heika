@@ -166,6 +166,7 @@ fn main() -> ExitCode {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
+        Err(Failure::Code(code)) => ExitCode::from(code),
     }
 }
 
@@ -176,6 +177,8 @@ fn main() -> ExitCode {
 enum Failure {
     Message(String),
     BrokenPipe,
+    /// 結果はもう出したので、この終了コードで終わる
+    Code(u8),
 }
 
 impl From<String> for Failure {

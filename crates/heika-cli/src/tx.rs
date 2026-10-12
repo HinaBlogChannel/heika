@@ -4,7 +4,7 @@
 //! 秘密鍵は署名するときに標準入力から1つだけ読む。
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ use heika_cert::certificate::Certificate;
 use heika_tls::{ClientCertificate, Identity};
 
 use crate::cert::{AnyPrivateKey, CONNECT_TIMEOUT, read_chain};
-use crate::{Failure, Network, read_secret};
+use crate::{Failure, Network, read_secret, show};
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
 /// ネットワークの設定 maxTransactionLifetime。メインネットもテストネットも 6h
@@ -30,6 +30,14 @@ const PUSH_TRANSACTIONS: u32 = 9;
 
 #[derive(Subcommand)]
 pub enum TxCommand {
+    /// トランザクションの中身を、署名する前に確かめられる形で出す
+    ///
+    /// ファイルは、トランザクションのバイト列そのものか、それを16進で書いたテキスト。`-` なら標準入力から読む。
+    /// 秘密鍵は使わない。署名があれば、それが正しいかも確かめる。
+    Show {
+        /// 出すトランザクションのファイル
+        transaction: PathBuf,
+    },
     /// 署名していないトランザクションに、標準入力から読んだ秘密鍵で署名する
     Sign {
         #[arg(long, value_enum)]
@@ -128,7 +136,7 @@ impl Unsigned {
 }
 
 impl Network {
-    fn generation_hash_seed(self) -> GenerationHashSeed {
+    pub(crate) fn generation_hash_seed(self) -> GenerationHashSeed {
         match self {
             Self::Mainnet => GenerationHashSeed::MAINNET,
             Self::Testnet => GenerationHashSeed::TESTNET,
@@ -136,7 +144,7 @@ impl Network {
     }
 
     /// ネットワークのエポックの始まり。catapult の設定では epochAdjustment と呼ばれる。
-    fn epoch(self) -> SystemTime {
+    pub(crate) fn epoch(self) -> SystemTime {
         let seconds = match self {
             // 2021-03-16T00:06:25Z
             Self::Mainnet => 1_615_853_185,
@@ -149,6 +157,14 @@ impl Network {
 
 pub fn run(command: TxCommand) -> Result<(), Failure> {
     match command {
+        TxCommand::Show { transaction } => {
+            let bytes = read_transaction(&transaction)?;
+            let transaction = Transaction::from_bytes(&bytes)
+                .map_err(|error| format!("{}: {error}", transaction.display()))?;
+            let description = show::describe(&transaction, SystemTime::now());
+            outln!("{}", description.render().trim_end());
+            show_missing_cosigners(&transaction)?;
+        }
         TxCommand::Sign {
             network,
             unsigned,
@@ -178,7 +194,9 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .sign(&private_key, &seed)
                 .map_err(|error| error.to_string())?;
             write_new(&out, &transaction.to_bytes())?;
-            outln!("ハッシュ: {}", transaction.hash(&seed));
+            // 何に署名したかが残るように、中身を出す。ハッシュも中に入っている
+            let description = show::describe(&transaction, SystemTime::now());
+            outln!("{}", description.render().trim_end());
             show_missing_cosigners(&transaction)?;
         }
         TxCommand::Cosign {
@@ -296,6 +314,40 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
     Ok(())
 }
 
+/// トランザクションのファイルを読む。中身が16進のテキストなら、バイト列に直す。`-` なら標準入力から読む
+fn read_transaction(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("標準入力を読めませんでした: {error}"))?;
+        bytes
+    } else {
+        fs::read(path).map_err(|error| format!("{} を読めませんでした: {error}", path.display()))?
+    };
+    Ok(from_hex_text(bytes))
+}
+
+/// 空白を除くと16進の文字だけなら、バイト列に直す。そうでなければそのまま返す。
+/// バイト列そのものなら、先頭のサイズの上位のバイトが0なので、16進の文字だけにはならない。
+fn from_hex_text(bytes: Vec<u8>) -> Vec<u8> {
+    let text: Vec<u8> = bytes
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if !text.is_empty() && text.len().is_multiple_of(2) && text.iter().all(u8::is_ascii_hexdigit) {
+        return text
+            .chunks(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII"), 16)
+                    .expect("hex digits")
+            })
+            .collect();
+    }
+    bytes
+}
+
 /// 署名したトランザクションを読み、ネットワークと署名を確かめる。読んだバイト列も返す。
 fn read_signed(path: &Path, network: Network) -> Result<(Vec<u8>, Transaction), String> {
     let bytes = fs::read(path)
@@ -376,4 +428,19 @@ pub fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
         .open(path)
         .and_then(|mut file| file.write_all(contents))
         .map_err(|error| format!("{} に書けませんでした: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_hex_text_or_raw_bytes() {
+        assert_eq!(from_hex_text(b"A1b2\n c3\n".to_vec()), [0xA1, 0xB2, 0xC3]);
+        // 先頭のサイズの上位のバイトが0なので、バイト列そのものは16進の文字だけにはならない
+        let raw = vec![0xA1, 0, 0, 0, 0x41];
+        assert_eq!(from_hex_text(raw.clone()), raw);
+        assert_eq!(from_hex_text(b"ABC".to_vec()), b"ABC");
+        assert_eq!(from_hex_text(Vec::new()), Vec::<u8>::new());
+    }
 }

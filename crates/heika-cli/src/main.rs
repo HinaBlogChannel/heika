@@ -204,6 +204,7 @@ macro_rules! outln {
 mod cert;
 mod delegations;
 mod harvesting;
+mod json;
 mod legal;
 mod node;
 mod show;

@@ -37,6 +37,9 @@ pub enum TxCommand {
     Show {
         /// 出すトランザクションのファイル
         transaction: PathBuf,
+        /// 表示と同じ項目を JSON で出す
+        #[arg(long)]
+        json: bool,
     },
     /// 署名していないトランザクションに、標準入力から読んだ秘密鍵で署名する
     Sign {
@@ -157,13 +160,17 @@ impl Network {
 
 pub fn run(command: TxCommand) -> Result<(), Failure> {
     match command {
-        TxCommand::Show { transaction } => {
+        TxCommand::Show { transaction, json } => {
             let bytes = read_transaction(&transaction)?;
             let transaction = Transaction::from_bytes(&bytes)
                 .map_err(|error| format!("{}: {error}", transaction.display()))?;
             let description = show::describe(&transaction, SystemTime::now());
-            outln!("{}", description.render().trim_end());
-            show_missing_cosigners(&transaction)?;
+            if json {
+                outln!("{}", description.to_json().render().trim_end());
+            } else {
+                outln!("{}", description.render().trim_end());
+                show_missing_cosigners(&transaction)?;
+            }
         }
         TxCommand::Sign {
             network,

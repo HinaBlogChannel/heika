@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use clap::Subcommand;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
-use heika_core::network::NetworkIdentifier;
+use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_p2p::{NetworkNode, Node, NodeRoles};
 use heika_tls::Identity;
 
@@ -24,8 +24,8 @@ const PROBE_BLOCKS: u32 = 100;
 /// 測るブロックの高さを、最初のノードの確定した高さからどれだけ戻すか。
 /// どのノードも同じ確定済みのブロックを返すので、比べられる
 const PROBE_DEPTH: u64 = 1000;
-/// ブロックの目標間隔。メインネットもテストネットも、ネットワークの設定 blockGenerationTargetTime は 30s
-const BLOCK_TIME: Duration = Duration::from_secs(30);
+/// 知らないネットワークでのブロックの目標間隔。catapult の blockGenerationTargetTime の既定値
+const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(30);
 /// --peers-json に書くノードの、遅れの上限（ブロック）。遅れは目標間隔で換算した推定なので、
 /// 実際のブロックの間隔のばらつきで、遅れていないノードにも数ブロックの遅れが出ることがある
 const MAX_PEER_LAG: u64 = 5;
@@ -203,7 +203,11 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             }
 
             // 遅れは並べ替える前の順で計算するので、ノードと組にしてから並べ替える
-            let tips = expected_heights(&measurements);
+            let block_time = NetworkParameters::from_identifier(network)
+                .map_or(DEFAULT_BLOCK_TIME, |parameters| {
+                    parameters.block_generation_target_time
+                });
+            let tips = expected_heights(&measurements, block_time);
             let mut rows: Vec<(Measurement, u64)> = measurements
                 .into_iter()
                 .zip(tips)
@@ -453,9 +457,9 @@ fn peers_p2p_json(peers: &[(&Measurement, Endpoint)]) -> String {
 ///
 /// 全部を測るには何分もかかり、そのあいだにもチェーンは進む。なので、ほかのノードの高さを
 /// 測った時刻の差だけブロックの目標間隔で進めたり戻したりして、その時刻の高さに換算してから一番高いものをとる。
-fn expected_heights(measurements: &[Measurement]) -> Vec<u64> {
+fn expected_heights(measurements: &[Measurement], block_time: Duration) -> Vec<u64> {
     let blocks_between = |from: Instant, to: Instant| -> i128 {
-        let blocks = |elapsed: Duration| (elapsed.as_millis() / BLOCK_TIME.as_millis()) as i128;
+        let blocks = |elapsed: Duration| (elapsed.as_millis() / block_time.as_millis()) as i128;
         if to >= from {
             blocks(to - from)
         } else {
@@ -541,7 +545,10 @@ mod tests {
             measurement(102, start + Duration::from_secs(60)),
             measurement(102, start + Duration::from_secs(180)),
         ];
-        assert_eq!(expected_heights(&measurements), [100, 102, 106]);
+        assert_eq!(
+            expected_heights(&measurements, DEFAULT_BLOCK_TIME),
+            [100, 102, 106]
+        );
     }
     #[test]
     fn writes_find_results_that_a_json_parser_reads_back() {

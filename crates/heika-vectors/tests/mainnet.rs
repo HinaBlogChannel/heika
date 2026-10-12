@@ -21,11 +21,12 @@ use std::time::Duration;
 use heika_block::{Block, BlockType};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
-use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
+use heika_core::network::NetworkParameters;
 use heika_p2p::Node;
 use heika_tls::Identity;
-use heika_transaction::{Body, Transaction, scan};
+use heika_transaction::{Body, Transaction, TransactionsHashCalculation, scan};
 
+const MAINNET: NetworkParameters = NetworkParameters::MAINNET;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 取る高さの範囲。どれも決まった規則で選んでいる。
@@ -100,15 +101,11 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
         for (index, block) in blocks.iter().enumerate() {
             let height = start + index as u64;
             assert_eq!(block.height, height, "{name}");
-            assert_eq!(
-                block.network,
-                NetworkIdentifier::MAINNET,
-                "{name}: {height}"
-            );
+            assert_eq!(block.network, MAINNET.identifier, "{name}: {height}");
             assert!(block.verify_signature(), "{name}: 高さ {height} の署名");
             let expected_type = match height {
                 1 => BlockType::Nemesis,
-                height if height % 720 == 0 => BlockType::Importance,
+                height if height % MAINNET.importance_grouping == 0 => BlockType::Importance,
                 _ => BlockType::Normal,
             };
             assert_eq!(block.block_type, expected_type, "{name}: {height}");
@@ -126,11 +123,11 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
                 });
                 assert_eq!(decoded.to_bytes(), transaction, "{name}: {height}");
                 assert!(
-                    decoded.verify(&GenerationHashSeed::MAINNET),
+                    decoded.verify(&MAINNET.generation_hash_seed),
                     "{name}: 高さ {height} のトランザクションの署名"
                 );
                 assert!(
-                    decoded.verify_cosignatures(&GenerationHashSeed::MAINNET),
+                    decoded.verify_cosignatures(&MAINNET.generation_hash_seed),
                     "{name}: 高さ {height} の連署"
                 );
                 if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) =
@@ -142,6 +139,22 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
                         aggregate.transactions_hash_calculation()
                     );
                     *aggregates.entry(key).or_insert(0) += 1;
+                    assert_eq!(
+                        aggregate.version().number(),
+                        MAINNET.aggregate_version(height),
+                        "{name}: 高さ {height} のアグリゲートのバージョン"
+                    );
+                    if aggregate.transactions_hash_calculation()
+                        == TransactionsHashCalculation::Unknown
+                    {
+                        assert!(
+                            MAINNET.is_known_corrupt_aggregate(
+                                &decoded.hash(&MAINNET.generation_hash_seed),
+                                &aggregate.transactions_hash()
+                            ),
+                            "{name}: 高さ {height} の TransactionsHash"
+                        );
+                    }
                 }
             }
             if index > 0 {

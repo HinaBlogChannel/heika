@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
-use heika_core::network::NetworkIdentifier;
+use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::slip10::{self, ExtendedKey};
 use zeroize::Zeroizing;
@@ -123,12 +123,18 @@ enum Network {
     Testnet,
 }
 
+impl Network {
+    pub(crate) fn parameters(self) -> &'static NetworkParameters {
+        match self {
+            Self::Mainnet => &NetworkParameters::MAINNET,
+            Self::Testnet => &NetworkParameters::TESTNET,
+        }
+    }
+}
+
 impl From<Network> for NetworkIdentifier {
     fn from(network: Network) -> Self {
-        match network {
-            Network::Mainnet => Self::MAINNET,
-            Network::Testnet => Self::TESTNET,
-        }
+        network.parameters().identifier
     }
 }
 

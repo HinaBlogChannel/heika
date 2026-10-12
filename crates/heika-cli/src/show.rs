@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use heika_core::address::Address;
 use heika_core::key::PublicKey;
-use heika_core::network::NetworkIdentifier;
+use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_core::signature::Signature;
 use heika_transaction::{
     AccountRestriction, AccountRestrictionFlags, AggregateVersion, AliasAction, Body, LinkAction,
@@ -18,10 +18,8 @@ use heika_transaction::{
 };
 use heika_wallet::harvest_request;
 
-use crate::{Network, json};
+use crate::json;
 
-/// ネットワークの設定 blockGenerationTargetTime。メインネットもテストネットも 30s
-const BLOCK_TIME: Duration = Duration::from_secs(30);
 /// 通貨のモザイクに付いているネームスペース `symbol.xym`
 const CURRENCY_NAMESPACE: NamespaceId = NamespaceId(0xE74B_99BA_41F4_AFEE);
 /// 通貨のモザイクの可分性
@@ -113,7 +111,7 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
     description.push("期限", context.deadline(transaction.deadline, now));
     match context.network {
         Some(network) => {
-            let seed = network.generation_hash_seed();
+            let seed = network.generation_hash_seed;
             if transaction.signature == Signature([0; 64]) {
                 description.push("署名", "まだない");
             } else {
@@ -138,6 +136,9 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
     );
 
     if let Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) = body {
+        let hash = context
+            .network
+            .map(|network| transaction.hash(&network.generation_hash_seed));
         match aggregate.version() {
             AggregateVersion::V3 => {}
             version => description.push(
@@ -156,15 +157,22 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
                     TransactionsHashCalculation::Legacy => {
                         "バージョン 1 で許されていた誤った求め方"
                     }
+                    TransactionsHashCalculation::Unknown
+                        if context.network.zip(hash).is_some_and(|(network, hash)| {
+                            network.is_known_corrupt_aggregate(
+                                &hash,
+                                &aggregate.transactions_hash(),
+                            )
+                        }) =>
+                    {
+                        "どの求め方とも合わないが、ネットワークの設定で1件ずつ認められたもの（下の中身が署名されたものとは限らない）"
+                    }
                     TransactionsHashCalculation::Unknown => {
                         "どの求め方とも合わない（下の中身が署名されたものとは限らない）"
                     }
                 },
             );
         }
-        let hash = context
-            .network
-            .map(|network| transaction.hash(&network.generation_hash_seed()));
         for cosignature in aggregate.cosignatures() {
             let verified = match hash {
                 Some(hash) if cosignature.verify(&hash) => "正しい",
@@ -229,13 +237,13 @@ fn describe_body(
         }
         Body::HashLock(lock) => {
             description.push("モザイク", context.mosaic(&lock.mosaic));
-            description.push("期間", blocks(lock.duration));
+            description.push("期間", context.blocks(lock.duration));
             description.push("ロックするアグリゲートのハッシュ", lock.hash.to_string());
         }
         Body::SecretLock(lock) => {
             description.push("受取人", context.address(&lock.recipient_address));
             description.push("モザイク", context.mosaic(&lock.mosaic));
-            description.push("期間", blocks(lock.duration));
+            description.push("期間", context.blocks(lock.duration));
             description.push("シークレット", lock.secret.to_string());
             description.push("ハッシュの種類", hash_algorithm(lock.hash_algorithm));
         }
@@ -278,7 +286,7 @@ fn describe_body(
                 if definition.duration == 0 {
                     "期限なし".to_owned()
                 } else {
-                    blocks(definition.duration)
+                    context.blocks(definition.duration)
                 },
             );
             description.push("性質", mosaic_flags(definition.flags));
@@ -338,7 +346,7 @@ fn describe_body(
             let parent_id = match registration.registration_type {
                 NamespaceRegistrationType::Root { duration } => {
                     description.push("種類", "ルート");
-                    description.push("期間", blocks(duration));
+                    description.push("期間", context.blocks(duration));
                     None
                 }
                 NamespaceRegistrationType::Child { parent_id } => {
@@ -458,16 +466,12 @@ fn describe_restriction<T>(
 struct Context {
     identifier: Option<NetworkIdentifier>,
     raw: NetworkIdentifier,
-    network: Option<Network>,
+    network: Option<&'static NetworkParameters>,
 }
 
 impl Context {
     fn new(identifier: NetworkIdentifier) -> Self {
-        let network = match identifier {
-            NetworkIdentifier::MAINNET => Some(Network::Mainnet),
-            NetworkIdentifier::TESTNET => Some(Network::Testnet),
-            _ => None,
-        };
+        let network = NetworkParameters::from_identifier(identifier);
         Self {
             identifier: network.map(|_| identifier),
             raw: identifier,
@@ -476,10 +480,10 @@ impl Context {
     }
 
     fn network_name(&self) -> String {
-        match self.network {
-            Some(Network::Mainnet) => "メインネット".to_owned(),
-            Some(Network::Testnet) => "テストネット".to_owned(),
-            None => format!("不明（0x{:02X}）", self.raw.0),
+        match self.identifier {
+            Some(NetworkIdentifier::MAINNET) => "メインネット".to_owned(),
+            Some(NetworkIdentifier::TESTNET) => "テストネット".to_owned(),
+            _ => format!("不明（0x{:02X}）", self.raw.0),
         }
     }
 
@@ -510,10 +514,18 @@ impl Context {
     }
 
     fn currency_mosaic_id(&self) -> Option<UnresolvedMosaicId> {
-        match self.network? {
-            Network::Mainnet => Some(UnresolvedMosaicId(0x6BED_913F_A202_23F8)),
-            Network::Testnet => Some(UnresolvedMosaicId(0x72C0_212E_67A0_8BCE)),
-        }
+        Some(UnresolvedMosaicId(self.network?.currency_mosaic_id))
+    }
+
+    /// ブロック数と、ブロックの目標間隔から見積もった時間。知らないネットワークなら、ブロック数だけ
+    fn blocks(&self, count: u64) -> String {
+        let Some(network) = self.network else {
+            return format!("{count} ブロック");
+        };
+        let duration = network
+            .block_generation_target_time
+            .saturating_mul(count.min(u32::MAX.into()) as u32);
+        format!("{count} ブロック（約 {}）", approximate(duration))
     }
 
     fn is_currency(&self, id: UnresolvedMosaicId) -> bool {
@@ -590,12 +602,6 @@ fn namespace_id(id: NamespaceId) -> String {
     } else {
         format!("0x{:016X}", id.0)
     }
-}
-
-/// ブロック数と、ブロックの間隔から見積もった時間
-fn blocks(count: u64) -> String {
-    let duration = BLOCK_TIME.saturating_mul(count.min(u32::MAX.into()) as u32);
-    format!("{count} ブロック（約 {}）", approximate(duration))
 }
 
 /// いちばん大きい単位で、だいたいの時間を出す
@@ -788,6 +794,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use heika_core::key::PrivateKey;
+    use heika_core::network::GenerationHashSeed;
     use heika_transaction::{
         Aggregate, EmbeddedTransaction, MosaicDefinition, NamespaceRegistration, Transfer,
     };
@@ -817,7 +824,7 @@ mod tests {
     }
 
     fn epoch() -> SystemTime {
-        Network::Mainnet.epoch()
+        NetworkParameters::MAINNET.epoch()
     }
 
     fn value<'a>(description: &'a Description, label: &str) -> Vec<&'a str> {
@@ -856,7 +863,7 @@ mod tests {
         assert!(value(&description, "ハッシュ").is_empty());
 
         transaction
-            .sign(&private_key(), &Network::Mainnet.generation_hash_seed())
+            .sign(&private_key(), &GenerationHashSeed::MAINNET)
             .unwrap();
         let later = epoch() + Duration::from_secs(7200);
         let description = describe(&transaction, later);

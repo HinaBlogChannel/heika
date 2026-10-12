@@ -157,6 +157,16 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
                     TransactionsHashCalculation::Legacy => {
                         "バージョン 1 で許されていた誤った求め方"
                     }
+                    TransactionsHashCalculation::Unknown
+                        if context.network.zip(hash).is_some_and(|(network, hash)| {
+                            network.is_known_corrupt_aggregate(
+                                &hash,
+                                &aggregate.transactions_hash(),
+                            )
+                        }) =>
+                    {
+                        "どの求め方とも合わないが、ネットワークの設定で1件ずつ認められたもの（下の中身が署名されたものとは限らない）"
+                    }
                     TransactionsHashCalculation::Unknown => {
                         "どの求め方とも合わない（下の中身が署名されたものとは限らない）"
                     }

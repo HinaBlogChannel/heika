@@ -20,7 +20,10 @@ mod restriction;
 mod scan;
 mod transfer;
 
-pub use aggregate::{Aggregate, Cosignature, EmbeddedTransaction, NestedAggregate};
+pub use aggregate::{
+    Aggregate, AggregateVersion, Cosignature, EmbeddedTransaction, NestedAggregate,
+    TransactionsHashCalculation,
+};
 pub use bounded::{BoundedVec, TooLong};
 pub use lock::{HashLock, LockHashAlgorithm, SecretLock, SecretProof};
 pub use metadata::{Metadata, MosaicMetadata, NamespaceMetadata};
@@ -245,13 +248,14 @@ impl Transaction {
 
     /// 署名とハッシュの対象。catapult の `TransactionPlugin::dataBuffer`。
     ///
-    /// ふつうはヘッダーの後半から最後まで。アグリゲートは、中のトランザクションのハッシュとそれらの長さまでで、
-    /// 後ろの予約の4バイト（catapult の `Footer_Size`）と、中のトランザクションと連署は含まない。
-    /// 中のトランザクションは、そのハッシュを通して署名される。
+    /// ふつうはヘッダーの後半から最後まで。アグリゲートは、中のトランザクションのハッシュまでか
+    /// （バージョン 2 まで）、それらの長さまで（バージョン 3）で、後ろの予約など（catapult の `Footer_Size`）と、
+    /// 中のトランザクションと連署は含まない。中のトランザクションは、そのハッシュを通して署名される。
     fn signed_part<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
-        match self.body {
-            Body::AggregateComplete(_) | Body::AggregateBonded(_) => {
-                &bytes[UNSIGNED_HEADER_SIZE..HEADER_SIZE + aggregate::FIXED_SIZE - 4]
+        match &self.body {
+            Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+                let end = HEADER_SIZE + aggregate::FIXED_SIZE - aggregate.version().footer_size();
+                &bytes[UNSIGNED_HEADER_SIZE..end]
             }
             _ => &bytes[UNSIGNED_HEADER_SIZE..],
         }
@@ -351,12 +355,13 @@ impl Body {
         }
     }
 
-    /// 種類ごとの構造のバージョン。どれも catbuffer の最新のものを書く。
-    /// アグリゲートはバージョン 3 で、メインネットでは高さ 4,759,100 から、それより前のバージョンは使えない。
+    /// 種類ごとの構造のバージョン。アグリゲートは [`AggregateVersion`] のとおりで、新しく作ればバージョン 3。
     /// ほかの種類は、どれもバージョン 1 しかない。
     pub fn version(&self) -> u8 {
         match self {
-            Self::AggregateComplete(_) | Self::AggregateBonded(_) => 3,
+            Self::AggregateComplete(aggregate) | Self::AggregateBonded(aggregate) => {
+                aggregate.version().number()
+            }
             _ => 1,
         }
     }
@@ -392,8 +397,7 @@ impl Body {
         }
     }
 
-    /// 種類とバージョンの組が catbuffer にあるか。中身の形はわかっても、Body として読めるとは限らない
-    /// （アグリゲートのバージョン 1 と 2 は、読めるのは走査だけ）。
+    /// 種類とバージョンの組が catbuffer にあるか。
     pub(crate) fn is_known(transaction_type: u16, version: u8) -> bool {
         if Self::is_aggregate_type(transaction_type) {
             (1..=3).contains(&version)
@@ -435,14 +439,11 @@ impl Body {
     }
 
     fn decode(transaction_type: u16, version: u8, bytes: &[u8]) -> Result<Self, DecodeError> {
-        let expected_version = if Self::is_aggregate_type(transaction_type) {
-            3
-        } else if Self::is_version_1_type(transaction_type) {
-            1
-        } else {
+        if !Self::is_aggregate_type(transaction_type) && !Self::is_version_1_type(transaction_type)
+        {
             return Err(DecodeError::UnknownType(transaction_type));
-        };
-        if version != expected_version {
+        }
+        if !Self::is_known(transaction_type, version) {
             return Err(DecodeError::UnsupportedVersion {
                 transaction_type,
                 version,
@@ -474,8 +475,8 @@ impl Body {
             0x4251 => Self::MosaicAddressRestriction(MosaicAddressRestriction::decode(bytes)?),
             0x4151 => Self::MosaicGlobalRestriction(MosaicGlobalRestriction::decode(bytes)?),
             0x4154 => Self::Transfer(Transfer::decode(bytes)?),
-            0x4141 => Self::AggregateComplete(Aggregate::decode(bytes)?),
-            _ => Self::AggregateBonded(Aggregate::decode(bytes)?),
+            0x4141 => Self::AggregateComplete(Aggregate::decode(version, bytes)?),
+            _ => Self::AggregateBonded(Aggregate::decode(version, bytes)?),
         })
     }
 

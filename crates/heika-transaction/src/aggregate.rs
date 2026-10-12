@@ -61,6 +61,14 @@ impl EmbeddedTransaction {
         Hash256(Sha3_256::digest(self.to_bytes()).into())
     }
 
+    /// 埋め草まで含めた SHA3-256。バージョン 1 で許されていた、誤った葉の求め方
+    /// （`HashEmbeddedTransactionWithPadding`）。
+    fn padded_hash(&self) -> Hash256 {
+        let mut bytes = self.to_bytes();
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
+        Hash256(Sha3_256::digest(bytes).into())
+    }
+
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader(bytes);
         reader.u32();
@@ -108,17 +116,67 @@ impl Cosignature {
     }
 }
 
+/// アグリゲートの構造のバージョン。形は同じで、署名の範囲と、中のトランザクションのハッシュの決まりが違う。
+///
+/// 新しく作るのはいつもバージョン 3。それより前のものは、チェーンにあるものを読むためだけに扱う。
+/// どの高さでどのバージョンが使えるかは、catapult の `AggregateTransactionVersionValidator` と
+/// ネットワークの設定の `[fork_heights]` で決まる。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AggregateVersion {
+    /// メインネットで高さ 1,690,500（strictAggregateTransactionHash）より前。
+    /// 中のトランザクションのハッシュに誤った求め方も許されていたので、中身から求めずに、書いてあったものを持つ
+    V1 {
+        transactions_hash: Hash256,
+    },
+    /// メインネットで高さ 4,759,100（uniqueAggregateTransactionHash）より前。
+    /// 署名の範囲に、中のトランザクションの長さを含まない
+    V2,
+    V3,
+}
+
+impl AggregateVersion {
+    pub fn number(self) -> u8 {
+        match self {
+            Self::V1 { .. } => 1,
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
+    /// 本体のうち、署名の範囲に入らない後ろの部分の長さ。catapult の `Footer_Size` と `Pre_V3_Footer_Size`。
+    pub(crate) fn footer_size(self) -> usize {
+        match self {
+            Self::V3 => 4,
+            _ => 4 + 4,
+        }
+    }
+}
+
+/// 中のトランザクションのハッシュが、どの求め方と合うか。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TransactionsHashCalculation {
+    /// 正しい求め方。バージョン 2 からは、これしか認められない
+    Correct,
+    /// バージョン 1 で許されていた誤った求め方（葉に埋め草を含める、誤った Merkle の根、またはその両方）
+    Legacy,
+    /// どの求め方とも合わない。バージョン 1 には、ネットワークの設定の
+    /// `[corrupt_aggregate_transaction_hashes]` に載せて認めたものがある。
+    /// 署名は書いてあったハッシュにしか掛かっていないので、表示している中身が署名されたものとは限らない
+    Unknown,
+}
+
 /// アグリゲートの本体。中のトランザクションと連署。
 ///
-/// 中のトランザクションのハッシュは中身から決まるので持たず、書くときに求める。
+/// 中のトランザクションのハッシュは中身から決まるので持たず、書くときに求める（バージョン 1 を除く）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Aggregate {
+    version: AggregateVersion,
     transactions: Vec<EmbeddedTransaction>,
     cosignatures: Vec<Cosignature>,
 }
 
 impl Aggregate {
-    /// 中のトランザクションから、連署のないアグリゲートを作る。アグリゲートは入れ子にできない。
+    /// 中のトランザクションから、連署のないアグリゲート（バージョン 3）を作る。アグリゲートは入れ子にできない。
     pub fn new(transactions: Vec<EmbeddedTransaction>) -> Result<Self, NestedAggregate> {
         if transactions
             .iter()
@@ -127,9 +185,14 @@ impl Aggregate {
             return Err(NestedAggregate);
         }
         Ok(Self {
+            version: AggregateVersion::V3,
             transactions,
             cosignatures: Vec::new(),
         })
+    }
+
+    pub fn version(&self) -> AggregateVersion {
+        self.version
     }
 
     pub fn transactions(&self) -> &[EmbeddedTransaction] {
@@ -144,14 +207,52 @@ impl Aggregate {
         self.cosignatures.push(cosignature);
     }
 
-    /// 中のトランザクションのハッシュ。それぞれのハッシュを葉にした Merkle ツリーの根。
+    /// 中のトランザクションのハッシュ。署名はこれに掛かる。
+    /// ふつうは、それぞれのハッシュを葉にした Merkle ツリーの根。バージョン 1 は、書いてあったもの。
     pub fn transactions_hash(&self) -> Hash256 {
+        match self.version {
+            AggregateVersion::V1 { transactions_hash } => transactions_hash,
+            _ => self.correct_transactions_hash(),
+        }
+    }
+
+    fn correct_transactions_hash(&self) -> Hash256 {
         let leaves: Vec<_> = self
             .transactions
             .iter()
             .map(EmbeddedTransaction::hash)
             .collect();
         merkle::root(&leaves)
+    }
+
+    /// 中のトランザクションのハッシュが、どの求め方と合うか。
+    /// catapult の `AggregateTransactionsHashValidator` と同じ順に確かめる。
+    pub fn transactions_hash_calculation(&self) -> TransactionsHashCalculation {
+        let hash = self.transactions_hash();
+        if hash == self.correct_transactions_hash() {
+            return TransactionsHashCalculation::Correct;
+        }
+        let leaves: Vec<_> = self
+            .transactions
+            .iter()
+            .map(EmbeddedTransaction::hash)
+            .collect();
+        let padded: Vec<_> = self
+            .transactions
+            .iter()
+            .map(EmbeddedTransaction::padded_hash)
+            .collect();
+        if [
+            merkle::root(&padded),
+            merkle::invalid_root(&leaves),
+            merkle::invalid_root(&padded),
+        ]
+        .contains(&hash)
+        {
+            TransactionsHashCalculation::Legacy
+        } else {
+            TransactionsHashCalculation::Unknown
+        }
     }
 
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
@@ -172,8 +273,10 @@ impl Aggregate {
     }
 
     /// catapult の `IsSizeValid` と同じく、中のトランザクションの長さが8の倍数で、
-    /// 残りが連署の長さの倍数になっているものを読む。中のトランザクションのハッシュが合わないものは弾く。
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+    /// 残りが連署の長さの倍数になっているものを読む。
+    /// バージョン 2 からは、中のトランザクションのハッシュが正しく求めたものと合わなければ弾く。
+    /// バージョン 1 は、どのハッシュでも読む（[`Aggregate::transactions_hash_calculation`] で確かめる）。
+    pub(crate) fn decode(version: u8, bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() < FIXED_SIZE {
             return Err(DecodeError::InvalidBodySize);
         }
@@ -222,7 +325,13 @@ impl Aggregate {
             })
             .collect::<Result<_, _>>()?;
 
+        let version = match version {
+            1 => AggregateVersion::V1 { transactions_hash },
+            2 => AggregateVersion::V2,
+            _ => AggregateVersion::V3,
+        };
         let aggregate = Self {
+            version,
             transactions,
             cosignatures,
         };
@@ -358,6 +467,79 @@ mod tests {
         assert!(!changed.verify(&seed()));
     }
 
+    /// 古いバージョンのアグリゲート。テストのために、外からは作れないものを作る
+    fn old(transactions: Vec<EmbeddedTransaction>, version: AggregateVersion) -> Transaction {
+        let mut transaction = aggregate(transactions);
+        body(&mut transaction).version = version;
+        transaction
+    }
+
+    #[test]
+    fn version_2_signs_up_to_the_transactions_hash() {
+        let mut transaction = old(vec![link(1)], AggregateVersion::V2);
+        transaction.sign(&signer(), &seed()).unwrap();
+        let bytes = transaction.to_bytes();
+        assert_eq!(bytes[108], 2);
+        let signature = signer().sign(&[&seed().0, &bytes[108..160]]);
+        assert_eq!(transaction.signature, signature);
+        assert_eq!(Transaction::from_bytes(&bytes), Ok(transaction.clone()));
+
+        // 中のトランザクションの長さは署名されていないので、バージョン 3 と同じ署名にはならない
+        let mut current = aggregate(vec![link(1)]);
+        current.sign(&signer(), &seed()).unwrap();
+        assert_ne!(current.signature, transaction.signature);
+
+        let mut wrong_hash = bytes.clone();
+        wrong_hash[BODY] ^= 1;
+        assert_eq!(
+            Transaction::from_bytes(&wrong_hash),
+            Err(DecodeError::TransactionsHashMismatch)
+        );
+    }
+
+    #[test]
+    fn version_1_keeps_the_written_transactions_hash() {
+        let transactions = vec![link(1), link(2), link(3)];
+        let leaves: Vec<_> = transactions.iter().map(EmbeddedTransaction::hash).collect();
+        let padded: Vec<_> = transactions
+            .iter()
+            .map(EmbeddedTransaction::padded_hash)
+            .collect();
+        for (transactions_hash, calculation) in [
+            (merkle::root(&leaves), TransactionsHashCalculation::Correct),
+            (merkle::root(&padded), TransactionsHashCalculation::Legacy),
+            (
+                merkle::invalid_root(&leaves),
+                TransactionsHashCalculation::Legacy,
+            ),
+            (
+                merkle::invalid_root(&padded),
+                TransactionsHashCalculation::Legacy,
+            ),
+            (Hash256([0xAB; 32]), TransactionsHashCalculation::Unknown),
+        ] {
+            let mut transaction = old(
+                transactions.clone(),
+                AggregateVersion::V1 { transactions_hash },
+            );
+            transaction.sign(&signer(), &seed()).unwrap();
+            let bytes = transaction.to_bytes();
+            assert_eq!(bytes[108], 1);
+            assert_eq!(bytes[BODY..BODY + 32], transactions_hash.0);
+            let read = Transaction::from_bytes(&bytes).unwrap();
+            assert_eq!(read, transaction);
+            assert!(read.verify(&seed()));
+            let Body::AggregateComplete(aggregate) = &read.body else {
+                unreachable!()
+            };
+            assert_eq!(
+                aggregate.transactions_hash_calculation(),
+                calculation,
+                "{transactions_hash}"
+            );
+        }
+    }
+
     #[test]
     fn refuses_to_nest_aggregates() {
         let inner = EmbeddedTransaction::new(
@@ -384,7 +566,7 @@ mod tests {
         let mut cosignature_version = [bytes.as_slice(), &[0; 104]].concat();
         cosignature_version[BODY + 128] = 1;
         let mut version = bytes.clone();
-        version[108] = 2;
+        version[108] = 4;
         for (name, mut bytes, error) in [
             ("nested", nested, DecodeError::NestedAggregate),
             (
@@ -414,7 +596,7 @@ mod tests {
                 version,
                 DecodeError::UnsupportedVersion {
                     transaction_type: 0x4141,
-                    version: 2,
+                    version: 4,
                 },
             ),
         ] {

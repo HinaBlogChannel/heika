@@ -2,6 +2,8 @@
 //!
 //! 秘密鍵は PKCS#8 の v1（公開鍵を含まない48バイト）、公開鍵は SubjectPublicKeyInfo（44バイト）。
 //! どちらも決まった前置きに32バイトの鍵が続くだけなので、ASN.1 は解釈せずに前置きと長さを比べる。
+//! 秘密鍵は、公開鍵だけが付いた v2（RFC 5958 の OneAsymmetricKey、83バイト）も読む。
+//! 属性の付いた v2 は、ASN.1 を解釈しないと読めないので受け付けない。書き出すのは v1 だけにする。
 //!
 //! Base64 との変換は定数時間で行う。PEM は末尾に改行を付けずに書き、読むときは前後の空白を無視する。
 
@@ -20,7 +22,17 @@ const PUBLIC_KEY_PREFIX: [u8; 12] = [
     0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
 
+/// `SEQUENCE { INTEGER 1, SEQUENCE { OID 1.3.101.112 }, OCTET STRING { OCTET STRING (32バイト) },`
+/// `[1] IMPLICIT BIT STRING (32バイト) }` のうち、秘密鍵の前まで
+const PRIVATE_KEY_V2_PREFIX: [u8; 16] = [
+    0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+/// v2 の、秘密鍵と公開鍵のあいだ。`[1] IMPLICIT BIT STRING` で、使わないビットは0
+const PRIVATE_KEY_V2_PUBLIC_KEY_TAG: [u8; 3] = [0x81, 0x21, 0x00];
+
 pub const PRIVATE_KEY_DER_LENGTH: usize = PRIVATE_KEY_PREFIX.len() + 32;
+const PRIVATE_KEY_V2_DER_LENGTH: usize =
+    PRIVATE_KEY_V2_PREFIX.len() + 32 + PRIVATE_KEY_V2_PUBLIC_KEY_TAG.len() + 32;
 pub const PUBLIC_KEY_DER_LENGTH: usize = PUBLIC_KEY_PREFIX.len() + 32;
 
 const PRIVATE_KEY_LABEL: &str = "PRIVATE KEY";
@@ -28,6 +40,7 @@ const PUBLIC_KEY_LABEL: &str = "PUBLIC KEY";
 
 /// Base64 にした長さ。どちらの鍵も PEM の1行（64文字）に収まる
 const PRIVATE_KEY_BASE64_LENGTH: usize = PRIVATE_KEY_DER_LENGTH.div_ceil(3) * 4;
+const PRIVATE_KEY_V2_BASE64_LENGTH: usize = PRIVATE_KEY_V2_DER_LENGTH.div_ceil(3) * 4;
 const PUBLIC_KEY_BASE64_LENGTH: usize = PUBLIC_KEY_DER_LENGTH.div_ceil(3) * 4;
 
 pub fn private_key_to_der(key: &PrivateKey) -> Zeroizing<[u8; PRIVATE_KEY_DER_LENGTH]> {
@@ -37,14 +50,38 @@ pub fn private_key_to_der(key: &PrivateKey) -> Zeroizing<[u8; PRIVATE_KEY_DER_LE
     der
 }
 
+/// PKCS#8 の v1 か、公開鍵だけが付いた v2 を読む。v2 の公開鍵は、秘密鍵から導いたものと同じでなければならない。
 pub fn private_key_from_der(der: &[u8]) -> Result<PrivateKey, ParseKeyError> {
-    match der.split_first_chunk::<{ PRIVATE_KEY_PREFIX.len() }>() {
-        Some((prefix, key)) if *prefix == PRIVATE_KEY_PREFIX => key
+    if let Some((prefix, key)) = der.split_first_chunk::<{ PRIVATE_KEY_PREFIX.len() }>()
+        && *prefix == PRIVATE_KEY_PREFIX
+    {
+        return key
             .try_into()
             .map(PrivateKey::from_bytes)
-            .map_err(|_| ParseKeyError::UnsupportedFormat),
-        _ => Err(ParseKeyError::UnsupportedFormat),
+            .map_err(|_| ParseKeyError::UnsupportedFormat);
     }
+    let Some((prefix, rest)) = der.split_first_chunk::<{ PRIVATE_KEY_V2_PREFIX.len() }>() else {
+        return Err(ParseKeyError::UnsupportedFormat);
+    };
+    let Some((key, rest)) = rest.split_first_chunk::<32>() else {
+        return Err(ParseKeyError::UnsupportedFormat);
+    };
+    let Some((tag, public_key)) =
+        rest.split_first_chunk::<{ PRIVATE_KEY_V2_PUBLIC_KEY_TAG.len() }>()
+    else {
+        return Err(ParseKeyError::UnsupportedFormat);
+    };
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| ParseKeyError::UnsupportedFormat)?;
+    if *prefix != PRIVATE_KEY_V2_PREFIX || *tag != PRIVATE_KEY_V2_PUBLIC_KEY_TAG {
+        return Err(ParseKeyError::UnsupportedFormat);
+    }
+    let key = PrivateKey::from_bytes(key);
+    if PublicKey::from_private_key(&key) != PublicKey(public_key) {
+        return Err(ParseKeyError::PublicKeyMismatch);
+    }
+    Ok(key)
 }
 
 pub fn private_key_to_pem(key: &PrivateKey) -> Zeroizing<String> {
@@ -57,8 +94,9 @@ pub fn private_key_to_pem(key: &PrivateKey) -> Zeroizing<String> {
 }
 
 pub fn private_key_from_pem(pem: &str) -> Result<PrivateKey, ParseKeyError> {
-    let mut base64 = Zeroizing::new([0; PRIVATE_KEY_BASE64_LENGTH]);
-    let mut der = Zeroizing::new([0; PRIVATE_KEY_DER_LENGTH]);
+    // v2 も収まる大きさにする
+    let mut base64 = Zeroizing::new([0; PRIVATE_KEY_V2_BASE64_LENGTH]);
+    let mut der = Zeroizing::new([0; PRIVATE_KEY_V2_DER_LENGTH]);
     private_key_from_der(read_pem(pem, PRIVATE_KEY_LABEL, &mut *base64, &mut *der)?)
 }
 
@@ -161,6 +199,8 @@ pub enum ParseKeyError {
     InvalidBase64,
     /// RFC 8410 の Ed25519 の鍵の形ではない
     UnsupportedFormat,
+    /// PKCS#8 の v2 に入っている公開鍵が、秘密鍵から導いたものと違う
+    PublicKeyMismatch,
 }
 
 impl fmt::Display for ParseKeyError {
@@ -172,7 +212,10 @@ impl fmt::Display for ParseKeyError {
             ),
             Self::InvalidBase64 => f.write_str("PEM の本体が Base64 として読めません"),
             Self::UnsupportedFormat => f.write_str(
-                "Ed25519 の鍵の形ではありません（OpenSSL が書き出す RFC 8410 の形だけを受け付けます）",
+                "Ed25519 の鍵の形ではありません（RFC 8410 の形の、PKCS#8 の v1 と、公開鍵だけが付いた v2 を受け付けます）",
+            ),
+            Self::PublicKeyMismatch => f.write_str(
+                "PKCS#8 の v2 に入っている公開鍵が、秘密鍵から導いたものと違います",
             ),
         }
     }
@@ -253,8 +296,53 @@ MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
         );
     }
 
+    /// RFC 8410 の 10.3 節の鍵を、属性を付けずに公開鍵だけを付けた PKCS#8 の v2 にしたもの。
+    /// `openssl pkey` でも読め、`-pubout` は PUBLIC_PEM と同じになる
+    const PRIVATE_V2_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MFECAQEwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC
+gSEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
+-----END PRIVATE KEY-----";
+
     #[test]
-    fn rejects_a_private_key_with_the_public_key() {
+    fn reads_a_v2_private_key_with_only_the_public_key() {
+        let key = private_key_from_pem(PRIVATE_V2_PEM).unwrap();
+        assert_eq!(*key.to_hex(), PRIVATE_HEX);
+        // 書き出すのは v1
+        assert_eq!(*private_key_to_pem(&key), PRIVATE_PEM);
+    }
+
+    #[test]
+    fn rejects_a_v2_private_key_with_another_public_key() {
+        let mut base64 = [0; PRIVATE_KEY_V2_BASE64_LENGTH];
+        let mut der = [0; PRIVATE_KEY_V2_DER_LENGTH];
+        let der = read_pem(PRIVATE_V2_PEM, PRIVATE_KEY_LABEL, &mut base64, &mut der)
+            .unwrap()
+            .to_vec();
+        let mut other = der.clone();
+        *other.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            private_key_from_der(&other).unwrap_err(),
+            ParseKeyError::PublicKeyMismatch
+        );
+        // 長さが合わないものや、版が 0 なのに公開鍵が付いたものは、形が違う
+        assert_eq!(
+            private_key_from_der(&der[..der.len() - 1]).unwrap_err(),
+            ParseKeyError::UnsupportedFormat
+        );
+        assert_eq!(
+            private_key_from_der(&[&der[..], &[0]].concat()).unwrap_err(),
+            ParseKeyError::UnsupportedFormat
+        );
+        let mut version_0 = der;
+        version_0[4] = 0x00;
+        assert_eq!(
+            private_key_from_der(&version_0).unwrap_err(),
+            ParseKeyError::UnsupportedFormat
+        );
+    }
+
+    #[test]
+    fn rejects_a_v2_private_key_with_attributes() {
         // RFC 8410 の 10.3 節の後半。PKCS#8 の v2 で、属性と公開鍵が付いている
         let pem = "-----BEGIN PRIVATE KEY-----
 MHICAQEwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC

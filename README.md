@@ -6,7 +6,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 
 - ✅DONE: ニーモニックの生成と、公式ウォレットと同じパスでの鍵とアドレスの導出
 - ✅DONE: 秘密鍵の生成と、公開鍵とアドレスの導出
-- ✅DONE: 鍵の PEM と16進の相互変換
+- ✅DONE: 鍵の PEM と16進の相互変換（秘密鍵は PKCS#8 の v1 と、公開鍵だけが付いた v2 を読める）
 - ✅DONE: catapult と同じ判定の署名の検証（ライブラリのみ）
 - ✅DONE: CA とノードの証明書の発行（DN と有効期間を指定できる。v3 は shoestring と同じ拡張、v1 も選べる）
 - ✅DONE: DN は RFC 4514 の形（CN=node,O=example）でも OpenSSL の形（/O=example/CN=node）でも書ける

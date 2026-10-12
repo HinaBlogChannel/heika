@@ -22,3 +22,7 @@ heika-transaction = { version = "0.2.0", path = "../heika-transaction" }
 heika-wallet = { version = "0.2.0", path = "../heika-wallet" }
 rand_core = "0.10.1"
 zeroize = "1.9.1"
+
+[dev-dependencies]
+# 自前で書く peers-p2p.json を、別の実装で読み戻して確かめる
+serde_json = "1.0.151"

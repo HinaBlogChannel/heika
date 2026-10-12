@@ -84,6 +84,7 @@ heika tx cosign --network mainnet --out harvesting.cosigned.bin harvesting.signe
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem harvesting.signed.bin < node.key.pem
 
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
+heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json < node.key.pem
 
 heika legal third-party
 heika legal source --out heika-source.zip
@@ -96,6 +97,8 @@ DN は RFC 4514 の形（`CN=node,O=example`）でも、OpenSSL の `-subj` の�
 `heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。マルチシグのアカウントなどで連署が要るときは、署名したものに `heika tx cosign` で1人ずつ連署を足す。連署するのは外側の署名を含むハッシュなので、先に署名しておく。`heika tx announce` は、ネットワーク、署名と連署、期限を確かめてから送る。ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで確かめる。
 
 `heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
+
+`--peers-json` を付けると、測ったノードのうち、Peer のロールがあって遅れが 5 ブロック以下のノードを、読み出しの速い順に `--peers-count` 台（既定は 10 台）選び、catapult の `peers-p2p.json` の形式で書く。公開鍵は、ノードが名乗ったものではなく、TLS で確かめた CA の公開鍵を書く。自分のノードの証明書で名乗っていれば、自分のノードは除く。すでにあるファイルは上書きしないので、ノードの `resources/peers-p2p.json` には、中身を確かめてから置き換える。
 
 ## テスト
 

@@ -133,6 +133,8 @@ impl fmt::Display for NodeVersion {
 pub struct NodeRoles(pub u32);
 
 impl NodeRoles {
+    pub const PEER: Self = Self(0x01);
+
     const NAMES: [(u32, &str); 5] = [
         (0x01, "Peer"),
         (0x02, "Api"),
@@ -140,6 +142,22 @@ impl NodeRoles {
         (0x40, "IPv4"),
         (0x80, "IPv6"),
     ];
+
+    /// `roles` のビットがすべて立っているか。
+    pub fn contains(self, roles: Self) -> bool {
+        self.0 & roles.0 == roles.0
+    }
+
+    /// catapult の設定ファイル（peers-p2p.json など）の書き方。`IPv4,Peer` のように `,` で区切る。
+    /// catapult は知らない名前があると読み込めないので、知らないビットは落とす。
+    pub fn to_config_value(self) -> String {
+        Self::NAMES
+            .iter()
+            .filter(|(bit, _)| self.0 & bit != 0)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 impl fmt::Display for NodeRoles {
@@ -425,6 +443,14 @@ mod tests {
     fn names_unknown_roles() {
         assert_eq!(NodeRoles(0).to_string(), "None");
         assert_eq!(NodeRoles(0x105).to_string(), "Peer|Voting|0x100");
+    }
+
+    #[test]
+    fn writes_roles_for_config_without_unknown_bits() {
+        assert_eq!(NodeRoles(0x43).to_config_value(), "Peer,Api,IPv4");
+        assert_eq!(NodeRoles(0x141).to_config_value(), "Peer,IPv4");
+        assert!(NodeRoles(0x41).contains(NodeRoles::PEER));
+        assert!(!NodeRoles(0x42).contains(NodeRoles::PEER));
     }
 
     #[test]

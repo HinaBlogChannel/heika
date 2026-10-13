@@ -1,4 +1,4 @@
-//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュ、TransactionsHash を確かめる。
+//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュ、TransactionsHash、VRF の証明を確かめる。
 //!
 //! 実際のチェーンが正なので、公式ベクターでは確かめられない署名とハッシュのつながりをここで見る。
 //! つなぐノードと名乗る証明書は、リポジトリに残さないように環境変数で渡す。
@@ -13,7 +13,7 @@
 //! HEIKA_TEST_NODE がなければ、何も確かめずに成功する（CI ではそうなる）。
 //! 同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::time::Duration;
@@ -24,7 +24,7 @@ use heika_cert::key;
 use heika_core::network::NetworkParameters;
 use heika_p2p::Node;
 use heika_tls::Identity;
-use heika_transaction::{Body, Transaction, TransactionsHashCalculation, scan};
+use heika_transaction::{Body, LinkAction, Transaction, TransactionsHashCalculation, scan};
 
 const MAINNET: NetworkParameters = NetworkParameters::MAINNET;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -71,12 +71,13 @@ fn connect() -> Option<Node> {
 
 #[test]
 #[ignore = "環境変数で指定したメインネットのノードにつなぐ"]
-fn mainnet_blocks_are_signed_chained_and_scannable() {
+fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
     let Some(mut node) = connect() else {
         return;
     };
     let mut types = BTreeMap::new();
     let mut aggregates = BTreeMap::new();
+    let mut proven = 0;
     for (name, start, count) in RANGES {
         let blocks = node
             .pull_blocks(start, count, 16 * 1024 * 1024)
@@ -98,6 +99,8 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
             blocks.extend(more.iter().map(|bytes| Block::from_bytes(bytes).unwrap()));
         }
 
+        // 範囲の中で見えた VRF の鍵のリンク。範囲の外で付け替えられているかもしれないので、範囲ごとに作り直す
+        let mut vrf_keys = HashMap::new();
         for (index, block) in blocks.iter().enumerate() {
             let height = start + index as u64;
             assert_eq!(block.height, height, "{name}");
@@ -114,12 +117,47 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
                 _ => BlockType::Normal,
             };
             assert_eq!(block.block_type, expected_type, "{name}: {height}");
+            // VRF の証明。Nemesis は署名者の鍵で generation hash seed を証明している。
+            // ほかは、ハーベストした人の VRF の鍵がこの範囲でリンクされていれば、1つ前の generation hash で確かめる
+            if height == 1 {
+                assert!(
+                    block
+                        .verify_generation_hash_proof(
+                            &block.signer_public_key,
+                            &MAINNET.generation_hash_seed.0
+                        )
+                        .is_some(),
+                    "{name}: Nemesis の VRF の証明"
+                );
+                proven += 1;
+            } else if index > 0
+                && let Some(vrf_public_key) = vrf_keys.get(&block.signer_public_key)
+            {
+                assert!(
+                    block
+                        .verify_generation_hash_proof(
+                            vrf_public_key,
+                            &blocks[index - 1].generation_hash().0
+                        )
+                        .is_some(),
+                    "{name}: 高さ {height} の VRF の証明"
+                );
+                proven += 1;
+            }
             // 中のトランザクションは、どれも知っている種類とバージョンで、中身まで読めるはず
             for transaction in block.transactions() {
                 for scanned in scan(transaction).unwrap_or_else(|error| {
                     panic!("{name}: 高さ {height} のトランザクション: {error}")
                 }) {
                     *types.entry(scanned.body.transaction_type()).or_insert(0) += 1;
+                    if let Body::VrfKeyLink(link) = &scanned.body {
+                        match link.link_action {
+                            LinkAction::Link => {
+                                vrf_keys.insert(scanned.signer_public_key, link.linked_public_key)
+                            }
+                            LinkAction::Unlink => vrf_keys.remove(&scanned.signer_public_key),
+                        };
+                    }
                 }
                 // 丸ごと読んでも同じバイト列に書き戻せて、署名と連署はチェーンが認めたとおり正しいはず。
                 // 古いアグリゲートの署名の範囲と、中のトランザクションのハッシュの決まりもここで確かめる
@@ -182,5 +220,7 @@ fn mainnet_blocks_are_signed_chained_and_scannable() {
         .map(|(version, count)| format!("{version}: {count}"))
         .collect();
     eprintln!("読んだアグリゲート: {}", aggregates.join(", "));
+    eprintln!("VRF の証明を確かめたブロック: {proven}");
+    assert!(proven > 1);
     assert!(types.len() > 1);
 }

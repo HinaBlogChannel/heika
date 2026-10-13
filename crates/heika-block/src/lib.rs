@@ -24,6 +24,8 @@ use heika_core::key::PublicKey;
 use heika_core::merkle;
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::signature::Signature;
+pub use heika_core::vrf::VrfProof;
+use heika_core::vrf::{self, GenerationHash};
 use heika_transaction::{DecodeError, Transaction};
 use sha3::{Digest, Sha3_256};
 
@@ -64,14 +66,6 @@ impl BlockType {
             Self::Nemesis | Self::Importance => IMPORTANCE_HEADER_SIZE,
         }
     }
-}
-
-/// ブロックを作る権利を示す VRF の証明。catapult の `crypto::VrfProof`。
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct VrfProof {
-    pub gamma: [u8; 32],
-    pub verification_hash: [u8; 16],
-    pub scalar: [u8; 32],
 }
 
 /// Nemesis と Importance のブロックのフッター。
@@ -200,6 +194,25 @@ impl Block {
                 .finalize()
                 .into(),
         )
+    }
+
+    /// VRF の証明の gamma から、このブロックの generation hash を求める。証明は確かめない。
+    pub fn generation_hash(&self) -> GenerationHash {
+        vrf::proof_hash(&self.generation_hash_proof.gamma).generation_hash()
+    }
+
+    /// VRF の証明を確かめて、通ればこのブロックの generation hash を返す。catapult の `CheckGenerationHash` の前半。
+    ///
+    /// `vrf_public_key` は、ハーベストしたアカウントのメインアカウントにリンクされている VRF の鍵。
+    /// `alpha` は1つ前のブロックの generation hash で、Nemesis のブロックなら generation hash seed、
+    /// 鍵は署名者の公開鍵になる。
+    pub fn verify_generation_hash_proof(
+        &self,
+        vrf_public_key: &PublicKey,
+        alpha: &[u8; 32],
+    ) -> Option<GenerationHash> {
+        vrf::verify(vrf_public_key, alpha, &self.generation_hash_proof)
+            .map(|hash| hash.generation_hash())
     }
 
     /// 中のトランザクションのバイト列。パディングは含まない。
@@ -431,6 +444,37 @@ mod tests {
             .cosign(&PrivateKey::from_bytes(&[8; 32]), seed)
             .unwrap();
         vec![single, aggregate]
+    }
+
+    #[test]
+    fn verifies_the_generation_hash_proof_with_the_vrf_key() {
+        let vrf_private_key = PrivateKey::from_bytes(&[9; 32]);
+        let vrf_public_key = PublicKey::from_private_key(&vrf_private_key);
+        let parent = [0x5A; 32];
+        let proof = vrf::prove(&vrf_private_key, &parent).unwrap();
+        let mut bytes = block(0x8143, &[], &private_key());
+        bytes[136..168].copy_from_slice(&proof.gamma);
+        bytes[168..184].copy_from_slice(&proof.verification_hash);
+        bytes[184..216].copy_from_slice(&proof.scalar);
+        let block = Block::from_bytes(&bytes).unwrap();
+        assert_eq!(block.generation_hash_proof, proof);
+        let expected = vrf::verify(&vrf_public_key, &parent, &proof)
+            .unwrap()
+            .generation_hash();
+        assert_eq!(block.generation_hash(), expected);
+        assert_eq!(
+            block.verify_generation_hash_proof(&vrf_public_key, &parent),
+            Some(expected)
+        );
+        // ブロックの署名者の鍵や、別の親では通らない
+        assert_eq!(
+            block.verify_generation_hash_proof(&block.signer_public_key, &parent),
+            None
+        );
+        assert_eq!(
+            block.verify_generation_hash_proof(&vrf_public_key, &[0xA5; 32]),
+            None
+        );
     }
 
     #[test]

@@ -11,15 +11,15 @@ use sha2::{Digest, Sha512};
 use zeroize::Zeroizing;
 
 /// 秘密鍵（RFC 8032 のシード）を SHA-512 で広げたもの。
-struct ExpandedKey {
+pub(crate) struct ExpandedKey {
     /// 前半をクランプしたスカラー
-    scalar: Zeroizing<Scalar>,
+    pub(crate) scalar: Zeroizing<Scalar>,
     /// 後半。nonce を作るのに使う
-    prefix: Zeroizing<[u8; 32]>,
+    pub(crate) prefix: Zeroizing<[u8; 32]>,
 }
 
 impl ExpandedKey {
-    fn new(seed: &[u8; 32]) -> Self {
+    pub(crate) fn new(seed: &[u8; 32]) -> Self {
         let hash = sha512([&seed[..]]);
         let mut lower = Zeroizing::new([0; 32]);
         let mut prefix = Zeroizing::new([0; 32]);
@@ -34,7 +34,7 @@ impl ExpandedKey {
         }
     }
 
-    fn public_key(&self) -> CompressedEdwardsY {
+    pub(crate) fn public_key(&self) -> CompressedEdwardsY {
         EdwardsPoint::mul_base(&self.scalar).compress()
     }
 }
@@ -100,7 +100,7 @@ fn challenge(encoded_r: &[u8; 32], public_key: &[u8; 32], message: &[&[u8]]) -> 
 /// y が正規形で、曲線上にあり、素数位数の部分群に入っている点だけを受け付ける。
 ///
 /// x が 0 なのに符号のビットが立っているものは、catapult も curve25519-dalek も受け付ける。
-fn decode(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
+pub(crate) fn decode(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
     if !is_canonical(bytes) {
         return None;
     }
@@ -110,11 +110,11 @@ fn decode(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
 }
 
 /// 符号のビットを除いた y が 2^255 - 19 より小さいか。catapult の `IsCanonicalKey`。
-fn is_canonical(bytes: &[u8; 32]) -> bool {
+pub(crate) fn is_canonical(bytes: &[u8; 32]) -> bool {
     bytes[0] < 0xED || bytes[1..31].iter().any(|&byte| byte != 0xFF) || bytes[31] & 0x7F != 0x7F
 }
 
-fn sha512<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Zeroizing<[u8; 64]> {
+pub(crate) fn sha512<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Zeroizing<[u8; 64]> {
     let mut hasher = Sha512::new();
     for part in parts {
         hasher.update(part);

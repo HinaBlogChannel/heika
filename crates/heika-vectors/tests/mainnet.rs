@@ -99,8 +99,9 @@ fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
             blocks.extend(more.iter().map(|bytes| Block::from_bytes(bytes).unwrap()));
         }
 
-        // 範囲の中で見えた VRF の鍵のリンク。範囲の外で付け替えられているかもしれないので、範囲ごとに作り直す
+        // 範囲の中で見えた VRF の鍵とリモートアカウントのリンク。範囲の外で付け替えられているかもしれないので、範囲ごとに作り直す
         let mut vrf_keys = HashMap::new();
+        let mut main_accounts = HashMap::new();
         for (index, block) in blocks.iter().enumerate() {
             let height = start + index as u64;
             assert_eq!(block.height, height, "{name}");
@@ -118,7 +119,8 @@ fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
             };
             assert_eq!(block.block_type, expected_type, "{name}: {height}");
             // VRF の証明。Nemesis は署名者の鍵で generation hash seed を証明している。
-            // ほかは、ハーベストした人の VRF の鍵がこの範囲でリンクされていれば、1つ前の generation hash で確かめる
+            // ほかは、ハーベストした人の VRF の鍵がこの範囲でリンクされていれば、1つ前の generation hash で確かめる。
+            // catapult と同じく、署名者がリモートアカウントなら、メインアカウントにリンクされた VRF の鍵を使う
             if height == 1 {
                 assert!(
                     block
@@ -131,7 +133,11 @@ fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
                 );
                 proven += 1;
             } else if index > 0
-                && let Some(vrf_public_key) = vrf_keys.get(&block.signer_public_key)
+                && let Some(vrf_public_key) = vrf_keys.get(
+                    main_accounts
+                        .get(&block.signer_public_key)
+                        .unwrap_or(&block.signer_public_key),
+                )
             {
                 assert!(
                     block
@@ -150,13 +156,25 @@ fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
                     panic!("{name}: 高さ {height} のトランザクション: {error}")
                 }) {
                     *types.entry(scanned.body.transaction_type()).or_insert(0) += 1;
-                    if let Body::VrfKeyLink(link) = &scanned.body {
-                        match link.link_action {
+                    match &scanned.body {
+                        Body::VrfKeyLink(link) => match link.link_action {
                             LinkAction::Link => {
-                                vrf_keys.insert(scanned.signer_public_key, link.linked_public_key)
+                                vrf_keys.insert(scanned.signer_public_key, link.linked_public_key);
                             }
-                            LinkAction::Unlink => vrf_keys.remove(&scanned.signer_public_key),
-                        };
+                            LinkAction::Unlink => {
+                                vrf_keys.remove(&scanned.signer_public_key);
+                            }
+                        },
+                        Body::AccountKeyLink(link) => match link.link_action {
+                            LinkAction::Link => {
+                                main_accounts
+                                    .insert(link.linked_public_key, scanned.signer_public_key);
+                            }
+                            LinkAction::Unlink => {
+                                main_accounts.remove(&link.linked_public_key);
+                            }
+                        },
+                        _ => {}
                     }
                 }
                 // 丸ごと読んでも同じバイト列に書き戻せて、署名と連署はチェーンが認めたとおり正しいはず。

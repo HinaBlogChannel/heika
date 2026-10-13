@@ -10,5 +10,6 @@ pub mod merkle;
 pub mod network;
 pub mod signature;
 pub mod voting;
+pub mod vrf;
 
 pub use hex::ParseHexError;

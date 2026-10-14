@@ -3,6 +3,7 @@
 //! - REST の JSON から組み直したバイト列が、バイナリと一致する
 //! - バイナリを heika の型にして書いた JSON が、REST の JSON と一致する
 //! - REST の値の確かめ（[`BlockInfo::verify`]、[`TransactionInfo::verify`] など）が通る
+//! - REST のステートメントを集めて求めた ReceiptsHash が、バイナリのブロックのヘッダーと一致する
 //!
 //! つなぐノード、名乗る証明書、REST のオリジンは、リポジトリに残さないように環境変数で渡す。
 //!
@@ -21,10 +22,19 @@ use std::fs;
 use std::time::Duration;
 
 use heika_block::Block;
+use heika_block::statement::{
+    AddressResolutionStatement, MosaicResolutionStatement, TransactionStatement,
+};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
+use heika_core::merkle::{self, MerklePathNode};
 use heika_p2p::Node;
 use heika_rest::block::{BlockHeader, BlockInfo};
+use heika_rest::merkle::MerkleProofInfo;
+use heika_rest::statement::{
+    ResolutionStatementInfo, ResolutionStatementJson, TransactionStatementInfo,
+    TransactionStatementJson, block_statement,
+};
 use heika_rest::transaction::{TransactionInfo, TransactionJson};
 use heika_tls::Identity;
 use heika_transaction::{Body, Transaction};
@@ -85,11 +95,17 @@ fn rest(origin: &str, path: &str) -> Value {
 
 /// 高さ `height` の承認済みのトランザクションを、ブロックの中の順にすべて取る。
 fn transactions(origin: &str, height: u64, embedded: bool) -> Vec<Value> {
+    pages(
+        origin,
+        &format!("/transactions/confirmed?height={height}&embedded={embedded}"),
+    )
+}
+
+/// 検索の `path`（問い合わせ付き）を、ページを進めながらすべて取る。
+fn pages(origin: &str, path: &str) -> Vec<Value> {
     let mut all = Vec::new();
     for page in 1.. {
-        let path = format!(
-            "/transactions/confirmed?height={height}&embedded={embedded}&pageSize={PAGE_SIZE}&pageNumber={page}"
-        );
+        let path = format!("{path}&pageSize={PAGE_SIZE}&pageNumber={page}");
         let data = rest(origin, &path)["data"].as_array().unwrap().clone();
         let last = data.len() < PAGE_SIZE;
         all.extend(data);
@@ -242,4 +258,102 @@ fn rest_json_round_trips_with_binary_blocks_and_transactions() {
         checked.0, checked.1, checked.2
     );
     assert!(checked.1 > 0 && checked.2 > 0);
+}
+
+#[test]
+#[ignore = "環境変数で指定した REST とメインネットのノードにつなぐ"]
+fn rest_statements_match_the_receipts_hash_of_binary_blocks() {
+    let Some((mut node, origin)) = connect() else {
+        return;
+    };
+    let mut checked = (0, 0);
+    for (name, start, count) in RANGES {
+        for (index, (_, block)) in pull(&mut node, name, start, count).iter().enumerate() {
+            let height = start + index as u64;
+            let context = format!("{name}: 高さ {height}");
+            let transactions = pages(&origin, &format!("/statements/transaction?height={height}"));
+            let addresses = pages(
+                &origin,
+                &format!("/statements/resolutions/address?height={height}"),
+            );
+            let mosaics = pages(
+                &origin,
+                &format!("/statements/resolutions/mosaic?height={height}"),
+            );
+            let transaction_infos: Vec<TransactionStatementInfo> = read_all(&transactions);
+            let address_infos: Vec<ResolutionStatementInfo> = read_all(&addresses);
+            let mosaic_infos: Vec<ResolutionStatementInfo> = read_all(&mosaics);
+
+            // 3種類を catapult の並びにまとめると、バイナリのブロックの ReceiptsHash になる
+            let statement = block_statement(&transaction_infos, &address_infos, &mosaic_infos)
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            assert!(
+                block.verify_receipts_hash(&statement),
+                "{context}: ReceiptsHash"
+            );
+            checked.0 += 1;
+
+            // 組み直したステートメントから書いた JSON が、REST の JSON と同じになる
+            for entry in &transactions {
+                let json: TransactionStatementJson =
+                    serde_json::from_value(entry["statement"].clone()).unwrap();
+                let rebuilt = TransactionStatement::try_from(&json).unwrap();
+                assert_eq!(
+                    serde_json::to_value(TransactionStatementJson::new(height, &rebuilt)).unwrap(),
+                    entry["statement"],
+                    "{context}: トランザクションのステートメントの JSON"
+                );
+            }
+            for (entries, address) in [(&addresses, true), (&mosaics, false)] {
+                for entry in entries {
+                    let json: ResolutionStatementJson =
+                        serde_json::from_value(entry["statement"].clone()).unwrap();
+                    let written = if address {
+                        ResolutionStatementJson::from_address(
+                            height,
+                            &AddressResolutionStatement::try_from(&json).unwrap(),
+                        )
+                    } else {
+                        ResolutionStatementJson::from_mosaic(
+                            height,
+                            &MosaicResolutionStatement::try_from(&json).unwrap(),
+                        )
+                    };
+                    assert_eq!(
+                        serde_json::to_value(written).unwrap(),
+                        entry["statement"],
+                        "{context}: 解決のステートメントの JSON"
+                    );
+                }
+            }
+
+            // 最初のステートメントは、REST が返す Merkle の経路で ReceiptsHash に含まれることを示せる
+            if let Some(first) = statement.transaction_statements.first() {
+                let hash = first.hash();
+                let proof: MerkleProofInfo = serde_json::from_value(rest(
+                    &origin,
+                    &format!("/blocks/{height}/statements/{hash}/merkle"),
+                ))
+                .unwrap();
+                let path = Vec::<MerklePathNode>::try_from(&proof).unwrap();
+                assert!(
+                    merkle::verify_path(&hash, &path, &block.receipts_hash),
+                    "{context}: ステートメントの Merkle の経路"
+                );
+                checked.1 += 1;
+            }
+        }
+    }
+    eprintln!(
+        "ReceiptsHash を突き合わせたブロック: {}、Merkle の経路を確かめたステートメント: {}",
+        checked.0, checked.1
+    );
+    assert!(checked.0 > 0 && checked.1 > 0);
+}
+
+fn read_all<T: serde::de::DeserializeOwned>(entries: &[Value]) -> Vec<T> {
+    entries
+        .iter()
+        .map(|entry| serde_json::from_value(entry.clone()).unwrap())
+        .collect()
 }

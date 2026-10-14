@@ -290,3 +290,14 @@ fn collects_flattened_embedded_transactions_by_their_parent() {
         })
     );
 }
+
+#[test]
+fn writes_the_rest_json_of_a_transaction() {
+    let transaction = aggregate();
+    let written =
+        serde_json::to_value(heika_rest::transaction::TransactionJson::from(&transaction)).unwrap();
+    let mut expected = json(&transaction)["transaction"].clone();
+    // 中のトランザクションの meta には、何番目かだけを書く
+    expected["transactions"][0]["meta"] = json!({ "index": 0 });
+    assert_eq!(written, expected);
+}

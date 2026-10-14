@@ -238,19 +238,41 @@ impl Block {
         &self,
         generation_hash_seed: &GenerationHashSeed,
     ) -> Result<Hash256, DecodeError> {
-        let leaves = if self.block_type == BlockType::Nemesis {
-            self.transactions()
+        Ok(merkle::root(&self.merkle_leaves(generation_hash_seed)?))
+    }
+
+    /// `index` 番目（0から）のトランザクションの葉から、TransactionsHash までの Merkle の経路。
+    /// 経路と葉（[`Transaction::merkle_component_hash`]）があれば、ブロック全体がなくても、
+    /// そのトランザクションがこのブロックに入っていることを [`merkle::verify_path`] で確かめられる。
+    /// `index` がトランザクションの数を超えていれば `None`。
+    pub fn transaction_merkle_path(
+        &self,
+        generation_hash_seed: &GenerationHashSeed,
+        index: usize,
+    ) -> Result<Option<Vec<merkle::MerklePathNode>>, DecodeError> {
+        Ok(merkle::path(
+            &self.merkle_leaves(generation_hash_seed)?,
+            index,
+        ))
+    }
+
+    /// TransactionsHash の葉。Nemesis だけは求め方が違う（[`Block::calculate_transactions_hash`]）。
+    fn merkle_leaves(
+        &self,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<Vec<Hash256>, DecodeError> {
+        if self.block_type == BlockType::Nemesis {
+            return Ok(self
+                .transactions()
                 .map(|bytes| whole_transaction_hash(bytes, generation_hash_seed))
-                .collect()
-        } else {
-            self.transactions()
-                .map(|bytes| {
-                    Transaction::from_bytes(bytes)
-                        .map(|transaction| transaction.merkle_component_hash(generation_hash_seed))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(merkle::root(&leaves))
+                .collect());
+        }
+        self.transactions()
+            .map(|bytes| {
+                Transaction::from_bytes(bytes)
+                    .map(|transaction| transaction.merkle_component_hash(generation_hash_seed))
+            })
+            .collect()
     }
 
     /// ヘッダーの TransactionsHash が、中のトランザクションと合うか。
@@ -513,6 +535,28 @@ mod tests {
             block.verify_generation_hash_proof(&vrf_public_key, &[0xA5; 32]),
             None
         );
+    }
+
+    #[test]
+    fn proves_that_each_transaction_is_in_the_block() {
+        let seed = GenerationHashSeed::MAINNET;
+        let transactions = signed_transactions(&seed);
+        let bytes: Vec<_> = transactions.iter().map(Transaction::to_bytes).collect();
+        let mut block_bytes = block(0x8143, &bytes, &private_key());
+        let leaves: Vec<_> = transactions
+            .iter()
+            .map(|transaction| transaction.merkle_component_hash(&seed))
+            .collect();
+        block_bytes[248..280].copy_from_slice(&merkle::root(&leaves).0);
+        let block = Block::from_bytes(&block_bytes).unwrap();
+        for (index, leaf) in leaves.iter().enumerate() {
+            let path = block
+                .transaction_merkle_path(&seed, index)
+                .unwrap()
+                .unwrap();
+            assert!(merkle::verify_path(leaf, &path, &block.transactions_hash));
+        }
+        assert_eq!(block.transaction_merkle_path(&seed, leaves.len()), Ok(None));
     }
 
     #[test]

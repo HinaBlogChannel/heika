@@ -9,6 +9,7 @@
 use std::fmt;
 
 pub mod block;
+pub mod merkle;
 
 /// REST の JSON を heika の型にできなかった。
 #[derive(Debug, Clone, PartialEq, Eq)]

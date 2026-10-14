@@ -420,10 +420,11 @@ fn show_missing_cosigners(transaction: &Transaction) -> Result<(), Failure> {
 
 /// ネットワークのエポックからのミリ秒。
 fn network_milliseconds(network: Network, time: SystemTime) -> Result<u64, String> {
-    let elapsed = time
-        .duration_since(network.parameters().epoch())
-        .map_err(|_| "時計がネットワークのエポックより前になっています".to_owned())?;
-    u64::try_from(elapsed.as_millis()).map_err(|_| "時刻が大きすぎます".to_owned())
+    network
+        .parameters()
+        .timestamp_at(time)
+        .map(|timestamp| timestamp.0)
+        .ok_or_else(|| "時計がネットワークのエポックより前になっています".to_owned())
 }
 
 /// バイト列をそのまま書く。すでにあるファイルは上書きしない。

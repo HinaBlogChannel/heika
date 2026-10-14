@@ -8,6 +8,7 @@ mod hex;
 pub mod key;
 pub mod merkle;
 pub mod network;
+pub mod patricia;
 pub mod signature;
 pub mod voting;
 pub mod vrf;

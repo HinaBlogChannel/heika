@@ -20,3 +20,13 @@ pub fn fetch<T: DeserializeOwned>(path: &str) -> T {
         .unwrap_or_else(|error| panic!("{url}: {error}"));
     serde_json::from_str(&body).unwrap_or_else(|error| panic!("{url}: {error}"))
 }
+
+/// リポジトリの根からの相対パスで指定したファイルを、同じコミットから文字列で取ってくる。
+/// ベクターのファイルになっていない、公式の SDK のテストの中の値を使うときに使う。
+pub fn fetch_text(path: &str) -> String {
+    let url = format!("https://raw.githubusercontent.com/symbol/symbol/{COMMIT}/{path}");
+    ureq::get(&url)
+        .call()
+        .and_then(|mut response| response.body_mut().read_to_string())
+        .unwrap_or_else(|error| panic!("{url}: {error}"))
+}

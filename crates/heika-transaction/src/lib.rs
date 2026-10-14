@@ -327,6 +327,9 @@ impl Transaction {
     /// ふつうはハッシュそのもの。アグリゲートは、ハッシュに連署者の公開鍵を並んだ順に続けた SHA3-256
     /// （aggregate プラグインの `merkleSupplementaryBuffers`）。連署はハッシュに入らないので、
     /// ブロックはこちらで連署の取り違えを防ぐ。
+    ///
+    /// Nemesis のブロックだけは、ヘッダーの TransactionsHash をこの値ではなく、トランザクションを丸ごとハッシュした葉で作っている。
+    /// Nemesis では heika-block の `Block::merkle_leaves` を使う。
     pub fn merkle_component_hash(&self, generation_hash_seed: &GenerationHashSeed) -> Hash256 {
         let hash = self.hash(generation_hash_seed);
         let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) = &self.body

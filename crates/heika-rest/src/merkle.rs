@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::{RestError, hex_array, hex_vec};
 
 /// `MerkleProofInfoDTO`。
+///
+/// トランザクションの経路の葉は、REST の `meta.merkleComponentHash`（[`heika_transaction::Transaction::merkle_component_hash`]）。
+/// ただし Nemesis のブロック（高さ 1）の経路は、ヘッダーの TransactionsHash にはつながらない。
+/// ヘッダーは nemgen がトランザクションを丸ごとハッシュした葉で作っているのに、ノードが保存して REST が経路を作る木は、
+/// ふつうの求め方の葉で作っているので、アグリゲートが入っていると2つの根が食い違う。
+/// Nemesis のトランザクションを確かめるには、ブロックを丸ごと手に入れて、[`heika_block::Block::merkle_leaves`] から求める。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MerkleProofInfo {

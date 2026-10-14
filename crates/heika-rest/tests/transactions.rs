@@ -216,3 +216,77 @@ fn needs_the_embedded_transactions_and_matching_value_types() {
         })
     );
 }
+
+/// 検索で返る形。中のトランザクションは入っていない
+fn without_embedded(json: &Value) -> Value {
+    let mut json = json.clone();
+    json["transaction"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transactions");
+    json
+}
+
+/// `embedded=true` の検索で、平たく並んで返る中のトランザクション
+fn flattened(json: &Value, aggregate_hash: &str) -> Value {
+    let mut entry = json["transaction"]["transactions"][0].clone();
+    entry["meta"]["aggregateHash"] = json!(aggregate_hash);
+    entry
+}
+
+#[test]
+fn verifies_an_aggregate_without_its_embedded_transactions() {
+    let transaction = aggregate();
+    let json = json(&transaction);
+    let header = read(&without_embedded(&json))
+        .verify_aggregate_header()
+        .unwrap();
+    let Body::AggregateComplete(aggregate) = &transaction.body else {
+        unreachable!()
+    };
+    assert_eq!(header.hash, transaction.hash(&SEED));
+    assert_eq!(
+        header.merkle_component_hash,
+        transaction.merkle_component_hash(&SEED)
+    );
+    assert_eq!(header.transactions_hash, aggregate.transactions_hash());
+    assert_eq!(header.version, 3);
+
+    // 中のトランザクションの長さは署名に掛かるので、size を変えると署名が合わない
+    let mut resized = without_embedded(&json);
+    resized["transaction"]["size"] = json!(transaction.size() + 8);
+    assert_eq!(
+        read(&resized).verify_aggregate_header(),
+        Err(RestError::Mismatch { field: "signature" })
+    );
+}
+
+#[test]
+fn collects_flattened_embedded_transactions_by_their_parent() {
+    let transaction = aggregate();
+    let json = json(&transaction);
+    let hash = transaction.hash(&SEED).to_string();
+    let header = read(&without_embedded(&json));
+    let entries: Vec<TransactionInfo> = [
+        flattened(&json, &hash),
+        // 別のアグリゲートのものは集めない
+        flattened(&json, &hex(&[0; 32])),
+        // 外側のトランザクションも混ざって返る
+        without_embedded(&json),
+    ]
+    .iter()
+    .map(read)
+    .collect();
+    let collected = header.with_embedded(&entries).unwrap();
+    assert_eq!(collected.verify(), Ok(transaction));
+
+    // 抜けがあれば集めない
+    let mut skipped = flattened(&json, &hash);
+    skipped["meta"]["index"] = json!(1);
+    assert_eq!(
+        header.with_embedded(&[read(&skipped)]),
+        Err(RestError::InvalidValue {
+            field: "meta.index"
+        })
+    );
+}

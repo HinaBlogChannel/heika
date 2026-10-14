@@ -1,0 +1,23 @@
+[package]
+name = "web-vanitygen"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# heika のワークスペースには入れず、依存と Cargo.lock と最適化の設定を分ける
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+heika-core = { path = "../../crates/heika-core", default-features = false, features = ["wasm_js"] }
+wasm-bindgen = "0.2.129"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+# z や s にしても wasm-opt のあとで1割ほどしか小さくならないので、鍵を作る速さを優先する
+opt-level = 3

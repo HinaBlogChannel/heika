@@ -8,6 +8,8 @@
 
 use std::fmt;
 
+pub mod block;
+
 /// REST の JSON を heika の型にできなかった。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestError {

@@ -9,6 +9,7 @@ description = "Symbol の REST が返す JSON を読み、heika の型に変え�
 [dependencies]
 heika-block = { path = "../heika-block" }
 heika-core = { path = "../heika-core", default-features = false }
+heika-transaction = { path = "../heika-transaction" }
 serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]

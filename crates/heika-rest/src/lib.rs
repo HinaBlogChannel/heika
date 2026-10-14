@@ -10,6 +10,7 @@ use std::fmt;
 
 pub mod block;
 pub mod merkle;
+pub mod transaction;
 
 /// REST の JSON を heika の型にできなかった。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,8 +21,12 @@ pub enum RestError {
     InvalidNumber { field: &'static str },
     /// 決まった値のどれでもない
     InvalidValue { field: &'static str },
+    /// 要る項目がない
+    Missing { field: &'static str },
     /// 組み直したバイト列を、ブロックとして読めない
     InvalidBlock(heika_block::BlockDecodeError),
+    /// 組み直したバイト列を、トランザクションとして読めない
+    InvalidTransaction(heika_transaction::DecodeError),
     /// 状態の木のノードを読めない
     InvalidTreeNodes(heika_core::patricia::TreeNodeDecodeError),
     /// 組み直したものから求めた値が、REST が一緒に返した値と合わない
@@ -34,7 +39,11 @@ impl fmt::Display for RestError {
             Self::InvalidHex { field } => write!(f, "{field} を16進として読めません"),
             Self::InvalidNumber { field } => write!(f, "{field} を数として読めません"),
             Self::InvalidValue { field } => write!(f, "{field} の値を知りません"),
+            Self::Missing { field } => write!(f, "{field} がありません"),
             Self::InvalidBlock(error) => write!(f, "ブロックとして読めません: {error}"),
+            Self::InvalidTransaction(error) => {
+                write!(f, "トランザクションとして読めません: {error}")
+            }
             Self::InvalidTreeNodes(error) => write!(f, "状態の木のノードを読めません: {error}"),
             Self::Mismatch { field } => write!(
                 f,

@@ -482,6 +482,7 @@ version = "0.5.0"
 dependencies = [
  "heika-block",
  "heika-core",
+ "heika-transaction",
  "serde",
  "serde_json",
 ]
@@ -511,6 +512,7 @@ dependencies = [
  "heika-cert",
  "heika-core",
  "heika-p2p",
+ "heika-rest",
  "heika-tls",
  "heika-transaction",
  "heika-wallet",

@@ -32,7 +32,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）のノード運営の�
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-tls`: catapult と同じ設定（TLS 1.3、X25519）での TLS の接続と、相手の証明書の確認
 - `heika-p2p`: ノードへの問い合わせ。ノードの情報、高さ、ほかのノードの一覧、ブロック
-- `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。catbuffer にある25種類すべて。手数料、メタデータの値の差分、メタデータと制限のキー、状態の中の1件を指すハッシュ
+- `heika-transaction`: トランザクションの読み書き、署名、ハッシュ。catbuffer にある25種類すべて。ネームスペースのフルネームからの ID、アドレスとモザイクの別名、手数料、メタデータの値の差分、メタデータと制限のキー、状態の中の1件を指すハッシュ
 - `heika-block`: ブロックの読み込み、署名の確認、ハッシュ。中のトランザクションの切り分けと、TransactionsHash と VRF の証明の確認
 - `heika-wallet`: ウォレットのための計算。BIP 39、SLIP-10、キーストア、暗号化したメッセージと委任ハーベストの要求の読み書きと、それに使う公開鍵あての暗号化
 - `heika-harvesting`: ノードへの委任ハーベスト。ブロックから委任の要求を拾い、メインアカウントのリンクと比べて今も有効かを確かめる

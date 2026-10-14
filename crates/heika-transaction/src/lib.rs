@@ -36,8 +36,8 @@ pub use mosaic::{
 };
 pub use multisig::MultisigAccountModification;
 pub use namespace::{
-    AddressAlias, AliasAction, MosaicAlias, NamespaceId, NamespaceRegistration,
-    NamespaceRegistrationType,
+    AddressAlias, AliasAction, InvalidNamespaceName, MosaicAlias, NamespaceId,
+    NamespaceRegistration, NamespaceRegistrationType, is_valid_namespace_name,
 };
 pub use restriction::{
     AccountRestriction, AccountRestrictionFlags, MosaicAddressRestriction, MosaicGlobalRestriction,

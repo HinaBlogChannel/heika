@@ -243,7 +243,7 @@ impl Block {
     }
 
     /// `index` 番目（0から）のトランザクションの葉から、TransactionsHash までの Merkle の経路。
-    /// 経路と葉（[`Transaction::merkle_component_hash`]）があれば、ブロック全体がなくても、
+    /// 経路と葉（[`Block::merkle_leaves`]。Nemesis 以外は [`Transaction::merkle_component_hash`]）があれば、ブロック全体がなくても、
     /// そのトランザクションがこのブロックに入っていることを [`merkle::verify_path`] で確かめられる。
     /// `index` がトランザクションの数を超えていれば `None`。
     pub fn transaction_merkle_path(
@@ -257,8 +257,11 @@ impl Block {
         ))
     }
 
-    /// TransactionsHash の葉。Nemesis だけは求め方が違う（[`Block::calculate_transactions_hash`]）。
-    fn merkle_leaves(
+    /// TransactionsHash の葉を、ブロックの中の順に並べたもの。
+    ///
+    /// ふつうは [`Transaction::merkle_component_hash`] で、REST の `meta.merkleComponentHash` と同じ。
+    /// Nemesis だけは求め方が違い（[`Block::calculate_transactions_hash`]）、アグリゲートの葉が REST の値と合わない。
+    pub fn merkle_leaves(
         &self,
         generation_hash_seed: &GenerationHashSeed,
     ) -> Result<Vec<Hash256>, DecodeError> {
@@ -611,6 +614,14 @@ mod tests {
         block_bytes[248..280].copy_from_slice(&merkle::root(&leaves).0);
         let nemesis = Block::from_bytes(&block_bytes).unwrap();
         assert_eq!(nemesis.verify_transactions_hash(&seed), Ok(true));
+        // 経路も、丸ごとハッシュした葉からつながる
+        assert_eq!(nemesis.merkle_leaves(&seed), Ok(leaves.clone()));
+        let path = nemesis.transaction_merkle_path(&seed, 1).unwrap().unwrap();
+        assert!(merkle::verify_path(
+            &leaves[1],
+            &path,
+            &nemesis.transactions_hash
+        ));
     }
 
     #[test]

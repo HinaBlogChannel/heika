@@ -4,6 +4,8 @@
 //! - バイナリを heika の型にして書いた JSON が、REST の JSON と一致する
 //! - REST の値の確かめ（[`BlockInfo::verify`]、[`TransactionInfo::verify`] など）が通る
 //! - REST のステートメントを集めて求めた ReceiptsHash が、バイナリのブロックのヘッダーと一致する
+//! - REST の状態（アカウント、モザイク、ネームスペース、メタデータ）から組み直した状態のハッシュが、
+//!   REST の状態の経路で、最新のブロックの9本の根につながる（これは REST だけで動き、HEIKA_TEST_REST だけでよい）
 //!
 //! つなぐノード、名乗る証明書、REST のオリジンは、リポジトリに残さないように環境変数で渡す。
 //!
@@ -27,17 +29,22 @@ use heika_block::statement::{
 };
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
+use heika_core::address::Address;
+use heika_core::hash::Hash256;
 use heika_core::merkle::{self, MerklePathNode};
+use heika_core::network::{NetworkIdentifier, NetworkParameters};
+use heika_core::patricia::SubCache;
 use heika_p2p::Node;
 use heika_rest::block::{BlockHeader, BlockInfo};
-use heika_rest::merkle::MerkleProofInfo;
+use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
+use heika_rest::state::{AccountInfo, MetadataInfo, MosaicInfo, NamespaceInfo, RootNamespaceState};
 use heika_rest::statement::{
     ResolutionStatementInfo, ResolutionStatementJson, TransactionStatementInfo,
     TransactionStatementJson, block_statement,
 };
 use heika_rest::transaction::{TransactionInfo, TransactionJson};
 use heika_tls::Identity;
-use heika_transaction::{Body, Transaction};
+use heika_transaction::{Body, NamespaceId, Transaction};
 use serde_json::Value;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,11 +92,23 @@ fn connect() -> Option<(Node, String)> {
 }
 
 /// REST の `path` を取る。失敗したときは、オリジンを出さずに `path` だけを出す。
+///
+/// 公開されている REST は問い合わせの数を絞っていて、多すぎると 429 を返すので、そのときは待つ時間を延ばしながら取り直す。
 fn rest(origin: &str, path: &str) -> Value {
-    let body = ureq::get(&format!("{origin}{path}"))
-        .call()
-        .and_then(|mut response| response.body_mut().read_to_string())
-        .unwrap_or_else(|error| panic!("REST の {path}: {error}"));
+    let url = format!("{origin}{path}");
+    let mut wait = Duration::from_secs(1);
+    let body = loop {
+        match ureq::get(&url)
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_string())
+        {
+            Err(ureq::Error::StatusCode(429)) if wait <= Duration::from_secs(16) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            result => break result.unwrap_or_else(|error| panic!("REST の {path}: {error}")),
+        }
+    };
     serde_json::from_str(&body).unwrap_or_else(|error| panic!("REST の {path}: {error}"))
 }
 
@@ -356,4 +375,185 @@ fn read_all<T: serde::de::DeserializeOwned>(entries: &[Value]) -> Vec<T> {
         .iter()
         .map(|entry| serde_json::from_value(entry.clone()).unwrap())
         .collect()
+}
+
+/// 状態の確かめに使う、REST のオリジンだけ。ノードにはつながない
+fn rest_origin() -> Option<String> {
+    let Ok(rest) = env::var("HEIKA_TEST_REST") else {
+        eprintln!("HEIKA_TEST_REST がないので、状態の確かめはしません");
+        return None;
+    };
+    Some(rest.trim_end_matches('/').to_owned())
+}
+
+/// 最新のブロックの9本の根と、状態のハッシュ、木のキー、状態の経路を取り、経路が根から状態のハッシュまでつながることを確かめる。
+/// 状態は最新のものしか取れず、取るあいだにブロックが進むと根が変わるので、何度か取り直す。
+fn assert_in_state_tree(
+    origin: &str,
+    context: &str,
+    sub_cache: SubCache,
+    fetch: impl Fn() -> (Hash256, Hash256, MerkleStateInfo),
+) {
+    let mut last = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        let height = rest(origin, "/chain/info")["height"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let info: BlockInfo =
+            serde_json::from_value(rest(origin, &format!("/blocks/{height}"))).unwrap();
+        // 9本の根から求めた StateHash が、署名されたヘッダーの値と合う
+        info.verify()
+            .unwrap_or_else(|error| panic!("{context}: 高さ {height} のブロック: {error}"));
+        let roots = info.sub_cache_merkle_roots().unwrap();
+        let (state_hash, key, proof) = fetch();
+        let result = proof.prove(&key, &roots[sub_cache.index()]);
+        if result == Ok(Some(state_hash)) {
+            return;
+        }
+        last = Some(result);
+    }
+    panic!("{context}: 状態の経路が、状態のハッシュまでつながりません: {last:?}");
+}
+
+#[test]
+#[ignore = "環境変数で指定した REST につなぐ"]
+fn rest_states_are_in_the_state_tree() {
+    let Some(origin) = rest_origin() else {
+        return;
+    };
+    let origin = origin.as_str();
+    let merkle =
+        |path: String| -> MerkleStateInfo { serde_json::from_value(rest(origin, &path)).unwrap() };
+    let mut checked = [0; 4];
+
+    // アカウント：Nemesis の署名者と、検索の最初のページ
+    let nemesis = rest(origin, "/blocks/1");
+    let network = NetworkParameters::from_identifier(NetworkIdentifier(
+        nemesis["block"]["network"].as_u64().unwrap() as u8,
+    ))
+    .unwrap();
+    let mut accounts = vec![
+        nemesis["block"]["signerPublicKey"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ];
+    for entry in rest(origin, "/accounts?pageSize=10")["data"]
+        .as_array()
+        .unwrap()
+    {
+        let address = Address::from_hex(entry["account"]["address"].as_str().unwrap()).unwrap();
+        accounts.push(address.to_string());
+    }
+    for (index, account) in accounts.iter().enumerate() {
+        assert_in_state_tree(
+            origin,
+            &format!("アカウント {index}"),
+            SubCache::AccountState,
+            || {
+                let info: AccountInfo =
+                    serde_json::from_value(rest(origin, &format!("/accounts/{account}"))).unwrap();
+                let address = Address::from_hex(&info.account.address).unwrap();
+                (
+                    info.account.state_hash().unwrap(),
+                    info.account.tree_key().unwrap(),
+                    merkle(format!("/accounts/{address}/merkle")),
+                )
+            },
+        );
+        checked[0] += 1;
+    }
+
+    // モザイク：通貨と、検索の最初のページ
+    let mut mosaics = vec![format!("{:016X}", network.currency_mosaic_id)];
+    for entry in rest(origin, "/mosaics?pageSize=10")["data"]
+        .as_array()
+        .unwrap()
+    {
+        mosaics.push(entry["mosaic"]["id"].as_str().unwrap().to_owned());
+    }
+    for (index, id) in mosaics.iter().enumerate() {
+        assert_in_state_tree(
+            origin,
+            &format!("モザイク {index}"),
+            SubCache::Mosaic,
+            || {
+                let info: MosaicInfo =
+                    serde_json::from_value(rest(origin, &format!("/mosaics/{id}"))).unwrap();
+                (
+                    info.mosaic.state_hash().unwrap(),
+                    info.mosaic.tree_key().unwrap(),
+                    merkle(format!("/mosaics/{id}/merkle")),
+                )
+            },
+        );
+        checked[1] += 1;
+    }
+
+    // ネームスペース：symbol と、ルートの検索の最初のページ
+    let mut roots = vec![NamespaceId::from_full_name("symbol").unwrap().0];
+    for entry in rest(origin, "/namespaces?registrationType=0&pageSize=10")["data"]
+        .as_array()
+        .unwrap()
+    {
+        if entry["meta"]["active"].as_bool().unwrap() {
+            let level0 = entry["namespace"]["level0"].as_str().unwrap();
+            roots.push(u64::from_str_radix(level0, 16).unwrap());
+        }
+    }
+    roots.dedup();
+    for (index, root) in roots.iter().enumerate() {
+        assert_in_state_tree(
+            origin,
+            &format!("ネームスペース {index}"),
+            SubCache::Namespace,
+            || {
+                let entries: Vec<NamespaceInfo> =
+                    read_all(&pages(origin, &format!("/namespaces?level0={root:016X}")));
+                let state = RootNamespaceState::collect(*root, &entries).unwrap();
+                (
+                    state.state_hash().unwrap(),
+                    state.tree_key(),
+                    merkle(format!("/namespaces/{root:016X}/merkle")),
+                )
+            },
+        );
+        checked[2] += 1;
+    }
+
+    // メタデータ：検索の最初のページ
+    let metadata = rest(origin, "/metadata?pageSize=10")["data"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for (index, entry) in metadata.iter().enumerate() {
+        let hash = entry["metadataEntry"]["compositeHash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_in_state_tree(
+            origin,
+            &format!("メタデータ {index}"),
+            SubCache::Metadata,
+            || {
+                let info: MetadataInfo =
+                    serde_json::from_value(rest(origin, &format!("/metadata/{hash}"))).unwrap();
+                (
+                    info.metadata_entry.state_hash().unwrap(),
+                    info.metadata_entry.tree_key().unwrap(),
+                    merkle(format!("/metadata/{hash}/merkle")),
+                )
+            },
+        );
+        checked[3] += 1;
+    }
+    eprintln!(
+        "状態の木で確かめたもの：アカウント {}、モザイク {}、ネームスペース {}、メタデータ {}",
+        checked[0], checked[1], checked[2], checked[3]
+    );
+    assert!(checked.iter().all(|&count| count > 0));
 }

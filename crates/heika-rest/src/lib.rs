@@ -10,6 +10,7 @@ use std::fmt;
 
 pub mod block;
 pub mod merkle;
+pub mod state;
 pub mod statement;
 pub mod transaction;
 
@@ -28,6 +29,8 @@ pub enum RestError {
     InvalidBlock(heika_block::BlockDecodeError),
     /// 組み直したバイト列を、トランザクションとして読めない
     InvalidTransaction(heika_transaction::DecodeError),
+    /// 状態の経路が根からつながらない
+    InvalidProof(heika_core::patricia::PatriciaProofError),
     /// 状態の木のノードを読めない
     InvalidTreeNodes(heika_core::patricia::TreeNodeDecodeError),
     /// 組み直したものから求めた値が、REST が一緒に返した値と合わない
@@ -45,6 +48,7 @@ impl fmt::Display for RestError {
             Self::InvalidTransaction(error) => {
                 write!(f, "トランザクションとして読めません: {error}")
             }
+            Self::InvalidProof(error) => write!(f, "状態の経路を確かめられません: {error}"),
             Self::InvalidTreeNodes(error) => write!(f, "状態の木のノードを読めません: {error}"),
             Self::Mismatch { field } => write!(
                 f,

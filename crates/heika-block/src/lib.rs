@@ -15,6 +15,8 @@
 //!
 //! ブロックは作らずに読むだけなので、catapult が確かめない予約の部分は確かめない。
 
+pub mod statement;
+
 use std::fmt;
 use std::ops::Range;
 
@@ -260,6 +262,12 @@ impl Block {
         Ok(self.calculate_transactions_hash(generation_hash_seed)? == self.transactions_hash)
     }
 
+    /// ヘッダーの ReceiptsHash が、ステートメントから求めた Merkle の根と合うか。
+    /// ステートメントはブロックに入っていないので、ノードから別に取ってきたものを渡す。
+    pub fn verify_receipts_hash(&self, statement: &statement::BlockStatement) -> bool {
+        statement.merkle_hash() == self.receipts_hash
+    }
+
     /// ブロック全体のバイト列。
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -444,6 +452,35 @@ mod tests {
             .cosign(&PrivateKey::from_bytes(&[8; 32]), seed)
             .unwrap();
         vec![single, aggregate]
+    }
+
+    #[test]
+    fn compares_the_receipts_hash_with_the_statement() {
+        use statement::{
+            BlockStatement, Mosaic, Receipt, ReceiptBody, ReceiptSource, TransactionStatement,
+        };
+
+        let statement = BlockStatement {
+            transaction_statements: vec![TransactionStatement {
+                source: ReceiptSource {
+                    primary_id: 0,
+                    secondary_id: 0,
+                },
+                receipts: vec![Receipt {
+                    version: 1,
+                    body: ReceiptBody::Inflation(Mosaic {
+                        mosaic_id: heika_transaction::MosaicId(1),
+                        amount: 2,
+                    }),
+                }],
+            }],
+            ..BlockStatement::default()
+        };
+        let mut bytes = block(0x8143, &[], &private_key());
+        bytes[280..312].copy_from_slice(&statement.merkle_hash().0);
+        let block = Block::from_bytes(&bytes).unwrap();
+        assert!(block.verify_receipts_hash(&statement));
+        assert!(!block.verify_receipts_hash(&BlockStatement::default()));
     }
 
     #[test]

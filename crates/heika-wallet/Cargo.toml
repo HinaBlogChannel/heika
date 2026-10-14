@@ -29,3 +29,5 @@ hkdf = "0.13.0"
 default = ["getrandom"]
 # OS の乱数でニーモニックを作る Mnemonic::generate。乱数を自分で渡すなら要らない
 getrandom = ["dep:getrandom"]
+# ブラウザ（wasm32-unknown-unknown）で getrandom を使うときに、Web Crypto の乱数を使う。getrandom の版を合わせなくて済むように出しておく
+wasm_js = ["getrandom", "getrandom/wasm_js", "heika-core/wasm_js"]

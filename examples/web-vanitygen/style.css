@@ -1,0 +1,144 @@
+/* 激薄みずいろと薄みずいろの、細い縦じま。ダークモードには合わせず、いつも明るい配色にする */
+:root {
+  color-scheme: light;
+  --stripe-a: #f4fafd;
+  --stripe-b: #e6f3fa;
+  --ink: #36505f;
+  --ink-soft: #7d96a4;
+  --accent: #4fa3d1;
+  --accent-deep: #2f85b5;
+  --accent-soft: #d7ecf7;
+  --card: rgba(255, 255, 255, 0.86);
+  --line: #d5e8f2;
+  --danger: #d0657a;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  min-height: 100%;
+  background: repeating-linear-gradient(90deg, var(--stripe-a) 0 6px, var(--stripe-b) 6px 12px);
+}
+
+body {
+  margin: 0;
+  padding: 3rem 1rem;
+  color: var(--ink);
+  font-family: "Zen Maru Gothic", "Hiragino Maru Gothic ProN", system-ui, sans-serif;
+  line-height: 1.7;
+}
+
+.card {
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 2.25rem 2rem 1.75rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 1.5rem;
+  box-shadow: 0 1.25rem 3rem -1.5rem rgba(47, 133, 181, 0.35);
+  backdrop-filter: blur(2px);
+}
+
+header { text-align: center; margin-bottom: 1.75rem; }
+.eyebrow { margin: 0; color: var(--accent); font-size: 0.8rem; letter-spacing: 0.2em; text-transform: uppercase; }
+h1 { margin: 0.2rem 0 0.4rem; font-size: 2rem; font-weight: 700; letter-spacing: 0.02em; }
+.lead { margin: 0; color: var(--ink-soft); font-size: 0.95rem; }
+
+form { display: flex; gap: 0.6rem; }
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.7rem 1rem;
+  font: 600 1.25rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+input:disabled { color: var(--ink-soft); background: #f7fbfd; }
+
+button {
+  padding: 0 1.6rem;
+  font: inherit;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 0.4rem 0 var(--accent-deep);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.2s;
+}
+button:hover { background: var(--accent-deep); }
+button:active { transform: translateY(0.25rem); box-shadow: 0 0.15rem 0 var(--accent-deep); }
+button.running { background: var(--danger); box-shadow: 0 0.4rem 0 #b04a5f; }
+
+.failure { margin: 0.8rem 0 0; color: var(--danger); font-size: 0.9rem; }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+  margin: 1.75rem 0 0;
+}
+.stats > div {
+  padding: 0.8rem 0.9rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+}
+dt { color: var(--ink-soft); font-size: 0.75rem; }
+dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+dd small { color: var(--ink-soft); font-weight: 400; }
+dd.big { font-size: 1.35rem; color: var(--accent-deep); }
+dd.sub { color: var(--ink-soft); font-size: 0.75rem; font-weight: 400; }
+
+.chance { margin-top: 1.25rem; }
+.bar { height: 0.6rem; background: var(--accent-soft); border-radius: 999px; overflow: hidden; }
+.bar span {
+  display: block;
+  height: 100%;
+  background: repeating-linear-gradient(90deg, var(--accent) 0 4px, #6bb6dd 4px 8px);
+  border-radius: 999px;
+  transition: width 0.3s ease-out;
+}
+.chance p { margin: 0.35rem 0 0; color: var(--ink-soft); font-size: 0.8rem; text-align: right; }
+
+.found {
+  margin-top: 1.5rem;
+  padding: 1.2rem 1.3rem;
+  background: linear-gradient(135deg, #ffffff, #eef8fd);
+  border: 2px dashed var(--accent);
+  border-radius: 1.25rem;
+  animation: pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+.found h2 { margin: 0 0 0.4rem; font-size: 1rem; color: var(--accent-deep); }
+.found h2::before { content: "✦ "; }
+.address, .secret { margin: 0; font-family: var(--mono); word-break: break-all; }
+.address { font-size: 1.05rem; font-weight: 600; }
+mark { color: var(--accent-deep); background: linear-gradient(transparent 55%, var(--accent-soft) 55%); }
+details { margin-top: 0.8rem; }
+summary { color: var(--ink-soft); font-size: 0.85rem; cursor: pointer; }
+.secret { margin-top: 0.4rem; padding: 0.6rem 0.8rem; font-size: 0.85rem; background: #fff; border-radius: 0.6rem; }
+.warning { margin: 0.4rem 0 0; color: var(--danger); font-size: 0.75rem; }
+
+.note { margin-top: 1.75rem; color: var(--ink-soft); font-size: 0.75rem; }
+.note p { margin: 0.3rem 0; }
+.note a { color: var(--accent-deep); }
+
+@keyframes pop {
+  from { transform: scale(0.94); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@media (max-width: 30rem) {
+  body { padding: 1.5rem 0.75rem; }
+  .card { padding: 1.75rem 1.25rem 1.25rem; }
+  .stats { grid-template-columns: 1fr; }
+}

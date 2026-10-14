@@ -1,4 +1,4 @@
-# master への push と PR で、整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧の確認をする。
+# master への push と PR で、整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧の確認、examples のビルドをする。
 # release.yaml からも、ビルドと並べて呼ぶ
 name: CI
 
@@ -93,3 +93,24 @@ jobs:
         run: |
           cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
           git diff --exit-code
+
+  # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる
+  examples:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: examples/web-vanitygen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェイン
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: examples/web-vanitygen
+      - run: cargo fmt --check
+      - run: cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+      - run: cargo test --lib --locked

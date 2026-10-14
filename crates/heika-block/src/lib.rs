@@ -263,7 +263,8 @@ impl Block {
     }
 
     /// ヘッダーの ReceiptsHash が、ステートメントから求めた Merkle の根と合うか。
-    /// ステートメントはブロックに入っていないので、ノードから別に取ってきたものを渡す。
+    /// ステートメントはブロックに入っておらず、ブロックを実行して求めるもの。受け取ったり読み込んだりしたステートメントが、
+    /// ヘッダーと合っているかを確かめる。
     pub fn verify_receipts_hash(&self, statement: &statement::BlockStatement) -> bool {
         statement.merkle_hash() == self.receipts_hash
     }

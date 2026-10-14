@@ -1,5 +1,6 @@
 //! Merkle ツリー。catapult の `crypto/MerkleHashBuilder.cpp`。
 //! ブロックのトランザクションや、アグリゲートの中のトランザクションのハッシュをまとめるのに使う。
+//! 葉が根に含まれることは、葉から根までの経路で示せる。
 
 use sha3::{Digest, Sha3_256};
 
@@ -17,13 +18,7 @@ pub fn root(leaves: &[Hash256]) -> Hash256 {
     while level.len() > 1 {
         level = level
             .chunks(2)
-            .map(|pair| {
-                let (left, right) = (&pair[0], pair.last().expect("chunks are not empty"));
-                let mut hasher = Sha3_256::new();
-                hasher.update(left.0);
-                hasher.update(right.0);
-                Hash256(hasher.finalize().into())
-            })
+            .map(|pair| pair_hash(&pair[0], pair.last().expect("chunks are not empty")))
             .collect();
     }
     level[0]
@@ -65,6 +60,71 @@ pub fn invalid_root(leaves: &[Hash256]) -> Hash256 {
     hashes[0]
 }
 
+/// Merkle の経路の1段。兄弟のハッシュと、それが左右どちらにあるか。
+/// catapult の REST が返す `merklePath` の1要素と同じ。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MerklePathNode {
+    pub hash: Hash256,
+    pub position: Position,
+}
+
+/// 兄弟のハッシュが、組にするときに左右どちらに来るか。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Position {
+    Left,
+    Right,
+}
+
+/// `index` 番目の葉から根までの経路を、葉に近い段から順に求める。catapult の REST の `buildAuditPath` と同じ。
+/// 葉が1つなら経路は空。`index` が葉の数を超えていれば `None`。
+///
+/// 段の数が奇数のときの最後のハッシュは、複製した自分自身が兄弟になる。
+pub fn path(leaves: &[Hash256], index: usize) -> Option<Vec<MerklePathNode>> {
+    if index >= leaves.len() {
+        return None;
+    }
+    let mut level = leaves.to_vec();
+    let mut index = index;
+    let mut path = Vec::new();
+    while level.len() > 1 {
+        let (sibling, position) = if index % 2 == 1 {
+            (index - 1, Position::Left)
+        } else {
+            ((index + 1).min(level.len() - 1), Position::Right)
+        };
+        path.push(MerklePathNode {
+            hash: level[sibling],
+            position,
+        });
+        level = level
+            .chunks(2)
+            .map(|pair| pair_hash(&pair[0], pair.last().expect("chunks are not empty")))
+            .collect();
+        index /= 2;
+    }
+    Some(path)
+}
+
+/// 葉と経路から根を求め直して、`root` と合うかを確かめる。公式の SDK の `prove_merkle`。
+///
+/// 経路は葉の数を含まないので、段の数が奇数のときの最後の葉は、複製されたもう1つの位置の葉としても通る。
+/// 何番目の葉かまで確かめたいときは、経路の左右の並びからも位置を確かめる。
+pub fn verify_path(leaf: &Hash256, path: &[MerklePathNode], root: &Hash256) -> bool {
+    let computed = path
+        .iter()
+        .fold(*leaf, |working, node| match node.position {
+            Position::Left => pair_hash(&node.hash, &working),
+            Position::Right => pair_hash(&working, &node.hash),
+        });
+    computed == *root
+}
+
+fn pair_hash(left: &Hash256, right: &Hash256) -> Hash256 {
+    let mut hasher = Sha3_256::new();
+    hasher.update(left.0);
+    hasher.update(right.0);
+    Hash256(hasher.finalize().into())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +135,72 @@ mod tests {
 
     fn pair(left: &Hash256, right: &Hash256) -> Hash256 {
         Hash256(Sha3_256::digest([left.0, right.0].concat()).into())
+    }
+
+    #[test]
+    fn every_leaf_has_a_path_to_the_root() {
+        for count in 1..=9 {
+            let leaves: Vec<_> = (0..count).map(|byte| leaf(byte as u8)).collect();
+            let expected = root(&leaves);
+            for (index, hash) in leaves.iter().enumerate() {
+                let path = path(&leaves, index).unwrap();
+                assert!(verify_path(hash, &path, &expected), "{index} of {count}");
+                // 別の葉や、1段でも違う経路では通らない
+                assert!(
+                    !verify_path(&leaf(0xFF), &path, &expected),
+                    "{index} of {count}"
+                );
+                if let Some(first) = path.first() {
+                    let mut swapped = path.clone();
+                    swapped[0].position = match first.position {
+                        Position::Left => Position::Right,
+                        Position::Right => Position::Left,
+                    };
+                    if first.hash != *hash {
+                        assert!(
+                            !verify_path(hash, &swapped, &expected),
+                            "{index} of {count}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(super::path(&leaves, count), None);
+        }
+    }
+
+    #[test]
+    fn builds_the_path_like_the_rest_audit_path() {
+        // 3つの葉では、2段目で最後のハッシュが自分自身と組になる
+        let leaves = [leaf(1), leaf(2), leaf(3)];
+        let left = pair(&leaf(1), &leaf(2));
+        assert_eq!(
+            path(&leaves, 2).unwrap(),
+            [
+                MerklePathNode {
+                    hash: leaf(3),
+                    position: Position::Right
+                },
+                MerklePathNode {
+                    hash: left,
+                    position: Position::Left
+                },
+            ]
+        );
+        assert_eq!(
+            path(&leaves, 1).unwrap(),
+            [
+                MerklePathNode {
+                    hash: leaf(1),
+                    position: Position::Left
+                },
+                MerklePathNode {
+                    hash: pair(&leaf(3), &leaf(3)),
+                    position: Position::Right
+                },
+            ]
+        );
+        assert_eq!(path(&[leaf(1)], 0).unwrap(), []);
+        assert_eq!(path(&[], 0), None);
     }
 
     #[test]

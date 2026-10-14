@@ -1,6 +1,11 @@
 //! 制限。catbuffer の `restriction_account/` と `restriction_mosaic/`。
 
+use heika_core::address::Address;
+use heika_core::hash::Hash256;
+use sha3::{Digest, Sha3_256};
+
 use crate::bounded::BoundedVec;
+use crate::mosaic::MosaicId;
 use crate::transfer::{UnresolvedAddress, UnresolvedMosaicId};
 use crate::{DecodeError, Reader};
 
@@ -272,6 +277,26 @@ impl MosaicGlobalRestriction {
     }
 }
 
+/// 文字列からモザイクの制限のキーを作る。公式の SDK の `mosaic_restriction_generate_key` と同じく、
+/// SHA3-256 の先頭8バイトをリトルエンディアンで読む。メタデータのキーと違い、最上位ビットは立てない。
+pub fn mosaic_restriction_key(text: &str) -> u64 {
+    let hash = Sha3_256::digest(text.as_bytes());
+    u64::from_le_bytes(hash[..8].try_into().expect("8 of 32 bytes"))
+}
+
+/// チェーンに記録されたモザイクの制限の1件を指すハッシュ。catapult の `CreateMosaicRestrictionEntryKey` で、
+/// モザイクの ID とアドレスを続けた SHA3-256。モザイク全体の制限なら、アドレスを24バイトの0にする。
+/// ID とアドレスは、ネームスペースを解決したあとのもの。
+pub fn mosaic_restriction_entry_key(mosaic_id: MosaicId, address: Option<&Address>) -> Hash256 {
+    let address = address.map_or([0; 24], |address| address.0);
+    Hash256(
+        Sha3_256::new()
+            .chain_update(mosaic_id.0.to_le_bytes())
+            .chain_update(address)
+            .finalize()
+            .into(),
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +309,29 @@ mod tests {
             restriction_additions: additions.try_into().unwrap(),
             restriction_deletions: Vec::new().try_into().unwrap(),
         }
+    }
+
+    #[test]
+    fn makes_restriction_keys_without_setting_the_high_bit() {
+        // FIPS 202 の SHA3-256 の例。空の文字列のハッシュは A7FFC6F8BF1ED766 で始まる
+        assert_eq!(mosaic_restriction_key(""), 0x66D7_1EBF_F8C6_FFA7);
+        // "abc" のハッシュは 3A985DA74FE225B2 で始まる
+        assert_eq!(mosaic_restriction_key("abc"), 0xB225_E24F_A75D_983A);
+    }
+
+    #[test]
+    fn hashes_the_mosaic_id_and_the_address() {
+        let mut data = 0x0102_u64.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0x98; 24]);
+        assert_eq!(
+            mosaic_restriction_entry_key(MosaicId(0x0102), Some(&Address([0x98; 24]))),
+            Hash256(Sha3_256::digest(&data).into())
+        );
+        // モザイク全体の制限は、アドレスが0の制限と同じキーになる
+        assert_eq!(
+            mosaic_restriction_entry_key(MosaicId(0x0102), None),
+            mosaic_restriction_entry_key(MosaicId(0x0102), Some(&Address([0; 24])))
+        );
     }
 
     #[test]

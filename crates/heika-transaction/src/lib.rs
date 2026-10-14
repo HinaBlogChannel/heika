@@ -25,8 +25,11 @@ pub use aggregate::{
     TransactionsHashCalculation,
 };
 pub use bounded::{BoundedVec, TooLong};
-pub use lock::{HashLock, LockHashAlgorithm, SecretLock, SecretProof};
-pub use metadata::{Metadata, MosaicMetadata, NamespaceMetadata};
+pub use lock::{HashLock, LockHashAlgorithm, SecretLock, SecretProof, secret_lock_key};
+pub use metadata::{
+    Metadata, MetadataKey, MetadataType, MosaicMetadata, NamespaceMetadata, metadata_value_update,
+    scoped_metadata_key,
+};
 pub use mosaic::{
     MosaicDefinition, MosaicFlags, MosaicId, MosaicSupplyChange, MosaicSupplyChangeAction,
     MosaicSupplyRevocation, UnresolvedMosaic,
@@ -38,7 +41,7 @@ pub use namespace::{
 };
 pub use restriction::{
     AccountRestriction, AccountRestrictionFlags, MosaicAddressRestriction, MosaicGlobalRestriction,
-    MosaicRestrictionType, TransactionType,
+    MosaicRestrictionType, TransactionType, mosaic_restriction_entry_key, mosaic_restriction_key,
 };
 pub use scan::{ScanError, Scanned, scan};
 pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};

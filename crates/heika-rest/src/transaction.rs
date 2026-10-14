@@ -10,43 +10,54 @@ use heika_core::hash::Hash256;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_core::signature::Signature;
-use heika_transaction::{Body, Transaction, TransactionsHashCalculation};
-use serde::Deserialize;
+use heika_transaction::{
+    AccountRestriction, AliasAction, Body, EmbeddedTransaction, LinkAction, LockHashAlgorithm,
+    MosaicMetadata, MosaicRestrictionType, MosaicSupplyChangeAction, NamespaceMetadata,
+    NamespaceRegistrationType, Transaction, TransactionsHashCalculation,
+};
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use crate::{RestError, hex_array, hex_vec, number};
+use crate::{RestError, hex, hex_array, hex_vec, number};
 
 /// トランザクションのヘッダーのうち、署名と手数料と期限を除いた、中のトランザクションと共通の部分の大きさ
 const EMBEDDED_HEADER_SIZE: usize = 4 + 4 + 32 + 4 + 1 + 1 + 2;
 
 /// `TransactionInfoDTO`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct TransactionInfo {
     pub meta: TransactionMeta,
     pub transaction: TransactionJson,
 }
 
 /// `TransactionMetaDTO` と `EmbeddedTransactionMetaDTO`。どちらの形でも読めるように、項目はどれも省けるようにする。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionMeta {
     /// 承認される前なら "0"
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<String>,
     /// 中のトランザクションにはない
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub merkle_component_hash: Option<String>,
     /// ブロックの中か、アグリゲートの中で何番目か（0から）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
     /// 中のトランザクションだけにある、親のアグリゲートのハッシュ
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_hash: Option<String>,
 }
 
 /// トランザクションの JSON。種類ごとの本体の項目は、どれか1つの種類のものだけが入る。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u32>,
     /// 中のトランザクションにはない
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     pub signer_public_key: String,
     pub version: u8,
@@ -54,73 +65,125 @@ pub struct TransactionJson {
     #[serde(rename = "type")]
     pub transaction_type: u16,
     /// 中のトランザクションにはない
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_fee: Option<String>,
     /// 中のトランザクションにはない
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
     #[serde(flatten)]
     pub body: BodyJson,
 }
 
 /// 25種類の本体の項目をまとめたもの。種類によって使う項目が違う。
-#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BodyJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub linked_public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub link_action: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_epoch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_epoch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mosaic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_algorithm: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proof: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scoped_metadata_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_mosaic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub value_size_delta: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub value_size: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub flags: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub divisibility: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_removal_delta: Option<i8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_approval_delta: Option<i8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub address_additions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub address_deletions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub alias_action: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_type: Option<u8>,
     /// ネームスペースの名前。16進ではなく、そのままの文字列
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restriction_flags: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restriction_additions: Option<Vec<RestrictionValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restriction_deletions: Option<Vec<RestrictionValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restriction_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_restriction_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub new_restriction_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_mosaic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_restriction_type: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub new_restriction_type: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mosaics: Option<Vec<MosaicJson>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transactions_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cosignatures: Option<Vec<CosignatureJson>>,
     /// ID かハッシュで1件取ったときだけ入る、中のトランザクション
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transactions: Option<Vec<TransactionInfo>>,
 }
 
 /// アカウントの制限の値。アドレスとモザイクは16進の文字列、トランザクションの種類は数で返る。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum RestrictionValue {
     Text(String),
@@ -128,14 +191,14 @@ pub enum RestrictionValue {
 }
 
 /// `UnresolvedMosaic`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct MosaicJson {
     pub id: String,
     pub amount: String,
 }
 
 /// `CosignatureDTO`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CosignatureJson {
     pub version: String,
@@ -714,3 +777,297 @@ const TRANSACTION_HEADER_SIZE: usize = 4 + 4 + 64 + 32 + 4 + 1 + 1 + 2 + 8 + 8;
 const AGGREGATE_FIXED_SIZE: usize = 32 + 4 + 4;
 /// 連署1つの大きさ。バージョン、公開鍵、署名
 const COSIGNATURE_SIZE: usize = 8 + 32 + 64;
+
+/// トランザクションを、REST が返す形にする。アグリゲートなら、ID かハッシュで1件取ったときと同じく、
+/// 中のトランザクションを `transactions` に入れ、`meta` には何番目かだけを書く。
+impl From<&Transaction> for TransactionJson {
+    fn from(transaction: &Transaction) -> Self {
+        Self {
+            size: Some(transaction.size() as u32),
+            signature: Some(transaction.signature.to_string()),
+            signer_public_key: transaction.signer_public_key.to_string(),
+            version: transaction.body.version(),
+            network: transaction.network.0,
+            transaction_type: transaction.body.transaction_type(),
+            max_fee: Some(transaction.fee.to_string()),
+            deadline: Some(transaction.deadline.to_string()),
+            body: body_json(&transaction.body),
+        }
+    }
+}
+
+/// アグリゲートの中のトランザクションを、REST が返す形にする。署名、手数料、期限、大きさはない。
+impl From<&EmbeddedTransaction> for TransactionJson {
+    fn from(embedded: &EmbeddedTransaction) -> Self {
+        Self {
+            size: None,
+            signature: None,
+            signer_public_key: embedded.signer_public_key.to_string(),
+            version: embedded.body.version(),
+            network: embedded.network.0,
+            transaction_type: embedded.body.transaction_type(),
+            max_fee: None,
+            deadline: None,
+            body: body_json(&embedded.body),
+        }
+    }
+}
+
+/// 種類ごとの本体の項目を、catapult-rest と同じ書き方で埋める。
+fn body_json(body: &Body) -> BodyJson {
+    let mut json = BodyJson::default();
+    let id = |value: u64| Some(format!("{value:016X}"));
+    let decimal = |value: u64| Some(value.to_string());
+    let address = |bytes: &[u8; 24]| Some(hex(bytes));
+    match body {
+        Body::AccountKeyLink(link) | Body::NodeKeyLink(link) | Body::VrfKeyLink(link) => {
+            json.linked_public_key = Some(link.linked_public_key.to_string());
+            json.link_action = Some(link_action(link.link_action));
+        }
+        Body::VotingKeyLink(link) => {
+            json.linked_public_key = Some(link.linked_public_key.to_string());
+            json.start_epoch = Some(link.start_epoch);
+            json.end_epoch = Some(link.end_epoch);
+            json.link_action = Some(link_action(link.link_action));
+        }
+        Body::HashLock(lock) => {
+            json.mosaic_id = id(lock.mosaic.mosaic_id.0);
+            json.amount = decimal(lock.mosaic.amount);
+            json.duration = decimal(lock.duration);
+            json.hash = Some(lock.hash.to_string());
+        }
+        Body::SecretLock(lock) => {
+            json.recipient_address = address(&lock.recipient_address.0);
+            json.secret = Some(lock.secret.to_string());
+            json.mosaic_id = id(lock.mosaic.mosaic_id.0);
+            json.amount = decimal(lock.mosaic.amount);
+            json.duration = decimal(lock.duration);
+            json.hash_algorithm = Some(hash_algorithm(lock.hash_algorithm));
+        }
+        Body::SecretProof(proof) => {
+            json.recipient_address = address(&proof.recipient_address.0);
+            json.secret = Some(proof.secret.to_string());
+            json.hash_algorithm = Some(hash_algorithm(proof.hash_algorithm));
+            json.proof = Some(hex(&proof.proof));
+        }
+        Body::AccountMetadata(metadata)
+        | Body::MosaicMetadata(MosaicMetadata { metadata, .. })
+        | Body::NamespaceMetadata(NamespaceMetadata { metadata, .. }) => {
+            json.target_address = address(&metadata.target_address.0);
+            json.scoped_metadata_key = id(metadata.scoped_metadata_key);
+            json.value_size_delta = Some(metadata.value_size_delta);
+            json.value_size = Some(metadata.value.len() as u16);
+            json.value = Some(hex(&metadata.value));
+            match body {
+                Body::MosaicMetadata(mosaic) => {
+                    json.target_mosaic_id = id(mosaic.target_mosaic_id.0)
+                }
+                Body::NamespaceMetadata(namespace) => {
+                    json.target_namespace_id = id(namespace.target_namespace_id.0)
+                }
+                _ => {}
+            }
+        }
+        Body::MosaicDefinition(definition) => {
+            json.id = id(definition.id.0);
+            json.duration = decimal(definition.duration);
+            json.nonce = Some(definition.nonce);
+            json.flags = Some(definition.flags.bits());
+            json.divisibility = Some(definition.divisibility);
+        }
+        Body::MosaicSupplyChange(change) => {
+            json.mosaic_id = id(change.mosaic_id.0);
+            json.delta = decimal(change.delta);
+            json.action = Some(match change.action {
+                MosaicSupplyChangeAction::Decrease => 0,
+                MosaicSupplyChangeAction::Increase => 1,
+            });
+        }
+        Body::MosaicSupplyRevocation(revocation) => {
+            json.source_address = address(&revocation.source_address.0);
+            json.mosaic_id = id(revocation.mosaic.mosaic_id.0);
+            json.amount = decimal(revocation.mosaic.amount);
+        }
+        Body::MultisigAccountModification(modification) => {
+            json.min_removal_delta = Some(modification.min_removal_delta);
+            json.min_approval_delta = Some(modification.min_approval_delta);
+            json.address_additions = Some(
+                modification
+                    .address_additions
+                    .iter()
+                    .map(|address| hex(&address.0))
+                    .collect(),
+            );
+            json.address_deletions = Some(
+                modification
+                    .address_deletions
+                    .iter()
+                    .map(|address| hex(&address.0))
+                    .collect(),
+            );
+        }
+        Body::AddressAlias(alias) => {
+            json.namespace_id = id(alias.namespace_id.0);
+            json.address = address(&alias.address.0);
+            json.alias_action = Some(alias_action(alias.alias_action));
+        }
+        Body::MosaicAlias(alias) => {
+            json.namespace_id = id(alias.namespace_id.0);
+            json.mosaic_id = id(alias.mosaic_id.0);
+            json.alias_action = Some(alias_action(alias.alias_action));
+        }
+        Body::NamespaceRegistration(registration) => {
+            match registration.registration_type {
+                NamespaceRegistrationType::Root { duration } => {
+                    json.registration_type = Some(0);
+                    json.duration = decimal(duration);
+                }
+                NamespaceRegistrationType::Child { parent_id } => {
+                    json.registration_type = Some(1);
+                    json.parent_id = id(parent_id.0);
+                }
+            }
+            json.id = id(registration.id.0);
+            json.name = Some(String::from_utf8_lossy(&registration.name).into_owned());
+        }
+        Body::AccountAddressRestriction(restriction) => {
+            account_restriction(&mut json, restriction, |address| {
+                RestrictionValue::Text(hex(&address.0))
+            })
+        }
+        Body::AccountMosaicRestriction(restriction) => {
+            account_restriction(&mut json, restriction, |mosaic| {
+                RestrictionValue::Text(format!("{:016X}", mosaic.0))
+            })
+        }
+        Body::AccountOperationRestriction(restriction) => {
+            account_restriction(&mut json, restriction, |operation| {
+                RestrictionValue::Number(operation.0)
+            })
+        }
+        Body::MosaicAddressRestriction(restriction) => {
+            json.mosaic_id = id(restriction.mosaic_id.0);
+            json.restriction_key = id(restriction.restriction_key);
+            json.previous_restriction_value = decimal(restriction.previous_restriction_value);
+            json.new_restriction_value = decimal(restriction.new_restriction_value);
+            json.target_address = address(&restriction.target_address.0);
+        }
+        Body::MosaicGlobalRestriction(restriction) => {
+            json.mosaic_id = id(restriction.mosaic_id.0);
+            json.reference_mosaic_id = id(restriction.reference_mosaic_id.0);
+            json.restriction_key = id(restriction.restriction_key);
+            json.previous_restriction_value = decimal(restriction.previous_restriction_value);
+            json.new_restriction_value = decimal(restriction.new_restriction_value);
+            json.previous_restriction_type = Some(mosaic_restriction_type(
+                restriction.previous_restriction_type,
+            ));
+            json.new_restriction_type =
+                Some(mosaic_restriction_type(restriction.new_restriction_type));
+        }
+        Body::Transfer(transfer) => {
+            json.recipient_address = address(&transfer.recipient_address().0);
+            json.mosaics = Some(
+                transfer
+                    .mosaics()
+                    .iter()
+                    .map(|(mosaic, amount)| MosaicJson {
+                        id: format!("{:016X}", mosaic.0),
+                        amount: amount.to_string(),
+                    })
+                    .collect(),
+            );
+            // catapult-rest は、空のメッセージを書かない
+            if !transfer.message().is_empty() {
+                json.message = Some(hex(transfer.message()));
+            }
+        }
+        Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+            json.transactions_hash = Some(aggregate.transactions_hash().to_string());
+            json.cosignatures = Some(
+                aggregate
+                    .cosignatures()
+                    .iter()
+                    .map(|cosignature| CosignatureJson {
+                        version: "0".to_owned(),
+                        signer_public_key: cosignature.signer_public_key.to_string(),
+                        signature: cosignature.signature.to_string(),
+                    })
+                    .collect(),
+            );
+            json.transactions = Some(
+                aggregate
+                    .transactions()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, embedded)| TransactionInfo {
+                        meta: TransactionMeta {
+                            height: None,
+                            hash: None,
+                            merkle_component_hash: None,
+                            index: Some(index as u32),
+                            aggregate_hash: None,
+                        },
+                        transaction: TransactionJson::from(embedded),
+                    })
+                    .collect(),
+            );
+        }
+    }
+    json
+}
+
+fn account_restriction<T>(
+    json: &mut BodyJson,
+    restriction: &AccountRestriction<T>,
+    value: impl Fn(&T) -> RestrictionValue,
+) {
+    json.restriction_flags = Some(restriction.restriction_flags.bits());
+    json.restriction_additions = Some(
+        restriction
+            .restriction_additions
+            .iter()
+            .map(&value)
+            .collect(),
+    );
+    json.restriction_deletions = Some(
+        restriction
+            .restriction_deletions
+            .iter()
+            .map(&value)
+            .collect(),
+    );
+}
+
+fn link_action(action: LinkAction) -> u8 {
+    match action {
+        LinkAction::Unlink => 0,
+        LinkAction::Link => 1,
+    }
+}
+
+fn alias_action(action: AliasAction) -> u8 {
+    match action {
+        AliasAction::Unlink => 0,
+        AliasAction::Link => 1,
+    }
+}
+
+fn hash_algorithm(algorithm: LockHashAlgorithm) -> u8 {
+    match algorithm {
+        LockHashAlgorithm::Sha3_256 => 0,
+        LockHashAlgorithm::Hash160 => 1,
+        LockHashAlgorithm::Hash256 => 2,
+    }
+}
+
+fn mosaic_restriction_type(value: MosaicRestrictionType) -> u8 {
+    match value {
+        MosaicRestrictionType::None => 0,
+        MosaicRestrictionType::Eq => 1,
+        MosaicRestrictionType::Ne => 2,
+        MosaicRestrictionType::Lt => 3,
+        MosaicRestrictionType::Le => 4,
+        MosaicRestrictionType::Gt => 5,
+        MosaicRestrictionType::Ge => 6,
+    }
+}

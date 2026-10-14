@@ -215,3 +215,18 @@ fn reads_state_tree_nodes_from_raw() {
         Err(RestError::InvalidTreeNodes(_))
     ));
 }
+
+#[test]
+fn writes_the_rest_json_of_a_block_header() {
+    for importance in [false, true] {
+        let json = block_json(importance);
+        let block = read(&json).verify().unwrap();
+        let mut expected = json["block"].clone();
+        // ヘッダーだけのブロックなので、大きさはヘッダーの大きさになる
+        expected["size"] = serde_json::json!(block.as_bytes().len());
+        assert_eq!(
+            serde_json::to_value(heika_rest::block::BlockHeader::from(&block)).unwrap(),
+            expected
+        );
+    }
+}

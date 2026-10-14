@@ -3,23 +3,23 @@
 //! REST のブロックはヘッダーだけで、中のトランザクションは別に返す。なので、ヘッダーだけのバイト列を組み直す。
 //! ブロックのハッシュと署名はヘッダーだけに掛かるので、ヘッダーだけでも求め直せる。
 
-use heika_block::Block;
+use heika_block::{Block, BlockType};
 use heika_core::hash::Hash256;
 use heika_core::patricia;
 use heika_core::vrf::GenerationHash;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{RestError, hex_array, number};
+use crate::{RestError, hex, hex_array, number};
 
 /// `BlockInfoDTO`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct BlockInfo {
     pub meta: BlockMeta,
     pub block: BlockHeader,
 }
 
 /// `BlockMetaDTO`。ノードがブロックを実行して求めた値。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockMeta {
     pub hash: String,
@@ -33,7 +33,7 @@ pub struct BlockMeta {
 }
 
 /// `BlockDTO` と `ImportanceBlockDTO`。Importance のフッターの4つは、Nemesis と Importance のブロックにだけある。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockHeader {
     /// 中のトランザクションも含めたブロック全体の大きさ
@@ -56,9 +56,13 @@ pub struct BlockHeader {
     pub state_hash: String,
     pub beneficiary_address: String,
     pub fee_multiplier: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub voting_eligible_accounts_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub harvesting_eligible_accounts_count: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_voting_balance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_importance_block_hash: Option<String>,
 }
 
@@ -186,5 +190,43 @@ impl BlockInfo {
             field: "meta.stateHashSubCacheMerkleRoots",
         })?;
         Ok(patricia::state_hash(&roots))
+    }
+}
+
+/// ブロックのヘッダーを、REST が返す形にする。`size` は中のトランザクションも含めたブロック全体の大きさ。
+impl From<&Block> for BlockHeader {
+    fn from(block: &Block) -> Self {
+        let footer = block.importance_footer.as_ref();
+        Self {
+            size: block.as_bytes().len() as u32,
+            signature: block.signature.to_string(),
+            signer_public_key: block.signer_public_key.to_string(),
+            version: block.version,
+            network: block.network.0,
+            block_type: match block.block_type {
+                BlockType::Nemesis => 0x8043,
+                BlockType::Normal => 0x8143,
+                BlockType::Importance => 0x8243,
+            },
+            height: block.height.to_string(),
+            timestamp: block.timestamp.to_string(),
+            difficulty: block.difficulty.to_string(),
+            proof_gamma: hex(&block.generation_hash_proof.gamma),
+            proof_verification_hash: hex(&block.generation_hash_proof.verification_hash),
+            proof_scalar: hex(&block.generation_hash_proof.scalar),
+            previous_block_hash: block.previous_block_hash.to_string(),
+            transactions_hash: block.transactions_hash.to_string(),
+            receipts_hash: block.receipts_hash.to_string(),
+            state_hash: block.state_hash.to_string(),
+            beneficiary_address: block.beneficiary_address.to_hex(),
+            fee_multiplier: block.fee_multiplier,
+            voting_eligible_accounts_count: footer
+                .map(|footer| footer.voting_eligible_accounts_count),
+            harvesting_eligible_accounts_count: footer
+                .map(|footer| footer.harvesting_eligible_accounts_count.to_string()),
+            total_voting_balance: footer.map(|footer| footer.total_voting_balance.to_string()),
+            previous_importance_block_hash: footer
+                .map(|footer| footer.previous_importance_block_hash.to_string()),
+        }
     }
 }

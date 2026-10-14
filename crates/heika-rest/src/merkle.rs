@@ -8,19 +8,19 @@
 use heika_core::hash::Hash256;
 use heika_core::merkle::{MerklePathNode, Position};
 use heika_core::patricia::TreeNode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{RestError, hex_array, hex_vec};
 
 /// `MerkleProofInfoDTO`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MerkleProofInfo {
     pub merkle_path: Vec<MerklePathItem>,
 }
 
 /// `MerklePathItemDTO`。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct MerklePathItem {
     /// `left` か `right`
     pub position: String,
@@ -50,7 +50,7 @@ impl TryFrom<&MerkleProofInfo> for Vec<MerklePathNode> {
 }
 
 /// `MerkleStateInfoDTO`。`tree` は `raw` を読みやすくしたものなので、読まずに `raw` から組み直す。
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct MerkleStateInfo {
     /// ノードを根から順に並べたバイト列の16進
     pub raw: String,

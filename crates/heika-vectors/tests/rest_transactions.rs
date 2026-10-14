@@ -1,11 +1,11 @@
 //! `models/transactions.json` のトランザクションを、REST が返す形の JSON にしてから heika-rest で組み直し、
-//! 元のバイト列に戻ることを確かめる。
+//! 元のバイト列に戻ることと、heika-rest が heika の型から書く JSON と同じになることを確かめる。
 //!
 //! JSON の形は、catapult-rest の `catapult-sdk/plugins` のスキーマと `server/messageFormattingRules.js` に合わせて、
 //! ここで heika の型から書く。アドレスとハッシュとバイト列は16進、u64 は10進の文字列、ID は上位から書いた16進、
 //! 小さい数と列挙は数、ネームスペースの名前はそのままの文字列。
 
-use heika_rest::transaction::TransactionInfo;
+use heika_rest::transaction::{TransactionInfo, TransactionJson};
 use heika_transaction::{
     AccountRestriction, AliasAction, Body, EmbeddedTransaction, LinkAction, LockHashAlgorithm,
     MosaicRestrictionType, MosaicSupplyChangeAction, NamespaceRegistrationType, Transaction,
@@ -336,7 +336,15 @@ fn rebuilds_every_transaction_from_rest_json() {
         let Ok(transaction) = Transaction::from_bytes(&payload) else {
             continue;
         };
-        let info: TransactionInfo = serde_json::from_value(transaction_json(&transaction))
+        let json = transaction_json(&transaction);
+        // ここで書いた JSON と、heika-rest が heika の型から書く JSON は同じになる
+        assert_eq!(
+            serde_json::to_value(TransactionJson::from(&transaction)).unwrap(),
+            json["transaction"],
+            "{}",
+            vector.test_name
+        );
+        let info: TransactionInfo = serde_json::from_value(json)
             .unwrap_or_else(|error| panic!("{}: {error}", vector.test_name));
         let rebuilt = info
             .transaction

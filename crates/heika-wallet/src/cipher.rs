@@ -1,6 +1,6 @@
 //! 公開鍵あての暗号化。catapult の `crypto/SharedKey.cpp` と `crypto/AesDecrypt.cpp`。
 //!
-//! 委任ハーベストの要求で、リモートアカウントと VRF の秘密鍵をノードに渡すのに使う。
+//! 委任ハーベストの要求で、リモートアカウントと VRF の秘密鍵をノードに渡すのと、Transfer の暗号化したメッセージに使う。
 //! 鍵共有は X25519 ではなく、Edwards 曲線の点のまま秘密鍵のスカラーを掛ける。
 
 use std::fmt;

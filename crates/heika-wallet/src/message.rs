@@ -6,6 +6,7 @@
 //!
 //! 暗号化は、送る人の秘密鍵と受け取る人の公開鍵から導出した共有鍵の AES-256-GCM なので、
 //! 送った人も受け取った人も、自分の秘密鍵と相手の公開鍵で復号できる。
+//! 昔の公式の Symbol ウォレットは、暗号化した部分をさらに16進の文字列にして書いていたので、それも読める。
 
 use std::fmt;
 
@@ -59,10 +60,40 @@ pub fn decrypt(
     cipher::decrypt(&key, encrypted).map_err(DecryptMessageError::Decrypt)
 }
 
+/// 昔の公式の Symbol ウォレットが書いた暗号化メッセージを復号する。公式の SDK の `try_decode_deprecated`。
+///
+/// 暗号は今と同じだが、印のあとの認証タグ、初期化ベクトル、暗号文を、さらに16進の文字列にして入れている。
+/// 読むためだけに用意していて、この形で書く関数はない。
+pub fn decrypt_legacy_wallet(
+    private_key: &PrivateKey,
+    other_public_key: &PublicKey,
+    message: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, DecryptMessageError> {
+    let Some((&ENCRYPTED, text)) = message.split_first() else {
+        return Err(DecryptMessageError::NotEncrypted);
+    };
+    let mut decoded = vec![ENCRYPTED];
+    decoded.extend(from_hex(text).ok_or(DecryptMessageError::NotHex)?);
+    decrypt(private_key, other_public_key, &decoded)
+}
+
+/// 大文字か小文字の16進の文字列を戻す。文字数が奇数か、16進でない文字があれば `None`。
+fn from_hex(text: &[u8]) -> Option<Vec<u8>> {
+    if text.len() % 2 == 1 {
+        return None;
+    }
+    let digit = |byte: u8| (byte as char).to_digit(16).map(|value| value as u8);
+    text.chunks(2)
+        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecryptMessageError {
     /// 暗号化したメッセージの印で始まっていない
     NotEncrypted,
+    /// 昔のウォレットの形なのに、印のあとが16進の文字列ではない
+    NotHex,
     Decrypt(DecryptError),
 }
 
@@ -70,6 +101,7 @@ impl fmt::Display for DecryptMessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotEncrypted => f.write_str("暗号化したメッセージではありません"),
+            Self::NotHex => f.write_str("昔のウォレットの暗号化したメッセージの形ではありません"),
             Self::Decrypt(DecryptError::InvalidPublicKey) => {
                 f.write_str("相手の公開鍵が、鍵の共有に使える曲線上の点ではありません")
             }
@@ -121,6 +153,43 @@ mod tests {
         let message = encrypt(&mut Replay(&[7; 12]), &alice, &bob_public, b"heika").unwrap();
         assert_eq!(*decrypt(&alice, &bob_public, &message).unwrap(), b"heika");
         assert_eq!(*decrypt(&bob, &alice_public, &message).unwrap(), b"heika");
+    }
+
+    #[test]
+    fn decrypts_hex_encoded_messages_of_the_old_wallet() {
+        let (alice, _) = key(ALICE);
+        let (bob, bob_public) = key(BOB);
+        let (_, alice_public) = key(ALICE);
+        let message = encrypt(&mut Replay(&[7; 12]), &alice, &bob_public, b"heika").unwrap();
+        // 印のあとを16進の文字列にする。大文字でも小文字でも読む
+        for upper in [true, false] {
+            let mut legacy = vec![ENCRYPTED];
+            for byte in &message[1..] {
+                let text = if upper {
+                    format!("{byte:02X}")
+                } else {
+                    format!("{byte:02x}")
+                };
+                legacy.extend_from_slice(text.as_bytes());
+            }
+            assert_eq!(
+                *decrypt_legacy_wallet(&bob, &alice_public, &legacy).unwrap(),
+                b"heika"
+            );
+        }
+        // 今の形は16進ではないので読めない
+        assert_eq!(
+            decrypt_legacy_wallet(&bob, &alice_public, &message),
+            Err(DecryptMessageError::NotHex)
+        );
+        assert_eq!(
+            decrypt_legacy_wallet(&bob, &alice_public, b"\x01ABC"),
+            Err(DecryptMessageError::NotHex)
+        );
+        assert_eq!(
+            decrypt_legacy_wallet(&bob, &alice_public, b"\x00AB"),
+            Err(DecryptMessageError::NotEncrypted)
+        );
     }
 
     #[test]

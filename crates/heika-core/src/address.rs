@@ -7,6 +7,7 @@ use ripemd::Ripemd160;
 use sha3::{Digest, Sha3_256};
 
 use crate::base32;
+use crate::hex::{self, ParseHexError};
 use crate::key::PublicKey;
 use crate::network::NetworkIdentifier;
 
@@ -42,6 +43,21 @@ impl Address {
         let checksum_begin = Self::SIZE - Self::CHECKSUM_SIZE;
         Sha3_256::digest(&self.0[..checksum_begin])[..Self::CHECKSUM_SIZE]
             == self.0[checksum_begin..]
+    }
+
+    /// 24バイトを16進で書いたもの（48文字）から読む。REST はアドレスをこの形で返す。
+    /// 公式の SDK の `from_decoded_address_hex_string` と違い、Base32 から読むときと同じくチェックサムも確かめる。
+    pub fn from_hex(text: &str) -> Result<Self, ParseAddressError> {
+        let address = Self(hex::decode(text).map_err(ParseAddressError::InvalidHex)?);
+        if !address.has_valid_checksum() {
+            return Err(ParseAddressError::InvalidChecksum);
+        }
+        Ok(address)
+    }
+
+    /// 24バイトを大文字の16進で書く。
+    pub fn to_hex(&self) -> String {
+        hex::encode(&self.0)
     }
 }
 
@@ -100,6 +116,8 @@ pub enum ParseAddressError {
     /// 最後の文字の下位ビットが0ではない
     NonCanonical,
     InvalidChecksum,
+    /// 16進から読むときに、48文字の16進ではない
+    InvalidHex(ParseHexError),
 }
 
 impl fmt::Display for ParseAddressError {
@@ -120,6 +138,7 @@ impl fmt::Display for ParseAddressError {
             }
             Self::NonCanonical => write!(f, "最後の文字が正規の書き方になっていません"),
             Self::InvalidChecksum => write!(f, "チェックサムが合いません"),
+            Self::InvalidHex(error) => write!(f, "アドレスの16進として読めません: {error}"),
         }
     }
 }
@@ -148,6 +167,28 @@ mod tests {
         assert_eq!(address.0, hex::decode(BLOCK_2_BENEFICIARY).unwrap());
         assert_eq!(address.network(), NetworkIdentifier::MAINNET);
         assert!(address.has_valid_checksum());
+    }
+
+    #[test]
+    fn round_trips_through_hex() {
+        let address = block_2_beneficiary();
+        assert_eq!(address.to_hex(), BLOCK_2_BENEFICIARY);
+        assert_eq!(Address::from_hex(BLOCK_2_BENEFICIARY), Ok(address));
+        assert_eq!(
+            Address::from_hex(&BLOCK_2_BENEFICIARY.to_lowercase()),
+            Ok(address)
+        );
+        // 最後のバイトを変えると、チェックサムが合わない
+        let mut changed = BLOCK_2_BENEFICIARY.to_owned();
+        changed.replace_range(46.., "71");
+        assert_eq!(
+            Address::from_hex(&changed),
+            Err(ParseAddressError::InvalidChecksum)
+        );
+        assert!(matches!(
+            Address::from_hex(BLOCK_2_BENEFICIARY_ENCODED),
+            Err(ParseAddressError::InvalidHex(_))
+        ));
     }
 
     #[test]

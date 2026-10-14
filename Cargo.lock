@@ -485,6 +485,7 @@ dependencies = [
  "heika-transaction",
  "serde",
  "serde_json",
+ "sha3",
 ]
 
 [[package]]

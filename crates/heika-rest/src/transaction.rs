@@ -7,9 +7,12 @@
 //! アグリゲートは、ID かハッシュで1件取ったときだけ、中のトランザクションが `transactions` に入って返る。
 
 use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
+use heika_core::signature::Signature;
 use heika_transaction::{Body, Transaction, TransactionsHashCalculation};
 use serde::Deserialize;
+use sha3::{Digest, Sha3_256};
 
 use crate::{RestError, hex_array, hex_vec, number};
 
@@ -552,3 +555,162 @@ fn set_size(bytes: &mut [u8]) {
     let size = bytes.len() as u32;
     bytes[..4].copy_from_slice(&size.to_le_bytes());
 }
+
+/// 中のトランザクションなしで確かめた、アグリゲートの外側。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AggregateHeader {
+    pub hash: Hash256,
+    pub merkle_component_hash: Hash256,
+    pub transactions_hash: Hash256,
+    pub version: u8,
+}
+
+impl TransactionInfo {
+    /// 検索で返る、中のトランザクションの入っていないアグリゲートを確かめる。
+    ///
+    /// 署名とハッシュは中のトランザクションに掛からず、TransactionsHash（バージョン 3 は中のトランザクションの
+    /// 長さも）までに掛かるので、外側だけで確かめられる。長さは、REST が返す全体の `size` から求める。
+    /// 確かめるのは、署名と連署、`meta.hash`、承認されていれば `meta.merkleComponentHash` とバージョン。
+    /// 中のトランザクションが TransactionsHash と合うかは、集めてから [`TransactionInfo::with_embedded`] で確かめる。
+    pub fn verify_aggregate_header(&self) -> Result<AggregateHeader, RestError> {
+        let json = &self.transaction;
+        if !matches!(json.transaction_type, 0x4141 | 0x4241) {
+            return Err(RestError::InvalidValue { field: "type" });
+        }
+        let network = NetworkParameters::from_identifier(NetworkIdentifier(json.network))
+            .ok_or(RestError::InvalidValue { field: "network" })?;
+        let seed = &network.generation_hash_seed;
+        let signature: [u8; 64] = hex_array(required(&json.signature, "signature")?, "signature")?;
+        let signer: [u8; 32] = hex_array(&json.signer_public_key, "signerPublicKey")?;
+        let transactions_hash: [u8; 32] = json
+            .body
+            .hex(&json.body.transactions_hash, "transactionsHash")?;
+        let cosignatures = json.body.cosignatures.as_deref().unwrap_or_default();
+
+        // 署名の対象。ヘッダーの後半、TransactionsHash、バージョン 3 なら中のトランザクションの長さ
+        let mut signed = vec![json.version, json.network];
+        signed.extend_from_slice(&json.transaction_type.to_le_bytes());
+        signed.extend_from_slice(
+            &number(required(&json.max_fee, "maxFee")?, "maxFee")?.to_le_bytes(),
+        );
+        signed.extend_from_slice(
+            &number(required(&json.deadline, "deadline")?, "deadline")?.to_le_bytes(),
+        );
+        signed.extend_from_slice(&transactions_hash);
+        if json.version >= 3 {
+            let size = *required(&json.size, "size")? as usize;
+            let payload_size = size
+                .checked_sub(
+                    TRANSACTION_HEADER_SIZE
+                        + AGGREGATE_FIXED_SIZE
+                        + COSIGNATURE_SIZE * cosignatures.len(),
+                )
+                .ok_or(RestError::InvalidValue { field: "size" })?;
+            signed.extend_from_slice(&length::<u32>(payload_size, "size")?.to_le_bytes());
+        }
+        if !PublicKey(signer).verify(&[&seed.0, &signed], &Signature(signature)) {
+            return Err(RestError::Mismatch { field: "signature" });
+        }
+        let hash = Hash256(
+            Sha3_256::new()
+                .chain_update(signature)
+                .chain_update(signer)
+                .chain_update(seed.0)
+                .chain_update(&signed)
+                .finalize()
+                .into(),
+        );
+        if hash
+            != Hash256(hex_array(
+                required(&self.meta.hash, "meta.hash")?,
+                "meta.hash",
+            )?)
+        {
+            return Err(RestError::Mismatch { field: "meta.hash" });
+        }
+
+        let mut leaf = Sha3_256::new().chain_update(hash.0);
+        for cosignature in cosignatures {
+            if number(&cosignature.version, "cosignatures.version")? != 0 {
+                return Err(RestError::InvalidValue {
+                    field: "cosignatures.version",
+                });
+            }
+            let key = PublicKey(hex_array(
+                &cosignature.signer_public_key,
+                "cosignatures.signerPublicKey",
+            )?);
+            let signature = Signature(hex_array(&cosignature.signature, "cosignatures.signature")?);
+            if !key.verify(&[&hash.0], &signature) {
+                return Err(RestError::Mismatch {
+                    field: "cosignatures",
+                });
+            }
+            leaf.update(key.0);
+        }
+        let merkle_component_hash = if cosignatures.is_empty() {
+            hash
+        } else {
+            Hash256(leaf.finalize().into())
+        };
+        let height = number(required(&self.meta.height, "meta.height")?, "meta.height")?;
+        if height > 0 {
+            let expected = required(&self.meta.merkle_component_hash, "meta.merkleComponentHash")?;
+            if merkle_component_hash != Hash256(hex_array(expected, "meta.merkleComponentHash")?) {
+                return Err(RestError::Mismatch {
+                    field: "meta.merkleComponentHash",
+                });
+            }
+            if json.version != network.aggregate_version(height) {
+                return Err(RestError::Mismatch { field: "version" });
+            }
+        }
+        Ok(AggregateHeader {
+            hash,
+            merkle_component_hash,
+            transactions_hash: Hash256(transactions_hash),
+            version: json.version,
+        })
+    }
+
+    /// `embedded=true` の検索で平たく並んで返った中のトランザクションから、このアグリゲートのものを
+    /// （`meta.aggregateHash` で）集め、`meta.index` の順に `transactions` に入れたものを返す。
+    /// 返したものを [`TransactionInfo::verify`] にかければ、中のトランザクションまで確かめられる。
+    ///
+    /// 集めたものの `meta.index` が0から抜けなく続いていなければ弾く。
+    pub fn with_embedded(&self, entries: &[TransactionInfo]) -> Result<TransactionInfo, RestError> {
+        let hash = Hash256(hex_array(
+            required(&self.meta.hash, "meta.hash")?,
+            "meta.hash",
+        )?);
+        let mut embedded = Vec::new();
+        for entry in entries {
+            let Some(parent) = &entry.meta.aggregate_hash else {
+                continue;
+            };
+            if Hash256(hex_array(parent, "meta.aggregateHash")?) == hash {
+                embedded.push(entry.clone());
+            }
+        }
+        embedded.sort_by_key(|entry| entry.meta.index);
+        if embedded
+            .iter()
+            .enumerate()
+            .any(|(index, entry)| entry.meta.index != Some(index as u32))
+        {
+            return Err(RestError::InvalidValue {
+                field: "meta.index",
+            });
+        }
+        let mut aggregate = self.clone();
+        aggregate.transaction.body.transactions = Some(embedded);
+        Ok(aggregate)
+    }
+}
+
+/// 署名と手数料と期限を含めた、トランザクションのヘッダーの大きさ
+const TRANSACTION_HEADER_SIZE: usize = 4 + 4 + 64 + 32 + 4 + 1 + 1 + 2 + 8 + 8;
+/// アグリゲートの、中のトランザクションより前の部分。TransactionsHash、中のトランザクションの長さ、予約
+const AGGREGATE_FIXED_SIZE: usize = 32 + 4 + 4;
+/// 連署1つの大きさ。バージョン、公開鍵、署名
+const COSIGNATURE_SIZE: usize = 8 + 32 + 64;

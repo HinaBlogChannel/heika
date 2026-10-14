@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use heika_core::address::Address;
 use heika_core::key::PublicKey;
-use heika_core::network::{NetworkIdentifier, NetworkParameters};
+use heika_core::network::{NetworkIdentifier, NetworkParameters, NetworkTimestamp};
 use heika_core::signature::Signature;
 use heika_transaction::{
     AccountRestriction, AccountRestrictionFlags, AggregateVersion, AliasAction, Body, LinkAction,
@@ -572,7 +572,9 @@ impl Context {
         let Some(network) = self.network else {
             return format!("エポックから {milliseconds} ミリ秒");
         };
-        let deadline = network.epoch() + Duration::from_millis(milliseconds);
+        let Some(deadline) = network.time_of(NetworkTimestamp(milliseconds)) else {
+            return format!("エポックから {milliseconds} ミリ秒");
+        };
         let remaining = match deadline.duration_since(now) {
             Ok(remaining) => format!("あと {}", approximate(remaining)),
             Err(_) => "期限切れ".to_owned(),

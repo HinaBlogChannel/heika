@@ -54,6 +54,30 @@ impl FromStr for GenerationHashSeed {
     }
 }
 
+/// ネットワーク時刻。Nemesis の時刻（ネットワークのエポック）からのミリ秒。catapult の `Timestamp`。
+/// トランザクションの期限やブロックの時刻は、これで書く。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct NetworkTimestamp(pub u64);
+
+impl NetworkTimestamp {
+    /// `duration` だけ後の時刻。ミリ秒より細かいところは切り捨てる。u64 に収まらなければ `None`。
+    pub fn checked_add(self, duration: Duration) -> Option<Self> {
+        let milliseconds = u64::try_from(duration.as_millis()).ok()?;
+        self.0.checked_add(milliseconds).map(Self)
+    }
+
+    /// `duration` だけ前の時刻。ミリ秒より細かいところは切り上げる（前に戻しすぎない）。エポックより前なら `None`。
+    pub fn checked_sub(self, duration: Duration) -> Option<Self> {
+        let milliseconds = u64::try_from(duration.as_nanos().div_ceil(1_000_000)).ok()?;
+        self.0.checked_sub(milliseconds).map(Self)
+    }
+
+    /// `earlier` からの経過。`earlier` のほうが後なら `None`。
+    pub fn duration_since(self, earlier: Self) -> Option<Duration> {
+        self.0.checked_sub(earlier.0).map(Duration::from_millis)
+    }
+}
+
 /// ネットワークごとに決まっている値のうち、heika が使うもの。catapult ではノードの `config-network.properties` に書かれ、
 /// フィールドの名前の後ろに、そこでの名前を添える。メインネットとテストネットの値は、それぞれのノードの設定から写した。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -151,6 +175,20 @@ impl NetworkParameters {
     /// Nemesis の時刻。
     pub fn epoch(&self) -> SystemTime {
         UNIX_EPOCH + self.epoch_adjustment
+    }
+
+    /// ふつうの時刻をネットワーク時刻にする。ミリ秒より細かいところは切り捨てる。
+    /// エポックより前か、u64 のミリ秒に収まらなければ `None`。
+    pub fn timestamp_at(&self, time: SystemTime) -> Option<NetworkTimestamp> {
+        let elapsed = time.duration_since(self.epoch()).ok()?;
+        u64::try_from(elapsed.as_millis())
+            .ok()
+            .map(NetworkTimestamp)
+    }
+
+    /// ネットワーク時刻をふつうの時刻にする。OS の時刻で表せなければ `None`。
+    pub fn time_of(&self, timestamp: NetworkTimestamp) -> Option<SystemTime> {
+        self.epoch().checked_add(Duration::from_millis(timestamp.0))
     }
 
     /// その高さのブロックが入る、ファイナライズのエポック。catapult の `CalculateFinalizationEpochForHeight`。
@@ -354,6 +392,54 @@ const MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES: [(Hash256, Hash256); 20] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_between_system_time_and_network_time() {
+        let network = NetworkParameters::MAINNET;
+        let epoch = network.epoch();
+        assert_eq!(network.timestamp_at(epoch), Some(NetworkTimestamp(0)));
+        // ミリ秒より細かいところは切り捨てる
+        let later = epoch + Duration::from_micros(1_500_999);
+        assert_eq!(network.timestamp_at(later), Some(NetworkTimestamp(1_500)));
+        assert_eq!(
+            network.time_of(NetworkTimestamp(1_500)),
+            Some(epoch + Duration::from_millis(1_500))
+        );
+        // エポックより前は表せない
+        assert_eq!(network.timestamp_at(epoch - Duration::from_millis(1)), None);
+        // 同じ時刻でも、ネットワークごとにエポックが違う
+        assert_ne!(
+            NetworkParameters::TESTNET.timestamp_at(later),
+            network.timestamp_at(later)
+        );
+    }
+
+    #[test]
+    fn adds_and_subtracts_durations() {
+        let deadline = NetworkTimestamp(1_000);
+        assert_eq!(
+            deadline.checked_add(Duration::from_secs(2 * 60 * 60)),
+            Some(NetworkTimestamp(1_000 + 7_200_000))
+        );
+        assert_eq!(
+            deadline.checked_add(Duration::from_micros(1_999)),
+            Some(NetworkTimestamp(1_001))
+        );
+        assert_eq!(
+            deadline.checked_sub(Duration::from_micros(1_001)),
+            Some(NetworkTimestamp(998))
+        );
+        assert_eq!(deadline.checked_sub(Duration::from_millis(1_001)), None);
+        assert_eq!(
+            NetworkTimestamp(u64::MAX).checked_add(Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            NetworkTimestamp(1_500).duration_since(deadline),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(deadline.duration_since(NetworkTimestamp(1_500)), None);
+    }
 
     #[test]
     fn finds_parameters_by_identifier() {

@@ -92,11 +92,23 @@ fn connect() -> Option<(Node, String)> {
 }
 
 /// REST の `path` を取る。失敗したときは、オリジンを出さずに `path` だけを出す。
+///
+/// 公開されている REST は問い合わせの数を絞っていて、多すぎると 429 を返すので、そのときは待つ時間を延ばしながら取り直す。
 fn rest(origin: &str, path: &str) -> Value {
-    let body = ureq::get(&format!("{origin}{path}"))
-        .call()
-        .and_then(|mut response| response.body_mut().read_to_string())
-        .unwrap_or_else(|error| panic!("REST の {path}: {error}"));
+    let url = format!("{origin}{path}");
+    let mut wait = Duration::from_secs(1);
+    let body = loop {
+        match ureq::get(&url)
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_string())
+        {
+            Err(ureq::Error::StatusCode(429)) if wait <= Duration::from_secs(16) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            result => break result.unwrap_or_else(|error| panic!("REST の {path}: {error}")),
+        }
+    };
     serde_json::from_str(&body).unwrap_or_else(|error| panic!("REST の {path}: {error}"))
 }
 

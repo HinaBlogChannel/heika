@@ -17,6 +17,7 @@ heika-block = { path = "../heika-block" }
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core" }
 heika-p2p = { path = "../heika-p2p" }
+heika-rest = { path = "../heika-rest" }
 heika-tls = { path = "../heika-tls" }
 heika-transaction = { path = "../heika-transaction" }
 heika-wallet = { path = "../heika-wallet" }

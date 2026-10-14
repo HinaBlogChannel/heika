@@ -55,6 +55,11 @@ impl fmt::Display for RestError {
 
 impl std::error::Error for RestError {}
 
+/// バイト列を、REST と同じ大文字の16進にする。
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
 /// 決まった長さの16進の文字列を読む。REST は大文字で返すが、小文字も受け付ける。
 fn hex_array<const N: usize>(text: &str, field: &'static str) -> Result<[u8; N], RestError> {
     hex_vec(text, field)?

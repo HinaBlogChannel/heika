@@ -1,5 +1,7 @@
 //! ネームスペース。catbuffer の `namespace/`。
 
+use std::fmt;
+
 use heika_core::address::Address;
 use sha3::{Digest, Sha3_256};
 
@@ -23,7 +25,65 @@ impl NamespaceId {
         let id = u64::from_le_bytes(hash[..8].try_into().expect("8 bytes"));
         Self(id | 1 << 63)
     }
+
+    /// ドットで区切ったフルネームから ID を求める。公式の SDK の `generate_mosaic_alias_id` と同じく、
+    /// [`NamespaceId::path`] の最後の ID。`symbol.xym` なら、通貨のモザイクに付いているネームスペースになる。
+    pub fn from_full_name(full_name: &str) -> Result<Self, InvalidNamespaceName> {
+        Ok(*Self::path(full_name)?
+            .last()
+            .expect("split yields at least one part"))
+    }
+
+    /// ドットで区切ったフルネームを、ルートから順の ID の並びにする。公式の SDK の `generate_namespace_path`。
+    /// どの部分も [`is_valid_namespace_name`] を満たさなければならない。
+    ///
+    /// 名前の長さと深さの上限はネットワークの設定（`maxNameSize` と `maxNamespaceDepth`）で決まるので、ここでは確かめない。
+    pub fn path(full_name: &str) -> Result<Vec<Self>, InvalidNamespaceName> {
+        let mut parent = None;
+        full_name
+            .split('.')
+            .map(|name| {
+                if !is_valid_namespace_name(name.as_bytes()) {
+                    return Err(InvalidNamespaceName(name.to_owned()));
+                }
+                let id = Self::generate(parent, name.as_bytes());
+                parent = Some(id);
+                Ok(id)
+            })
+            .collect()
+    }
 }
+
+/// ネームスペースの名前として使えるか。catapult の `IsValidName` と同じく、空でなく、
+/// 英小文字と数字と `-` と `_` だけで、最初は英小文字か数字でなければならない。
+pub fn is_valid_namespace_name(name: &[u8]) -> bool {
+    let is_alphanumeric = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    match name.split_first() {
+        Some((first, rest)) => {
+            is_alphanumeric(first)
+                && rest
+                    .iter()
+                    .all(|byte| is_alphanumeric(byte) || *byte == b'-' || *byte == b'_')
+        }
+        None => false,
+    }
+}
+
+/// フルネームに、ネームスペースの名前として使えない部分がある。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InvalidNamespaceName(pub String);
+
+impl fmt::Display for InvalidNamespaceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ネームスペースの名前として使えない部分があります: {:?}（英小文字、数字、- と _ だけで、英小文字か数字で始めます）",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidNamespaceName {}
 
 /// ルートか、どの親の下のサブネームスペースか。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -176,6 +236,45 @@ mod tests {
     use super::*;
     use crate::Body;
     use crate::testing::{decode, round_trip};
+
+    #[test]
+    fn finds_the_currency_namespace_from_its_full_name() {
+        let symbol = NamespaceId::generate(None, b"symbol");
+        let xym = NamespaceId::generate(Some(symbol), b"xym");
+        // 通貨のモザイクに付いているネームスペースの ID は、チェーンに記録されているもの
+        assert_eq!(xym, NamespaceId(0xE74B_99BA_41F4_AFEE));
+        assert_eq!(NamespaceId::path("symbol.xym"), Ok(vec![symbol, xym]));
+        assert_eq!(NamespaceId::from_full_name("symbol.xym"), Ok(xym));
+        assert_eq!(NamespaceId::from_full_name("symbol"), Ok(symbol));
+    }
+
+    #[test]
+    fn refuses_full_names_with_invalid_parts() {
+        for (full_name, part) in [
+            ("", ""),
+            ("symbol.", ""),
+            (".xym", ""),
+            ("Symbol.xym", "Symbol"),
+            ("symbol._xym", "_xym"),
+            ("symbol.x ym", "x ym"),
+        ] {
+            assert_eq!(
+                NamespaceId::path(full_name),
+                Err(InvalidNamespaceName(part.to_owned())),
+                "{full_name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_names_like_catapult() {
+        for name in ["a", "0", "a-b_c", "9-", "heika_2026"] {
+            assert!(is_valid_namespace_name(name.as_bytes()), "{name}");
+        }
+        for name in ["", "-a", "_a", "A", "a.b", "a b", "あ"] {
+            assert!(!is_valid_namespace_name(name.as_bytes()), "{name}");
+        }
+    }
 
     fn registration(registration_type: NamespaceRegistrationType) -> NamespaceRegistration {
         NamespaceRegistration {

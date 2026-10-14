@@ -10,6 +10,7 @@ use std::fmt;
 
 pub mod block;
 pub mod merkle;
+pub mod statement;
 pub mod transaction;
 
 /// REST の JSON を heika の型にできなかった。

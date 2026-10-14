@@ -166,6 +166,28 @@ impl Transaction {
         }
     }
 
+    /// バイト数。アグリゲートなら、今付いている連署も数える。
+    pub fn size(&self) -> usize {
+        self.to_bytes().len()
+    }
+
+    /// 手数料の倍率 `fee_multiplier` で、ブロックに入れてもらうのに要る手数料。
+    /// catapult の `CalculateTransactionFee` と同じく、バイト数に倍率を掛けたもの。
+    ///
+    /// アグリゲートにこれから連署が付くなら、その数を `cosignature_count` に渡す。連署1つで104バイト増え、
+    /// ノードは連署の付いたあとのバイト数で手数料を確かめる。公式の SDK の `calculate_transaction_fee` と同じ。
+    pub fn fee_for(&self, fee_multiplier: u32, cosignature_count: usize) -> u64 {
+        let size =
+            self.size() as u64 + aggregate::COSIGNATURE_SIZE as u64 * cosignature_count as u64;
+        size.saturating_mul(fee_multiplier.into())
+    }
+
+    /// 手数料から、ブロックに入れてもらえる倍率の上限を求める。catapult の `CalculateTransactionMaxFeeMultiplier`。
+    /// ハーベストする人は、ブロックの倍率がこれ以下のときだけ、このトランザクションを入れられる。
+    pub fn max_fee_multiplier(&self) -> u32 {
+        u32::try_from(self.fee / self.size() as u64).unwrap_or(u32::MAX)
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut body = Vec::new();
         self.body.encode(&mut body);
@@ -965,6 +987,39 @@ mod tests {
 
     fn cosigner_key() -> PrivateKey {
         PrivateKey::from_bytes(&[7; 32])
+    }
+
+    #[test]
+    fn calculates_the_fee_from_the_size() {
+        let transaction = vrf_key_link();
+        let size = transaction.to_bytes().len();
+        assert_eq!(transaction.size(), size);
+        assert_eq!(transaction.fee_for(100, 0), size as u64 * 100);
+        // これから付く連署の分も数える
+        assert_eq!(transaction.fee_for(100, 2), (size as u64 + 2 * 104) * 100);
+        assert_eq!(transaction.fee_for(0, 2), 0);
+    }
+
+    #[test]
+    fn counts_attached_cosignatures_in_the_size() {
+        let mut transaction = aggregate_complete();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        let before = transaction.fee_for(100, 1);
+        transaction.cosign(&cosigner_key(), &seed()).unwrap();
+        assert_eq!(transaction.fee_for(100, 0), before);
+    }
+
+    #[test]
+    fn calculates_the_max_fee_multiplier() {
+        let mut transaction = vrf_key_link();
+        let size = transaction.size() as u64;
+        transaction.fee = size * 100 + size - 1;
+        assert_eq!(transaction.max_fee_multiplier(), 100);
+        transaction.fee = 0;
+        assert_eq!(transaction.max_fee_multiplier(), 0);
+        // 倍率は u32 なので、それより大きければ上限に丸める
+        transaction.fee = u64::MAX;
+        assert_eq!(transaction.max_fee_multiplier(), u32::MAX);
     }
 
     #[test]

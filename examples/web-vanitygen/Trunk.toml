@@ -1,3 +1,7 @@
 [build]
 # code-server のプロキシや GitHub Pages の /heika/ の下でも動くように、相対パスにする
 public_url = "./"
+
+[serve]
+# 自動の再読み込みは WebSocket を使い、code-server のプロキシ越しだと届いたものを読めずにエラーを出すので切る
+no_autoreload = true

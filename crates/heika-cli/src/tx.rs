@@ -96,7 +96,7 @@ pub enum TxCommand {
 pub struct Unsigned {
     /// 手数料は、トランザクションのバイト数にこれを掛けたもの
     #[arg(long, default_value_t = 100)]
-    fee_multiplier: u64,
+    fee_multiplier: u32,
     /// 期限を今から何時間後にするか。ネットワークの設定 maxTransactionLifetime より先にはできない
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=MAX_TRANSACTION_LIFETIME_HOURS))]
     deadline_hours: u64,
@@ -128,10 +128,8 @@ impl Unsigned {
             network_milliseconds(network, deadline)?,
             Body::AggregateComplete(aggregate),
         );
-        let size = transaction.to_bytes().len() as u64;
-        transaction.fee = size
-            .checked_mul(self.fee_multiplier)
-            .ok_or_else(|| "--fee-multiplier が大きすぎます".to_owned())?;
+        let size = transaction.size();
+        transaction.fee = transaction.fee_for(self.fee_multiplier, 0);
         write_new(&self.out, &transaction.to_bytes())?;
 
         outln!(

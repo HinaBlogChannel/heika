@@ -19,7 +19,7 @@ const EMBEDDED_HEADER_SIZE: usize = 4 + 4 + 32 + 4 + 1 + 1 + 2;
 pub(crate) const FIXED_SIZE: usize = 32 + 4 + 4;
 
 /// 連署の長さ。バージョン、署名者の公開鍵、署名。
-const COSIGNATURE_SIZE: usize = 8 + 32 + 64;
+pub(crate) const COSIGNATURE_SIZE: usize = 8 + 32 + 64;
 
 /// アグリゲートの中のトランザクション。catbuffer の `EmbeddedTransaction` に、種類ごとの本体が続く。
 #[derive(Clone, PartialEq, Eq, Debug)]

@@ -86,8 +86,18 @@ fn App() -> impl IntoView {
                     return;
                 }
             };
+            let sender = worker.clone();
+            let prefix = prefix.clone();
             let onmessage = Closure::<dyn Fn(MessageEvent)>::new(move |event: MessageEvent| {
                 let data = event.data();
+                // WASM を読み終えた Worker に、先頭の文字を渡して探させる
+                if data.as_string().as_deref() == Some("ready") {
+                    if sender.post_message(&JsValue::from_str(&prefix)).is_err() {
+                        failure.set(Some("Worker に先頭の文字を渡せません".into()));
+                        stop();
+                    }
+                    return;
+                }
                 if let Some(count) = data.as_f64() {
                     tried.update(|tried| *tried += count as u64);
                     elapsed.set((now() - started.get_untracked()) / 1000.0);
@@ -104,11 +114,6 @@ fn App() -> impl IntoView {
             worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
             // Worker を止めたあとは呼ばれないので、閉じ込めた値ごと残しておく
             onmessage.forget();
-            if worker.post_message(&JsValue::from_str(&prefix)).is_err() {
-                failure.set(Some("Worker に先頭の文字を渡せません".into()));
-                stop();
-                return;
-            }
             workers.update_value(|workers| workers.push(worker));
         }
         running.set(true);

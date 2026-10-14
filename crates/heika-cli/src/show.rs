@@ -497,12 +497,10 @@ impl Context {
 
     /// アドレスかネームスペース。アドレスなら、このネットワークのものか、チェックサムが合うかも確かめる
     fn address(&self, address: &UnresolvedAddress) -> String {
-        let bytes = address.0;
-        if bytes[0] & 1 == 1 {
-            let id = u64::from_le_bytes(bytes[1..9].try_into().expect("8 bytes"));
-            return format!("ネームスペース {}", namespace_id(NamespaceId(id)));
-        }
-        let address = Address(bytes);
+        let Some(address) = address.address() else {
+            let id = address.namespace_id().expect("not an address");
+            return format!("ネームスペース {}", namespace_id(id));
+        };
         let warning = if address.network() != self.raw {
             "（別のネットワークのアドレス）"
         } else if !address.has_valid_checksum() {
@@ -534,12 +532,14 @@ impl Context {
 
     /// まだ解決していないモザイクの ID。最上位ビットが立っていればネームスペース
     fn mosaic_id(&self, id: UnresolvedMosaicId) -> String {
-        let name = if id.0 >> 63 == 1 {
-            format!("ネームスペース {}", namespace_id(NamespaceId(id.0)))
-        } else {
-            mosaic_id(MosaicId(id.0))
+        let name = match id.mosaic_id() {
+            Some(mosaic) => mosaic_id(mosaic),
+            None => format!(
+                "ネームスペース {}",
+                namespace_id(id.namespace_id().expect("not a mosaic"))
+            ),
         };
-        if self.is_currency(id) && id.0 >> 63 == 0 {
+        if self.is_currency(id) && id.mosaic_id().is_some() {
             format!("{name}（XYM）")
         } else {
             name

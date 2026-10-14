@@ -15,6 +15,7 @@
 //!
 //! ブロックは作らずに読むだけなので、catapult が確かめない予約の部分は確かめない。
 
+pub mod finalization;
 pub mod statement;
 
 use std::fmt;

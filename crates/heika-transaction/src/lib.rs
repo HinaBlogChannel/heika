@@ -261,6 +261,30 @@ impl Transaction {
         Ok(())
     }
 
+    /// 署名するバイト列。generation hash seed に、署名の対象の部分を続けたもの。公式の SDK の `extract_signing_payload`。
+    /// 秘密鍵を別の場所（ハードウェアや別のプロセス）に置いて署名するときは、これを Ed25519 で署名して
+    /// [`Transaction::attach_signature`] で付ける。
+    pub fn signing_payload(&self, generation_hash_seed: &GenerationHashSeed) -> Vec<u8> {
+        let bytes = self.to_bytes();
+        [&generation_hash_seed.0[..], self.signed_part(&bytes)].concat()
+    }
+
+    /// 別の場所で作った署名を付ける。公式の SDK の `attach_signature` と違い、署名者の公開鍵で
+    /// 検証できない署名は付けない。
+    pub fn attach_signature(
+        &mut self,
+        signature: Signature,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<(), SignError> {
+        let mut signed = self.clone();
+        signed.signature = signature;
+        if !signed.verify(generation_hash_seed) {
+            return Err(SignError::InvalidSignature);
+        }
+        self.signature = signature;
+        Ok(())
+    }
+
     /// 署名を検証する。catapult の `SignatureValidator` と同じく、
     /// generation hash seed に続けて、署名の対象の部分に署名されていることを確かめる。
     pub fn verify(&self, generation_hash_seed: &GenerationHashSeed) -> bool {
@@ -733,12 +757,15 @@ impl std::error::Error for DecodeError {}
 pub enum SignError {
     /// 秘密鍵が、署名者の公開鍵と合わない
     KeyMismatch,
+    /// 付けようとした署名が、署名者の公開鍵で検証できない
+    InvalidSignature,
 }
 
 impl fmt::Display for SignError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::KeyMismatch => f.write_str("秘密鍵が署名者の公開鍵と合いません"),
+            Self::InvalidSignature => f.write_str("署名が、署名者の公開鍵で検証できません"),
         }
     }
 }
@@ -1091,6 +1118,30 @@ mod tests {
         cosigned.sign(&private_key(), &seed()).unwrap();
         cosigned.cosign(&cosigner_key(), &seed()).unwrap();
         assert_eq!(transaction, cosigned);
+    }
+
+    #[test]
+    fn signs_the_payload_elsewhere_and_attaches_the_signature() {
+        for mut transaction in [vrf_key_link(), aggregate_complete()] {
+            let payload = transaction.signing_payload(&seed());
+            assert_eq!(payload[..32], seed().0);
+            let signature = private_key().sign(&[&payload]);
+
+            let mut signed = transaction.clone();
+            signed.sign(&private_key(), &seed()).unwrap();
+            assert_eq!(signed.signature, signature);
+
+            // 別のネットワークの署名や、壊した署名は付けない
+            let other =
+                private_key().sign(&[&transaction.signing_payload(&GenerationHashSeed([0; 32]))]);
+            assert_eq!(
+                transaction.attach_signature(other, &seed()),
+                Err(SignError::InvalidSignature)
+            );
+            assert_eq!(transaction.signature, Signature([0; 64]));
+            transaction.attach_signature(signature, &seed()).unwrap();
+            assert_eq!(transaction, signed);
+        }
     }
 
     #[test]

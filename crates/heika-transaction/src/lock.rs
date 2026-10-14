@@ -1,6 +1,8 @@
 //! ロック。catbuffer の `lock_hash/` と `lock_secret/`。
 
+use heika_core::address::Address;
 use heika_core::hash::Hash256;
+use sha3::{Digest, Sha3_256};
 
 use crate::bounded::BoundedVec;
 use crate::mosaic::UnresolvedMosaic;
@@ -142,6 +144,17 @@ impl SecretProof {
     }
 }
 
+/// チェーンに記録されたシークレットロックの1件を指すハッシュ。catapult の `CalculateSecretLockInfoHash` で、
+/// シークレットと受取人のアドレスを続けた SHA3-256。受取人は、ネームスペースを解決したあとのアドレス。
+pub fn secret_lock_key(secret: &Hash256, recipient: &Address) -> Hash256 {
+    Hash256(
+        Sha3_256::new()
+            .chain_update(secret.0)
+            .chain_update(recipient.0)
+            .finalize()
+            .into(),
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +167,16 @@ mod tests {
             mosaic_id: UnresolvedMosaicId(0x0102),
             amount: 10,
         }
+    }
+
+    #[test]
+    fn hashes_the_secret_and_the_recipient() {
+        let mut data = vec![0x11; 32];
+        data.extend_from_slice(&[0x98; 24]);
+        assert_eq!(
+            secret_lock_key(&Hash256([0x11; 32]), &Address([0x98; 24])),
+            Hash256(Sha3_256::digest(&data).into())
+        );
     }
 
     #[test]

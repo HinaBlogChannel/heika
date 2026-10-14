@@ -5,6 +5,7 @@ pub mod bip39;
 pub mod cipher;
 pub mod harvest_request;
 pub mod keystore;
+pub mod message;
 pub mod slip10;
 
 #[cfg(test)]

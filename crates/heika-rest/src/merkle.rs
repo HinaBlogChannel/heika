@@ -64,3 +64,12 @@ impl TryFrom<&MerkleStateInfo> for Vec<TreeNode> {
         TreeNode::decode_all(&hex_vec(&info.raw, "raw")?).map_err(RestError::InvalidTreeNodes)
     }
 }
+
+impl MerkleStateInfo {
+    /// 経路をたどり直して、`key` の状態の木での値を求める。あれば `Some(状態のハッシュ)`、ないことが示されれば `None`。
+    /// `root` は、同じ時点のブロックの9本の根のうち、その状態の木の根（[`heika_core::patricia::SubCache::index`]）。
+    pub fn prove(&self, key: &Hash256, root: &Hash256) -> Result<Option<Hash256>, RestError> {
+        let nodes = Vec::<TreeNode>::try_from(self)?;
+        heika_core::patricia::prove(key, &nodes, root).map_err(RestError::InvalidProof)
+    }
+}

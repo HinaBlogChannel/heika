@@ -116,6 +116,56 @@ impl Cosignature {
     }
 }
 
+/// アグリゲートから切り離して受け渡す連署。catbuffer の `DetachedCosignature`。
+/// ボンデッドのアグリゲートに、あとから連署を集めるときに使う。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DetachedCosignature {
+    pub cosignature: Cosignature,
+    /// 連署したアグリゲートのハッシュ
+    pub parent_hash: Hash256,
+}
+
+impl DetachedCosignature {
+    /// バージョン（予約で0）、署名者の公開鍵、署名、アグリゲートのハッシュ。
+    pub const SIZE: usize = COSIGNATURE_SIZE + 32;
+
+    /// アグリゲートのハッシュに連署する。
+    pub fn sign(private_key: &PrivateKey, parent_hash: &Hash256) -> Self {
+        Self {
+            cosignature: Cosignature::sign(private_key, parent_hash),
+            parent_hash: *parent_hash,
+        }
+    }
+
+    /// 連署が、書いてあるアグリゲートのハッシュに対して正しいか。
+    pub fn verify(&self) -> bool {
+        self.cosignature.verify(&self.parent_hash)
+    }
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
+        bytes[8..40].copy_from_slice(&self.cosignature.signer_public_key.0);
+        bytes[40..104].copy_from_slice(&self.cosignature.signature.0);
+        bytes[104..].copy_from_slice(&self.parent_hash.0);
+        bytes
+    }
+
+    /// バイト列から読む。アグリゲートの中の連署と同じく、バージョンは0でなければならない。
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::exact(bytes, Self::SIZE)?;
+        if reader.u64() != 0 {
+            return Err(DecodeError::NonZeroReserved);
+        }
+        Ok(Self {
+            cosignature: Cosignature {
+                signer_public_key: PublicKey(reader.array()),
+                signature: Signature(reader.array()),
+            },
+            parent_hash: Hash256(reader.array()),
+        })
+    }
+}
+
 /// アグリゲートの構造のバージョン。形は同じで、署名の範囲と、中のトランザクションのハッシュの決まりが違う。
 ///
 /// 新しく作るのはいつもバージョン 3。それより前のものは、チェーンにあるものを読むためだけに扱う。
@@ -402,6 +452,35 @@ mod tests {
             Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => aggregate,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn detaches_a_cosignature_with_its_parent_hash() {
+        let private_key = PrivateKey::from_bytes(&[7; 32]);
+        let parent = Hash256([0x11; 32]);
+        let detached = DetachedCosignature::sign(&private_key, &parent);
+        assert!(detached.verify());
+        let bytes = detached.to_bytes();
+        assert_eq!(bytes[..8], [0; 8]);
+        assert_eq!(bytes[104..], [0x11; 32]);
+        assert_eq!(DetachedCosignature::from_bytes(&bytes), Ok(detached));
+
+        let other = DetachedCosignature {
+            parent_hash: Hash256([0x22; 32]),
+            ..detached
+        };
+        assert!(!other.verify());
+
+        let mut versioned = bytes;
+        versioned[0] = 1;
+        assert_eq!(
+            DetachedCosignature::from_bytes(&versioned),
+            Err(DecodeError::NonZeroReserved)
+        );
+        assert_eq!(
+            DetachedCosignature::from_bytes(&bytes[..135]),
+            Err(DecodeError::InvalidBodySize)
+        );
     }
 
     #[test]

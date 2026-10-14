@@ -21,8 +21,8 @@ mod scan;
 mod transfer;
 
 pub use aggregate::{
-    Aggregate, AggregateVersion, Cosignature, EmbeddedTransaction, NestedAggregate,
-    TransactionsHashCalculation,
+    Aggregate, AggregateVersion, Cosignature, DetachedCosignature, EmbeddedTransaction,
+    NestedAggregate, TransactionsHashCalculation,
 };
 pub use bounded::{BoundedVec, TooLong};
 pub use lock::{HashLock, LockHashAlgorithm, SecretLock, SecretProof, secret_lock_key};
@@ -330,29 +330,58 @@ impl Transaction {
         private_key: &PrivateKey,
         generation_hash_seed: &GenerationHashSeed,
     ) -> Result<(), CosignError> {
+        let hash = self.hash_to_cosign(generation_hash_seed)?;
+        self.add_cosignature(Cosignature::sign(private_key, &hash))
+    }
+
+    /// 切り離して集めた連署を、アグリゲートに付ける。[`Transaction::cosign`] と同じものを弾くほか、
+    /// 連署したアグリゲートがこれでないものと、署名が正しくないものも弾く。
+    pub fn attach_cosignature(
+        &mut self,
+        detached: &DetachedCosignature,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<(), CosignError> {
+        let hash = self.hash_to_cosign(generation_hash_seed)?;
+        if detached.parent_hash != hash {
+            return Err(CosignError::OtherParent);
+        }
+        if !detached.verify() {
+            return Err(CosignError::InvalidSignature);
+        }
+        self.add_cosignature(detached.cosignature)
+    }
+
+    /// 連署の対象になるハッシュ。署名したアグリゲートでなければ連署できない
+    fn hash_to_cosign(
+        &self,
+        generation_hash_seed: &GenerationHashSeed,
+    ) -> Result<Hash256, CosignError> {
         if !Body::is_aggregate_type(self.body.transaction_type()) {
             return Err(CosignError::NotAggregate);
         }
         if self.signature == Signature([0; 64]) {
             return Err(CosignError::NotSigned);
         }
-        let hash = self.hash(generation_hash_seed);
-        let public_key = PublicKey::from_private_key(private_key);
+        Ok(self.hash(generation_hash_seed))
+    }
+
+    /// 外側の署名者やすでに連署した鍵でなければ、連署を足す
+    fn add_cosignature(&mut self, cosignature: Cosignature) -> Result<(), CosignError> {
         let signer_public_key = self.signer_public_key;
         let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) =
             &mut self.body
         else {
-            unreachable!("the type is an aggregate");
+            unreachable!("checked by hash_to_cosign");
         };
-        if public_key == signer_public_key
+        if cosignature.signer_public_key == signer_public_key
             || aggregate
                 .cosignatures()
                 .iter()
-                .any(|cosignature| cosignature.signer_public_key == public_key)
+                .any(|existing| existing.signer_public_key == cosignature.signer_public_key)
         {
             return Err(CosignError::Redundant);
         }
-        aggregate.add_cosignature(Cosignature::sign(private_key, &hash));
+        aggregate.add_cosignature(cosignature);
         Ok(())
     }
 
@@ -724,6 +753,10 @@ pub enum CosignError {
     NotSigned,
     /// 外側の署名者か、すでに連署した鍵
     Redundant,
+    /// 切り離した連署が、別のアグリゲートへのもの
+    OtherParent,
+    /// 切り離した連署の署名が正しくない
+    InvalidSignature,
 }
 
 impl fmt::Display for CosignError {
@@ -734,6 +767,8 @@ impl fmt::Display for CosignError {
             Self::Redundant => {
                 f.write_str("この鍵は署名者か、すでに連署しているので、連署を重ねられません")
             }
+            Self::OtherParent => f.write_str("別のアグリゲートへの連署なので、付けられません"),
+            Self::InvalidSignature => f.write_str("連署の署名が正しくないので、付けられません"),
         }
     }
 }
@@ -1023,6 +1058,39 @@ mod tests {
         // 倍率は u32 なので、それより大きければ上限に丸める
         transaction.fee = u64::MAX;
         assert_eq!(transaction.max_fee_multiplier(), u32::MAX);
+    }
+
+    #[test]
+    fn attaches_a_detached_cosignature() {
+        let mut transaction = aggregate_complete();
+        transaction.sign(&private_key(), &seed()).unwrap();
+        let hash = transaction.hash(&seed());
+        let detached = DetachedCosignature::sign(&cosigner_key(), &hash);
+
+        // 別のアグリゲートへの連署や、署名を壊したものは付けない
+        let other = DetachedCosignature::sign(&cosigner_key(), &Hash256([0; 32]));
+        assert_eq!(
+            transaction.attach_cosignature(&other, &seed()),
+            Err(CosignError::OtherParent)
+        );
+        let mut broken = detached;
+        broken.cosignature.signature.0[0] ^= 1;
+        assert_eq!(
+            transaction.attach_cosignature(&broken, &seed()),
+            Err(CosignError::InvalidSignature)
+        );
+
+        transaction.attach_cosignature(&detached, &seed()).unwrap();
+        assert!(transaction.verify_cosignatures(&seed()));
+        assert_eq!(
+            transaction.attach_cosignature(&detached, &seed()),
+            Err(CosignError::Redundant)
+        );
+        // 自分で連署したのと同じものになる
+        let mut cosigned = aggregate_complete();
+        cosigned.sign(&private_key(), &seed()).unwrap();
+        cosigned.cosign(&cosigner_key(), &seed()).unwrap();
+        assert_eq!(transaction, cosigned);
     }
 
     #[test]

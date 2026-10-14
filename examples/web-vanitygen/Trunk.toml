@@ -1,0 +1,3 @@
+[build]
+# code-server のプロキシや GitHub Pages の /heika/ の下でも動くように、相対パスにする
+public_url = "./"

@@ -1,0 +1,4 @@
+body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+input { font-family: ui-monospace, monospace; font-size: 1.2rem; }
+.address, .secret { font-family: ui-monospace, monospace; word-break: break-all; }
+.failure { color: #b00; }

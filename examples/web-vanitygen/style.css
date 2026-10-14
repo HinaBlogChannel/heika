@@ -18,7 +18,7 @@
 
 html {
   min-height: 100%;
-  background: repeating-linear-gradient(90deg, var(--stripe-a) 0 4px, var(--stripe-b) 4px 8px);
+  background: repeating-linear-gradient(90deg, var(--stripe-a) 0 6px, var(--stripe-b) 6px 12px);
 }
 
 body {

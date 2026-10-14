@@ -477,6 +477,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-rest"
+version = "0.5.0"
+dependencies = [
+ "heika-block",
+ "heika-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "heika-tls"
 version = "0.5.0"
 dependencies = [

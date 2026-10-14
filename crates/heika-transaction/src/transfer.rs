@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use heika_core::address::Address;
+use heika_core::network::NetworkIdentifier;
 
+use crate::mosaic::MosaicId;
+use crate::namespace::NamespaceId;
 use crate::{DecodeError, Reader};
 
 /// まだ解決していないアドレス。アドレスそのものか、アドレスに紐づけたネームスペースのどちらか。
@@ -18,10 +21,60 @@ impl From<Address> for UnresolvedAddress {
     }
 }
 
+impl UnresolvedAddress {
+    /// ネームスペースを指すアドレスにする。公式の SDK の `Address.from_namespace_id` と同じく、
+    /// ネットワークの識別子の最下位ビットを立てた1バイト、ID の8バイト、残りの0を並べる。
+    /// catapult が読むのは、先頭の最下位ビットと ID だけ。
+    pub fn from_namespace_id(namespace_id: NamespaceId, network: NetworkIdentifier) -> Self {
+        let mut bytes = [0; 24];
+        bytes[0] = network.0 | 1;
+        bytes[1..9].copy_from_slice(&namespace_id.0.to_le_bytes());
+        Self(bytes)
+    }
+
+    /// ネームスペースを指していれば、その ID。catapult の `addAddressResolver` と同じく、先頭の最下位ビットで見分ける。
+    pub fn namespace_id(&self) -> Option<NamespaceId> {
+        (self.0[0] & 1 == 1).then(|| {
+            NamespaceId(u64::from_le_bytes(
+                self.0[1..9].try_into().expect("8 bytes"),
+            ))
+        })
+    }
+
+    /// ネームスペースを指していなければ、そのアドレス。
+    pub fn address(&self) -> Option<Address> {
+        (self.0[0] & 1 == 0).then_some(Address(self.0))
+    }
+}
+
 /// まだ解決していないモザイクの ID。モザイクの ID か、モザイクに紐づけたネームスペースの ID のどちらか。
 /// 最上位ビットが1ならネームスペース。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct UnresolvedMosaicId(pub u64);
+
+impl From<MosaicId> for UnresolvedMosaicId {
+    fn from(id: MosaicId) -> Self {
+        Self(id.0)
+    }
+}
+
+impl From<NamespaceId> for UnresolvedMosaicId {
+    fn from(id: NamespaceId) -> Self {
+        Self(id.0)
+    }
+}
+
+impl UnresolvedMosaicId {
+    /// ネームスペースを指していれば、その ID。catapult の `addMosaicResolver` と同じく、最上位ビットで見分ける。
+    pub fn namespace_id(self) -> Option<NamespaceId> {
+        (self.0 >> 63 == 1).then_some(NamespaceId(self.0))
+    }
+
+    /// ネームスペースを指していなければ、そのモザイクの ID。
+    pub fn mosaic_id(self) -> Option<MosaicId> {
+        (self.0 >> 63 == 0).then_some(MosaicId(self.0))
+    }
+}
 
 /// モザイクとメッセージを送る本体。
 ///
@@ -176,6 +229,34 @@ mod tests {
             Body::Transfer(transfer),
         )
         .to_bytes()
+    }
+
+    #[test]
+    fn points_an_address_at_a_namespace() {
+        let id = NamespaceId(0xE74B_99BA_41F4_AFEE);
+        let alias = UnresolvedAddress::from_namespace_id(id, NetworkIdentifier::MAINNET);
+        assert_eq!(alias.0[0], 0x69);
+        assert_eq!(alias.0[1..9], id.0.to_le_bytes());
+        assert_eq!(alias.0[9..], [0; 15]);
+        assert_eq!(alias.namespace_id(), Some(id));
+        assert_eq!(alias.address(), None);
+
+        let address = UnresolvedAddress::from(Address([0x68; 24]));
+        assert_eq!(address.namespace_id(), None);
+        assert_eq!(address.address(), Some(Address([0x68; 24])));
+    }
+
+    #[test]
+    fn tells_mosaics_from_namespaces_by_the_high_bit() {
+        let namespace = UnresolvedMosaicId::from(NamespaceId(0xE74B_99BA_41F4_AFEE));
+        assert_eq!(
+            namespace.namespace_id(),
+            Some(NamespaceId(0xE74B_99BA_41F4_AFEE))
+        );
+        assert_eq!(namespace.mosaic_id(), None);
+        let mosaic = UnresolvedMosaicId::from(MosaicId(0x6BED_913F_A202_23F8));
+        assert_eq!(mosaic.namespace_id(), None);
+        assert_eq!(mosaic.mosaic_id(), Some(MosaicId(0x6BED_913F_A202_23F8)));
     }
 
     #[test]

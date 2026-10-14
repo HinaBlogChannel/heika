@@ -5,3 +5,8 @@ public_url = "./"
 [serve]
 # 自動の再読み込みは WebSocket を使い、code-server のプロキシ越しだと届いたものを読めずにエラーを出すので切る
 no_autoreload = true
+
+[tools]
+# 手元と GitHub Actions で同じものを使う。wasm-bindgen は Cargo.lock の版に合わせる
+wasm_bindgen = "0.2.129"
+wasm_opt = "version_133"

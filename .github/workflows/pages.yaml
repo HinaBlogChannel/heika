@@ -1,0 +1,65 @@
+# v* のタグで、examples のデモをビルドして GitHub Pages に出す。
+# examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ になる。
+# 手で回すと、master のものを出す
+name: Pages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.0
+  TRUNK: 0.21.14
+  TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェイン
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: examples/web-vanitygen
+      - name: trunk
+        run: |
+          curl -sSfLo trunk.tar.gz "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$TRUNK_SHA256  trunk.tar.gz" | sha256sum -c -
+          tar xzf trunk.tar.gz -C "$HOME/.cargo/bin" trunk
+      - name: web-vanitygen
+        working-directory: examples/web-vanitygen
+        run: trunk build --release --locked
+      - name: サイトの形に並べる
+        run: |
+          mkdir -p site/examples
+          cp -r examples/web-vanitygen/dist site/examples/web-vanitygen
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}examples/web-vanitygen/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

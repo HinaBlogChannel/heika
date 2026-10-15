@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+pub mod balance;
 pub mod block;
 pub mod merkle;
 pub mod state;

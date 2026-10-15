@@ -379,7 +379,8 @@ jobs:
           fi
           mkdir out
           "$build_tools/zipalign" -p 4 "$unsigned" aligned.apk
-          "$build_tools/apksigner" sign \
+          # v4 の署名は adb の incremental install にしか使わず、別の .idsig ファイルになるので付けない
+          "$build_tools/apksigner" sign --v4-signing-enabled false \
             --ks "$keystore" --ks-type PKCS12 --ks-key-alias heika --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             --out "out/$apk" aligned.apk
           rm -f "$keystore"

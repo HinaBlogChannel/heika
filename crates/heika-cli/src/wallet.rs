@@ -3,8 +3,7 @@
 //! キーストアは age 形式のファイル1つで、heika がなくても `age -d` で開ける。
 //! パスフレーズは端末から聞く。標準入力は、取り込む秘密を渡すのに使う。
 
-use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -12,15 +11,12 @@ use clap::{Args, Subcommand};
 use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
-use heika_wallet::age;
 use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::keystore::{Account, Entry, Keystore, KeystoreError, Secret, check_label};
+use heika_wallet::keystore_file;
 use zeroize::Zeroizing;
 
-use crate::{Failure, Network, Words, create_secret_file, read_secret, terminal, write_secret};
-
-/// キーストアのファイルの名前
-const FILE_NAME: &str = "keystore.age";
+use crate::{Failure, Network, Words, read_secret, terminal, write_secret};
 
 #[derive(Subcommand)]
 pub enum WalletCommand {
@@ -358,7 +354,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             if *next == *passphrase {
                 return Err("前と同じパスフレーズです".to_owned().into());
             }
-            let backup = with_suffix(&path, ".bak");
+            let backup = keystore_file::backup_path(&path);
             // 書くと、前のファイルが .bak になる。消すかは、書く前に決めておく
             let remove_backup = if remove_backup || keep_backup || new_passphrase_file.is_some() {
                 remove_backup
@@ -378,14 +374,9 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 );
                 return Ok(());
             }
-            fs::remove_file(&backup)
-                .and_then(|()| sync_directory(directory_of(&path)).map_err(io::Error::other))
-                .map_err(|error| {
-                    format!(
-                        "{} を消せませんでした。前のパスフレーズで開けるので、手で消してください: {error}",
-                        backup.display()
-                    )
-                })?;
+            keystore_file::remove_backup(&path).map_err(|error| {
+                format!("{error}。前のパスフレーズで開けるかもしれないので、残っていれば手で消してください")
+            })?;
             outln!(
                 "前のパスフレーズで開ける {} を消しました。ただし、ファイルを消しても、ディスクの上から読めなくなるとは限りません",
                 backup.display()
@@ -442,7 +433,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             }
             outln!(
                 "前の中身は {} に残っています。残したくないときは、このファイルも消してください",
-                with_suffix(&path, ".bak").display()
+                keystore_file::backup_path(&path).display()
             );
         }
     }
@@ -622,110 +613,16 @@ fn describe(store: &Keystore, label: &str, bip39_passphrase: &str) -> Result<(),
     Ok(())
 }
 
-/// キーストアを置く場所。OS ごとに、ユーザーのデータを置くところの下の heika。
+/// キーストアを置く場所。--keystore がないときに使う
 fn default_path() -> Result<PathBuf, String> {
-    let var = |name| {
-        env::var_os(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    };
-    let directory = if cfg!(windows) {
-        var("LOCALAPPDATA").ok_or("LOCALAPPDATA がないので、--keystore で場所を指定してください")?
-    } else if cfg!(target_os = "macos") {
-        var("HOME")
-            .ok_or("HOME がないので、--keystore で場所を指定してください")?
-            .join("Library/Application Support")
-    } else {
-        match var("XDG_DATA_HOME") {
-            Some(directory) => directory,
-            None => var("HOME")
-                .ok_or("HOME がないので、--keystore で場所を指定してください")?
-                .join(".local/share"),
-        }
-    };
-    Ok(directory.join("heika").join(FILE_NAME))
+    keystore_file::default_path()
+        .map_err(|error| format!("{error}。--keystore で場所を指定してください"))
 }
 
-/// キーストアを書く。どこで落ちても、古いファイルか新しいファイルのどちらかが完全な形で残るようにする。
-///
-/// 同じフォルダーの一時ファイルに書いて同期し、読み戻して同じパスフレーズで開けることを確かめてから、
-/// 前のファイルを `.bak` に写し、一時ファイルを本来の名前に置き換えて、フォルダーも同期する。
+/// キーストアを、どこで落ちても壊れないように書く
 fn save(path: &Path, keystore: &Keystore, passphrase: &str) -> Result<(), String> {
-    let directory = directory_of(path);
-    create_private_directory(directory)?;
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
-    let sealed = keystore.seal(&mut rng, passphrase.as_bytes(), age::DEFAULT_WORK_FACTOR);
-
-    let temporary = with_suffix(path, ".tmp");
-    // 前に落ちたときの一時ファイルが残っていれば消す。本来のファイルではないので、消しても失うものはない
-    match fs::remove_file(&temporary) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "{} を消せませんでした: {error}",
-                temporary.display()
-            ));
-        }
-    }
-    let mut file = create_secret_file(&temporary)?;
-    file.write_all(&sealed)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| format!("{} に書けませんでした: {error}", temporary.display()))?;
-    drop(file);
-
-    let written = fs::read(&temporary)
-        .map_err(|error| format!("{} を読み戻せませんでした: {error}", temporary.display()))?;
-    let reopened = Keystore::open(passphrase.as_bytes(), &written)
-        .map_err(|error| format!("書いたキーストアを開き直せませんでした: {error}"))?;
-    if *reopened.to_text() != *keystore.to_text() {
-        return Err("書いたキーストアの中身が、書こうとしたものと違います".to_owned());
-    }
-
-    if path.exists() {
-        let backup = with_suffix(path, ".bak");
-        fs::copy(path, &backup)
-            .and_then(|_| OpenOptions::new().write(true).open(&backup)?.sync_all())
-            .map_err(|error| format!("{} を作れませんでした: {error}", backup.display()))?;
-    }
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("{} に置き換えられませんでした: {error}", path.display()))?;
-    sync_directory(directory)
-}
-
-/// キーストアを置くフォルダー。ファイルの名前だけなら、今のフォルダー
-fn directory_of(path: &Path) -> &Path {
-    path.parent()
-        .filter(|directory| !directory.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-/// キーストアのフォルダーを作る。Unix では自分だけが入れるようにする。
-fn create_private_directory(directory: &Path) -> Result<(), String> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(directory)
-        .map_err(|error| format!("{} を作れませんでした: {error}", directory.display()))
-}
-
-/// 置き換えたことをフォルダーに書き込む。Windows ではフォルダーを開いて同期できないので、何もしない
-fn sync_directory(directory: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    fs::File::open(directory)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("{} を同期できませんでした: {error}", directory.display()))?;
-    #[cfg(not(unix))]
-    let _ = directory;
-    Ok(())
+    keystore_file::save(&mut rng, path, keystore, passphrase).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -733,46 +630,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_crash_safely_and_keeps_a_backup() {
-        let directory = env::temp_dir().join(format!("heika-wallet-test-{}", std::process::id()));
-        let path = directory.join("nested").join(FILE_NAME);
-        save(&path, &Keystore::new(), "first").unwrap();
-        let first = fs::read(&path).unwrap();
-        assert!(Keystore::open(b"first", &first).is_ok());
-        assert!(!with_suffix(&path, ".bak").exists());
-        assert!(!with_suffix(&path, ".tmp").exists());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&path), 0o600);
-            assert_eq!(mode(path.parent().unwrap()), 0o700);
-        }
-
-        let mut keystore = Keystore::new();
-        keystore
-            .add(Entry {
-                secret: Secret::PrivateKey(PrivateKey::from_bytes(&[1; 32])),
-                accounts: vec![Account {
-                    network: NetworkIdentifier::TESTNET,
-                    index: None,
-                    label: "a".to_owned(),
-                }],
-            })
-            .unwrap();
-        // 前に落ちたときの一時ファイルが残っていても書ける
-        fs::write(with_suffix(&path, ".tmp"), b"broken").unwrap();
-        save(&path, &keystore, "second").unwrap();
-        let backup = fs::read(with_suffix(&path, ".bak")).unwrap();
-        assert_eq!(backup, first);
-        let second = Keystore::open(b"second", &fs::read(&path).unwrap()).unwrap();
-        assert_eq!(second.accounts().count(), 1);
-        fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
     fn reads_the_first_line_of_a_passphrase_file() {
-        let path = env::temp_dir().join(format!("heika-passphrase-test-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("heika-passphrase-test-{}", std::process::id()));
         fs::write(&path, "correct horse\r\nignored\n").unwrap();
         assert_eq!(*read_passphrase_file(&path).unwrap(), "correct horse");
         fs::write(&path, "\n").unwrap();

@@ -78,7 +78,10 @@ jobs:
       - name: ビルド
         run: |
           $TAURI_CLI icon icon.png
-          $TAURI_CLI build
+          $TAURI_CLI build 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: heika-gui-${{ runner.os }}
@@ -120,7 +123,10 @@ jobs:
           # プロジェクトを作ったあとに作ると、Android のアイコンもそこに入る
           $TAURI_CLI icon icon.png
       - name: ビルド
-        run: $TAURI_CLI android build --apk --target aarch64
+        run: $TAURI_CLI android build --apk --target aarch64 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - name: 使い捨ての鍵で署名する
         run: |
           build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
@@ -167,7 +173,10 @@ jobs:
           xcodebuild -project "$project" -scheme "$scheme" -configuration release -sdk iphoneos \
             -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
-            build
+            build 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - name: IPA にまとめる
         run: |
           app=$(find build/Build/Products -name '*.app' -maxdepth 2 | head -1)

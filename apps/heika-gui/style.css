@@ -1,7 +1,7 @@
 /*
  * 透き通るオトナカワイイ。ふだんの画面は、雪のような白と、深い青のくっきりした対比にする。
  * - 面は角をほぼ立てて、細い線で囲み、後ろのしまが曇りガラス越しに見えるくらい透かす
- * - かわいさは淡いバラ色を点で差すだけにして、量を絞る
+ * - 色は雪の白と深い青だけ。緑と赤は、確かめられた、確かめられなかった、という意味のあるところにだけ使う
  * - 見出しは明朝、本文は角ゴシック。丸ゴシックにはしない
  * - 使わないもの: 大文字で字間を空けた小見出し、押すと沈む錠剤の形のボタン、角の大きく丸い影付きのカード
  *
@@ -20,11 +20,21 @@
   --blue-faint: rgba(27, 58, 122, 0.06);
   --glass: rgba(255, 255, 255, 0.6);
   --glass-hover: rgba(255, 255, 255, 0.85);
-  --rose: #d49aaa;
   --danger: #b4475f;
   --serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif CJK JP", serif;
   --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
   --mono: ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
+  /* 確かめられた、という印の色。エラーの赤系とは分ける */
+  --ok: #2e7d5b;
+  /* 余白は 4px（0.25rem）刻みの、この段からだけ選ぶ */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
 }
 
 * {
@@ -52,7 +62,7 @@ body {
 main {
   max-width: 34rem;
   margin: 0 auto;
-  padding: max(env(safe-area-inset-top), 2.5rem) 1.25rem 2rem;
+  padding: max(env(safe-area-inset-top), var(--space-10)) var(--space-5) var(--space-8);
 }
 
 /*
@@ -74,8 +84,8 @@ main {
   flex: 1;
   flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.55rem 0.25rem 0.45rem;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-1);
   border: none;
   background: none;
   color: var(--ink-soft);
@@ -122,7 +132,10 @@ svg {
     z-index: 10;
     padding-bottom: env(safe-area-inset-bottom);
     border-width: 1px 0 0;
+    border-color: rgba(27, 58, 122, 0.3);
     border-radius: 0;
+    /* 後ろの画面が透けると読みにくい。ぼかしが効かない WebView もあるので、ほぼ塗りつぶす */
+    background: rgba(246, 249, 252, 0.94);
   }
 
   .shell.inside main {
@@ -137,10 +150,10 @@ svg {
     min-height: 100vh;
   }
 
+  /* メニューを除いた残りの真ん中に置く */
   .shell.inside main {
     width: 100%;
-    margin: 0;
-    padding-left: 3rem;
+    padding: var(--space-10) var(--space-8);
   }
 
   .shell.inside main > h1 {
@@ -152,15 +165,15 @@ svg {
     top: 0;
     height: 100vh;
     flex-direction: column;
-    gap: 0.25rem;
-    padding: 2.5rem 1rem;
+    gap: var(--space-1);
+    padding: var(--space-10) var(--space-4);
     border-width: 0 1px 0 0;
     border-radius: 0;
   }
 
   .menu .brand {
     display: block;
-    margin: 0 0 2rem 0.75rem;
+    margin: 0 0 var(--space-8) var(--space-3);
     font-family: var(--serif);
     font-size: 1.6rem;
     letter-spacing: 0.14em;
@@ -170,8 +183,8 @@ svg {
   .menu .item {
     flex: none;
     flex-direction: row;
-    gap: 0.75rem;
-    padding: 0.6rem 0.75rem;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     font-size: 0.9rem;
   }
 
@@ -188,8 +201,8 @@ svg {
 h1 {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  margin: 0 0 2rem;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-8);
   font-family: var(--serif);
   font-size: 1.9rem;
   font-weight: 400;
@@ -222,13 +235,13 @@ h1::after {
 }
 
 .lead {
-  margin: 0 0 1.25rem;
+  margin: 0 0 var(--space-5);
   font-family: var(--serif);
   font-size: 1.05rem;
 }
 
 .hint {
-  margin: 0 0 1rem;
+  margin: 0 0 var(--space-4);
   color: var(--ink-soft);
   font-size: 0.85rem;
 }
@@ -257,7 +270,7 @@ select {
 }
 
 button {
-  padding: 0.65rem 1.5rem;
+  padding: var(--space-3) var(--space-6);
   border: 1px solid var(--blue);
   border-radius: 2px;
   background: transparent;
@@ -286,7 +299,7 @@ button:disabled {
 }
 
 button.quiet {
-  padding: 0.25rem 0;
+  padding: var(--space-1) 0;
   border: none;
   background: none;
   color: var(--ink-soft);
@@ -300,23 +313,52 @@ button.quiet:hover {
   color: var(--blue);
 }
 
+/* キーボードで動かしたときだけ、いまどこにいるかを深い青の線で示す。入れる欄は下線で示す */
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/*
+ * 指で押すときは、小さいボタンの押せる範囲を、見た目を変えずに 44px 四方くらいまで広げる
+ */
+@media (pointer: coarse) {
+  button.quiet,
+  summary {
+    position: relative;
+  }
+
+  button.quiet::after,
+  summary::after {
+    content: "";
+    position: absolute;
+    inset: -10px -8px;
+  }
+}
+
 .choices {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.75rem;
+  gap: var(--space-3);
 }
 
 .choices .quiet {
   align-self: flex-start;
-  margin-top: 0.5rem;
+  margin-top: var(--space-2);
 }
 
 .choice {
   display: grid;
   grid-template-columns: 2.25rem 1fr;
-  column-gap: 1rem;
-  padding: 1rem 1.25rem;
+  column-gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
   text-align: left;
   color: var(--ink);
   letter-spacing: 0.02em;
@@ -351,16 +393,16 @@ button.quiet:hover {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
 }
 
 .words {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
-  gap: 0.2rem 1rem;
-  margin: 0 0 1.5rem;
-  padding: 1.25rem 1.5rem;
+  gap: var(--space-1) var(--space-4);
+  margin: 0 0 var(--space-6);
+  padding: var(--space-5) var(--space-6);
   list-style: none;
   font-family: var(--mono);
 }
@@ -374,7 +416,7 @@ button.quiet:hover {
   opacity: 0.55;
 }
 
-/* 注意書きの頭に、淡いバラ色の短い線を引く */
+/* 注意書きの頭に、淡い青の短い線を引く */
 .notes {
   margin: 0;
   padding: 0;
@@ -385,7 +427,7 @@ button.quiet:hover {
 
 .notes li {
   position: relative;
-  padding-left: 1.1rem;
+  padding-left: var(--space-4);
 }
 
 .notes li::before {
@@ -395,14 +437,15 @@ button.quiet:hover {
   top: 0.9em;
   width: 0.5rem;
   height: 1px;
-  background: var(--rose);
+  background: var(--blue);
+  opacity: 0.45;
 }
 
 .check {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  margin: 1.5rem 0 0;
+  gap: var(--space-2);
+  margin: var(--space-6) 0 0;
 }
 
 input[type="checkbox"] {
@@ -413,7 +456,7 @@ input[type="checkbox"] {
 .field {
   display: flex;
   flex-direction: column;
-  margin-bottom: 1.25rem;
+  margin-bottom: var(--space-5);
   color: var(--ink-soft);
   font-size: 0.8rem;
   letter-spacing: 0.1em;
@@ -424,7 +467,7 @@ input[type="password"],
 input[type="url"],
 select {
   width: 100%;
-  padding: 0.5rem 0.1rem;
+  padding: var(--space-2) 0;
   border: none;
   border-bottom: 1px solid var(--blue-line);
   border-radius: 0;
@@ -438,7 +481,7 @@ select {
 
 textarea {
   width: 100%;
-  padding: 0.75rem 1rem;
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--blue-line);
   border-radius: 2px;
   background: var(--glass);
@@ -459,7 +502,7 @@ textarea:focus {
 }
 
 form > input {
-  margin-bottom: 0.5rem;
+  margin-bottom: var(--space-2);
 }
 
 .secret {
@@ -469,14 +512,14 @@ form > input {
 .accounts {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-3);
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
 .card {
-  padding: 1rem 1.25rem;
+  padding: var(--space-4) var(--space-5);
 }
 
 /* アカウントの一覧は、押すと残高に進む */
@@ -494,8 +537,11 @@ button.card:hover {
   border-color: var(--blue);
 }
 
+/* 名前を主に、アドレスは控えめに */
 button.card .address {
   display: block;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
 }
 
 .card .row {
@@ -510,7 +556,7 @@ button.card .address {
 }
 
 .badge {
-  padding: 0 0.5rem;
+  padding: 0 var(--space-2);
   border: 1px solid var(--blue-line);
   color: var(--blue);
   font-size: 0.75rem;
@@ -522,7 +568,7 @@ button.card .address {
 }
 
 .address {
-  margin: 0.5rem 0 0;
+  margin: var(--space-2) 0 0;
   font-family: var(--mono);
   font-size: 0.95rem;
   letter-spacing: 0.04em;
@@ -550,7 +596,7 @@ button.account {
 button.eye {
   display: flex;
   margin-left: auto;
-  padding: 0.25rem;
+  padding: var(--space-1);
   color: var(--ink-soft);
 }
 
@@ -559,11 +605,11 @@ button.card.selected {
 }
 
 .lead.section {
-  margin-top: 2.5rem;
+  margin-top: var(--space-10);
 }
 
 .address .copy {
-  margin-left: 0.75rem;
+  margin-left: var(--space-3);
   font-family: var(--sans);
 }
 
@@ -573,11 +619,11 @@ button.card.selected {
 
 /* 残高。整数の部分を大きく、小数と単位を小さく */
 .balance {
-  margin: 2rem 0 1.5rem;
+  margin: var(--space-8) 0 var(--space-6);
 }
 
 .amount {
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--space-2);
   font-family: var(--serif);
   color: var(--blue);
   line-height: 1.2;
@@ -595,11 +641,25 @@ button.card.selected {
 }
 
 .amount .unit {
-  margin-left: 0.6rem;
+  margin-left: var(--space-2);
   font-family: var(--sans);
   font-size: 0.9rem;
   letter-spacing: 0.12em;
   color: var(--ink-soft);
+}
+
+/* 確かめた印。金額のすぐ横に、緑の盾を置く */
+.amount .mark {
+  display: inline-flex;
+  margin-left: var(--space-2);
+  vertical-align: -0.15em;
+  color: var(--ok);
+}
+
+.amount .mark svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  stroke-width: 1.6;
 }
 
 .amount.pending {
@@ -608,7 +668,7 @@ button.card.selected {
 }
 
 .mosaics {
-  margin: 1rem 0 0;
+  margin: var(--space-4) 0 0;
   padding: 0;
   list-style: none;
 }
@@ -616,8 +676,8 @@ button.card.selected {
 .mosaics li {
   display: flex;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.35rem 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--blue-line);
 }
 
@@ -635,7 +695,7 @@ button.card.selected {
 
 /* 何を確かめて、何を信じたか */
 .verified {
-  padding: 1rem 1.25rem;
+  padding: var(--space-4) var(--space-5);
 }
 
 .verified .hint {
@@ -643,24 +703,44 @@ button.card.selected {
 }
 
 .stamp {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin: 0 0 0.25rem;
+  margin: 0 0 var(--space-1);
   font-family: var(--serif);
   color: var(--blue);
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
 }
 
+/* 確かめられた印の、緑の点。文が折り返しても1行目の頭に置く */
 .stamp::before {
   content: "";
-  width: 1.25rem;
-  height: 1px;
-  background: var(--rose);
+  display: inline-block;
+  margin-right: var(--space-2);
+  vertical-align: 0.1em;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--ok);
 }
 
 details {
-  margin-top: 0.75rem;
+  margin-top: var(--space-3);
+}
+
+/* くわしくの中では、印は残高の横の盾に任せて、点は付けない */
+details .stamp {
+  margin-top: var(--space-3);
+}
+
+details .stamp::before {
+  display: none;
+}
+
+/* 確かめられなかった印は、エラーの色の点 */
+.stamp.failed::before {
+  background: var(--danger);
+}
+
+.balance details.expired {
+  margin-top: var(--space-4);
 }
 
 summary {
@@ -671,23 +751,28 @@ summary {
 }
 
 details .label {
-  margin: 0.75rem 0 0.25rem;
+  margin: var(--space-3) 0 var(--space-1);
   color: var(--ink-soft);
   font-size: 0.75rem;
   letter-spacing: 0.1em;
 }
 
 .error {
-  margin: 1.25rem 0 0;
-  padding-left: 0.75rem;
-  border-left: 2px solid var(--rose);
+  margin: var(--space-5) 0 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--danger);
   color: var(--danger);
   font-size: 0.9rem;
 }
 
 footer {
-  margin-top: 2.5rem;
+  margin-top: var(--space-10);
   color: var(--ink-soft);
   font-size: 0.75rem;
   letter-spacing: 0.06em;
+}
+
+.balance .note {
+  margin: var(--space-2) 0 0;
+  font-size: 0.8rem;
 }

@@ -1,6 +1,8 @@
 //! 画面。中身の計算はしないで、Tauri の `invoke` でアプリの本体（src-tauri）に頼み、返ってきたものを出すだけにする。
 //! 秘密鍵は本体の中にしまい、ここには出さない。作ったばかりのニーモニックの単語だけは、紙に控えてもらうために出す。
 
+use std::time::Duration;
+
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -35,6 +37,21 @@ async fn call<T: DeserializeOwned>(command: &str, args: impl Serialize) -> Resul
         .await
         .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
+/// 残高を確かめる。確かめられなかったら、本体が付けたわけの種類と一緒に返す
+async fn check_balance(address: String) -> Result<BalanceView, BalanceFailure> {
+    let args = serde_wasm_bindgen::to_value(&BalanceArgs { address })
+        .map_err(|error| BalanceFailure::other(error.to_string()))?;
+    match invoke("balance", args).await {
+        Ok(value) => serde_wasm_bindgen::from_value(value)
+            .map_err(|error| BalanceFailure::other(error.to_string())),
+        Err(error) => Err(
+            serde_wasm_bindgen::from_value(error.clone()).unwrap_or_else(|_| {
+                BalanceFailure::other(error.as_string().unwrap_or_else(|| format!("{error:?}")))
+            }),
+        ),
+    }
 }
 
 #[derive(Serialize)]
@@ -91,6 +108,33 @@ struct MosaicView {
     currency: bool,
     amount: Option<String>,
     raw: String,
+}
+
+/// 本体の `balance` が返す、確かめられなかったわけ
+#[derive(Clone, Deserialize)]
+struct BalanceFailure {
+    kind: FailureKind,
+    detail: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureKind {
+    Unreachable,
+    Unreadable,
+    WrongNetwork,
+    Unsupported,
+    Mismatch,
+    Other,
+}
+
+impl BalanceFailure {
+    fn other(detail: String) -> Self {
+        Self {
+            kind: FailureKind::Other,
+            detail,
+        }
+    }
 }
 
 /// 本体の `about` が返すもの
@@ -283,7 +327,12 @@ fn App() -> impl IntoView {
                     Screen::Settings => settings_view(ctx).into_any(),
                 }}</section> }}
                 {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
-                <footer>{footer}</footer>
+                // 版はふだんの画面には出さず、設定と、開く前の画面にだけ出す。つながらないときはいつも出す
+                {move || {
+                    let quiet = matches!(ctx.screen.get(), Screen::Home | Screen::Accounts)
+                        && matches!(about.get(), Some(Ok(_)));
+                    (!quiet).then(|| view! { <footer>{footer}</footer> })
+                }}
             </main>
         </div>
     }
@@ -319,6 +368,8 @@ const ICON_SETTINGS: &str = "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4";
 const ICON_EYE: &str =
     "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z";
 const ICON_EYE_OFF: &str = "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM4 20 20 4";
+/// 確かめた残高に添える、チェックの入った盾
+const ICON_VERIFIED: &str = "M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3zM9 12l2 2 4-4";
 
 fn welcome(ctx: Ctx) -> impl IntoView {
     let create = move |_| {
@@ -581,7 +632,7 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
                                 <span class="badge">{account.network}</span>
                                 <span class="hint">{account.source}</span>
                             </span>
-                            <span class="address">{account.address}</span>
+                            <span class="address">{spaced(&account.address)}</span>
                         </button>
                     </li>
                 }
@@ -602,7 +653,7 @@ enum Check {
     NoRest,
     Done(BalanceView),
     /// 確かめられなかった。数字は出さない
-    Failed(String),
+    Failed(BalanceFailure),
 }
 
 /// ホーム。選んでいるアカウントの残高
@@ -624,7 +675,7 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
         }
         check.set(Check::Loading);
         spawn_local(async move {
-            check.set(match call("balance", BalanceArgs { address }).await {
+            check.set(match check_balance(address).await {
                 Ok(balance) => Check::Done(balance),
                 Err(error) => Check::Failed(error),
             });
@@ -637,6 +688,7 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
         move |_| {
             write_clipboard(&address);
             copied.set(true);
+            set_timeout(move || copied.set(false), Duration::from_secs(2));
         }
     };
     let hidden = move || ctx.settings.get().hide_amounts;
@@ -656,8 +708,8 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             </button>
         </div>
         <p class="address">
-            {account.address.clone()}
-            <button class="quiet copy" on:click=copy>{move || if copied.get() { "写しました" } else { "写す" }}</button>
+            {spaced(&account.address)}
+            <button class="quiet copy" on:click=copy>{move || if copied.get() { "コピーしました" } else { "コピー" }}</button>
         </p>
         {move || match check.get() {
             Check::Loading => view! {
@@ -672,17 +724,52 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
                     <button class="primary" on:click=move |_| ctx.go(Screen::Settings)>"設定する"</button>
                 </div>
             }.into_any(),
-            Check::Failed(error) => view! {
-                <div class="balance">
-                    <p class="amount pending">"確かめられませんでした"</p>
-                    <p class="hint">"確かめられない数字は出しません。"</p>
-                    <p class="error">{error}</p>
-                </div>
-            }.into_any(),
+            Check::Failed(failure) => failed(ctx, failure, &account.network).into_any(),
             Check::Done(balance) => verified(balance, hidden()).into_any(),
         }}
         <div class="row">
             <button class="primary" on:click=move |_| refresh() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
+        </div>
+    }
+}
+
+/// 確かめられなかったとき。何が起きて、何をすればいいかを出し、元のエラーはくわしくに回す
+fn failed(ctx: Ctx, failure: BalanceFailure, network: &str) -> impl IntoView {
+    let (title, advice) = match failure.kind {
+        FailureKind::Unreachable => (
+            "REST につながりませんでした",
+            "設定の URL が合っているか、ネットにつながっているかを見てください。少し待って確かめ直すと、通ることもあります。".to_owned(),
+        ),
+        FailureKind::Unreadable => (
+            "REST の答えを読めませんでした",
+            "設定の URL が、Symbol の REST（ふつうはポート 3001）を指しているかを見てください。".to_owned(),
+        ),
+        FailureKind::WrongNetwork => (
+            "ネットワークが違います",
+            format!("このアカウントは {network} のものですが、設定の REST は別のネットワークのものです。{network} の REST にしてください。"),
+        ),
+        FailureKind::Unsupported => (
+            "この REST では確かめられません",
+            "この REST のノードは、残高を確かめるのに要る状態のハッシュを出していません。別の REST にしてください。".to_owned(),
+        ),
+        FailureKind::Mismatch => (
+            "REST の答えが、ブロックと合いませんでした",
+            "何度か取り直しても合いませんでした。この REST の答えは信じないほうが安全です。別の REST を試してください。".to_owned(),
+        ),
+        FailureKind::Other => ("確かめられませんでした", String::new()),
+    };
+    let settings = failure.kind != FailureKind::Other;
+    view! {
+        <div class="balance">
+            <p class="stamp failed">{title}</p>
+            <p class="hint">{format!("{advice}確かめられない数字は出しません。")}</p>
+            {settings.then(|| view! {
+                <button on:click=move |_| ctx.go(Screen::Settings)>"設定を開く"</button>
+            })}
+            <details>
+                <summary>"くわしく"</summary>
+                <p class="address small">{failure.detail}</p>
+            </details>
         </div>
     }
 }
@@ -700,25 +787,36 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
         Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
         None => (group(&amount), String::new()),
     };
-    let others = balance
+    // 定義の期限が切れてもうチェーンにないモザイクは、使えないので畳んで奥にしまう。
+    // 小数点の位置もわからないので、いちばん小さい単位の数のまま出す
+    let (others, expired): (Vec<_>, Vec<_>) = balance
         .mosaics
         .iter()
         .filter(|mosaic| !mosaic.currency)
-        .map(|mosaic| {
-            let value = match &mosaic.amount {
-                _ if hidden => MASK.to_owned(),
-                Some(amount) => grouped(amount),
-                // 定義がもうなく、小数点の位置がわからない
-                None => format!("{}（桁不明）", group(&mosaic.raw)),
-            };
-            view! {
-                <li>
-                    <span class="id">{format!("0x{}", mosaic.id)}</span>
-                    <span class="value">{value}</span>
-                </li>
-            }
-        })
-        .collect_view();
+        .partition(|mosaic| mosaic.amount.is_some());
+    let row = |mosaic: &MosaicView| {
+        let value = match &mosaic.amount {
+            _ if hidden => MASK.to_owned(),
+            Some(amount) => grouped(amount),
+            None => group(&mosaic.raw),
+        };
+        view! {
+            <li>
+                <span class="id">{format!("0x{}", mosaic.id)}</span>
+                <span class="value">{value}</span>
+            </li>
+        }
+    };
+    let expired = (!expired.is_empty()).then(|| {
+        view! {
+            <details class="expired">
+                <summary>{format!("期限の切れたモザイク {} 件", expired.len())}</summary>
+                <p class="hint note">"定義の期限が切れて、もうチェーンにないモザイクです。送ることも受け取ることもできません。小数点の位置がわからないので、いちばん小さい単位の数のまま出しています。"</p>
+                <ul class="mosaics">{expired.into_iter().map(row).collect_view()}</ul>
+            </details>
+        }
+    });
+    let others = others.into_iter().map(row).collect_view();
     let when = balance.block_time.map(|time| {
         let minutes = ((Date::now() - time) / 60_000.0).max(0.0) as u64;
         let ago = if minutes == 0 {
@@ -728,10 +826,16 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
         };
         format!("{}（{ago}）", Date::new(time).to_locale_string("ja-JP"))
     });
-    let what = if balance.on_chain {
-        "アカウントと、持っているモザイクの定義が、状態の経路でその根につながること"
+    let (stamp, what) = if balance.on_chain {
+        (
+            "ブロックの署名から、この残高まで確かめました",
+            "アカウントと、持っているモザイクの定義が、状態の経路でその根につながること",
+        )
     } else {
-        "アカウントが、状態の木にないこと"
+        (
+            "ブロックの署名から、まだ載っていないことまで確かめました",
+            "アカウントが、状態の木にないこと",
+        )
     };
     view! {
         <div class="balance">
@@ -739,17 +843,21 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
                 <span class="whole">{whole}</span>
                 <span class="fraction">{fraction}</span>
                 <span class="unit">"XYM"</span>
+                <span class="mark" role="img" title=stamp aria-label=stamp>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d=ICON_VERIFIED /></svg>
+                </span>
             </p>
             {(!balance.on_chain).then(|| view! {
                 <p class="hint">"まだチェーンに載っていないアドレスです。一度も受け取っていなければ、こうなります。"</p>
             })}
             <ul class="mosaics">{others}</ul>
+            {expired}
         </div>
         <div class="verified glass">
-            <p class="stamp">"確かめました"</p>
-            <p class="hint">{format!("高さ {} のブロック", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
+            <p class="hint">{format!("ブロック #{}", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
             <details>
                 <summary>"くわしく"</summary>
+                <p class="stamp">{stamp}</p>
                 <p class="label">"確かめたこと"</p>
                 <ul class="notes">
                     <li>"ブロックの署名と、9本の根から求めた StateHash"</li>
@@ -764,6 +872,16 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
             </details>
         </div>
     }
+}
+
+/// アドレスを6文字ずつ区切って読みやすくする。コピーするのは区切らないもの
+fn spaced(address: &str) -> String {
+    let chars: Vec<char> = address.chars().collect();
+    chars
+        .chunks(6)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// 隠した金額

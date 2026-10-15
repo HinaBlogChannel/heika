@@ -14,7 +14,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use heika_core::address::Address;
 use heika_core::network::{NetworkParameters, NetworkTimestamp};
-use heika_rest::balance::verify_balance;
+use heika_rest::balance::{BalanceError, VerifyError, verify_balance};
 use serde::{Deserialize, Serialize};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
@@ -153,20 +153,71 @@ pub struct MosaicView {
     raw: String,
 }
 
+/// 残高を確かめられなかったわけ。画面は `kind` で、何をすればいいかを出し分ける
+#[derive(Debug, Serialize)]
+pub struct Failure {
+    kind: FailureKind,
+    /// くわしいエラー
+    detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureKind {
+    /// REST につながらない
+    Unreachable,
+    /// REST の答えが読めない。Symbol の REST でなさそう
+    Unreadable,
+    /// REST のネットワークが、アドレスのと違う
+    WrongNetwork,
+    /// REST のノードが状態のハッシュを使っていないので、確かめられない
+    Unsupported,
+    /// 取り直しても、答えがブロックの StateHash と合わない
+    Mismatch,
+    Other,
+}
+
+impl Failure {
+    fn other(detail: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::Other,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl From<BalanceError<String>> for Failure {
+    fn from(error: BalanceError<String>) -> Self {
+        let kind = match &error {
+            BalanceError::Fetch(_) => FailureKind::Unreachable,
+            BalanceError::NotFound { .. } | BalanceError::Json { .. } => FailureKind::Unreadable,
+            BalanceError::Verify(VerifyError::WrongNetwork) => FailureKind::WrongNetwork,
+            BalanceError::Verify(VerifyError::NoStateHash) => FailureKind::Unsupported,
+            BalanceError::Verify(VerifyError::MissingMosaic(_) | VerifyError::Invalid { .. }) => {
+                FailureKind::Mismatch
+            }
+        };
+        Self {
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
 /// `address` の残高を、設定した REST から取って確かめる
 #[tauri::command]
 pub async fn balance(
     config: tauri::State<'_, Config>,
     address: String,
-) -> Result<BalanceView, String> {
+) -> Result<BalanceView, Failure> {
     let origin = config
         .get()
         .rest
-        .ok_or("残高を問い合わせる REST を、設定で決めてください")?;
+        .ok_or_else(|| Failure::other("残高を問い合わせる REST を、設定で決めてください"))?;
     let address: Address = address
         .trim()
         .parse()
-        .map_err(|error| format!("アドレスを読めません: {error}"))?;
+        .map_err(|error| Failure::other(format!("アドレスを読めません: {error}")))?;
     let agent = Arc::new(agent());
     let fetch = {
         let origin = origin.clone();
@@ -184,9 +235,7 @@ pub async fn balance(
         // 眠るだけなので、止まっても困らない
         let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(RETRY_PAUSE)).await;
     };
-    let balance = verify_balance(&address, fetch, pause)
-        .await
-        .map_err(|error| error.to_string())?;
+    let balance = verify_balance(&address, fetch, pause).await?;
 
     let network = NetworkParameters::from_identifier(balance.block.network);
     let block_time = network
@@ -263,5 +312,32 @@ mod tests {
         assert!(check_origin("ftp://symbol.example").is_err());
         assert!(check_origin("https://").is_err());
         assert!(check_origin("https://a b").is_err());
+    }
+
+    #[test]
+    fn tells_what_went_wrong() {
+        let kind = |error| Failure::from(error).kind;
+        assert_eq!(
+            kind(BalanceError::Fetch("timed out".to_owned())),
+            FailureKind::Unreachable
+        );
+        assert_eq!(
+            kind(BalanceError::NotFound {
+                path: "/chain/info".to_owned()
+            }),
+            FailureKind::Unreadable
+        );
+        assert_eq!(
+            kind(BalanceError::Verify(VerifyError::WrongNetwork)),
+            FailureKind::WrongNetwork
+        );
+        assert_eq!(
+            kind(BalanceError::Verify(VerifyError::NoStateHash)),
+            FailureKind::Unsupported
+        );
+        assert_eq!(
+            kind(BalanceError::Verify(VerifyError::MissingMosaic(1))),
+            FailureKind::Mismatch
+        );
     }
 }

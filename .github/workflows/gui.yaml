@@ -3,12 +3,16 @@
 #
 # - 画面（trunk で作る wasm）は1回だけ作り、それぞれのジョブに配る
 # - Android の APK は、ジョブの中で作る使い捨ての鍵で署名する。ビルドごとに鍵が変わるので、入れ直すときは先にアンインストールする
-# - iOS は署名しない .app を Payload/ に入れた IPA にする。そのままでは入れられず、AltStore などで署名し直す前提。
+# - iOS は tauri ios build --no-sign で、署名しない IPA にする。そのままでは入れられず、AltStore などで署名し直す前提。
 #   まだ試しているところなので、失敗してもほかのジョブは止めない
 name: GUI
 
 on:
   workflow_dispatch:
+    inputs:
+      identifier:
+        description: アプリの識別子（Android のパッケージ名にもなる）。フォークしたら自分のものに変える
+        default: io.github.hinablogchannel.heika
 
 permissions:
   contents: read
@@ -67,8 +71,16 @@ jobs:
         with:
           name: frontend
           path: apps/heika-gui/dist
-      - name: 画面は frontend のジョブで作ったものを使い、ビルドの前に trunk を走らせない
-        run: jq '.build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json && mv conf.json src-tauri/tauri.conf.json
+      - name: 識別子を入れ、画面は frontend のジョブで作ったものを使う（ビルドの前に trunk を走らせない）
+        env:
+          IDENTIFIER: ${{ inputs.identifier }}
+        run: |
+          if ! printf '%s\n' "$IDENTIFIER" | grep -Eqx '[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+'; then
+            echo "::error::識別子 $IDENTIFIER は、英字で始まる英数字をドットでつないだ形にしてください"
+            exit 1
+          fi
+          jq --arg identifier "$IDENTIFIER" '.identifier = $identifier | .build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json
+          mv conf.json src-tauri/tauri.conf.json
       - name: Linux で WebKitGTK などを入れる
         if: runner.os == 'Linux'
         run: |
@@ -110,8 +122,16 @@ jobs:
         with:
           name: frontend
           path: apps/heika-gui/dist
-      - name: 画面は frontend のジョブで作ったものを使い、ビルドの前に trunk を走らせない
-        run: jq '.build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json && mv conf.json src-tauri/tauri.conf.json
+      - name: 識別子を入れ、画面は frontend のジョブで作ったものを使う（ビルドの前に trunk を走らせない）
+        env:
+          IDENTIFIER: ${{ inputs.identifier }}
+        run: |
+          if ! printf '%s\n' "$IDENTIFIER" | grep -Eqx '[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+'; then
+            echo "::error::識別子 $IDENTIFIER は、英字で始まる英数字をドットでつないだ形にしてください"
+            exit 1
+          fi
+          jq --arg identifier "$IDENTIFIER" '.identifier = $identifier | .build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json
+          mv conf.json src-tauri/tauri.conf.json
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
@@ -161,8 +181,16 @@ jobs:
         with:
           name: frontend
           path: apps/heika-gui/dist
-      - name: 画面は frontend のジョブで作ったものを使い、ビルドの前に trunk を走らせない
-        run: jq '.build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json && mv conf.json src-tauri/tauri.conf.json
+      - name: 識別子を入れ、画面は frontend のジョブで作ったものを使う（ビルドの前に trunk を走らせない）
+        env:
+          IDENTIFIER: ${{ inputs.identifier }}
+        run: |
+          if ! printf '%s\n' "$IDENTIFIER" | grep -Eqx '[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+'; then
+            echo "::error::識別子 $IDENTIFIER は、英字で始まる英数字をドットでつないだ形にしてください"
+            exit 1
+          fi
+          jq --arg identifier "$IDENTIFIER" '.identifier = $identifier | .build.beforeBuildCommand = ""' src-tauri/tauri.conf.json > conf.json
+          mv conf.json src-tauri/tauri.conf.json
       - name: Rust のツールチェイン
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-ios
@@ -176,22 +204,16 @@ jobs:
           # プロジェクトを作ったあとに作ると、iOS のアイコンもそこに入る
           $TAURI_CLI icon icon.png
       - name: 署名せずにビルドする
-        run: |
-          project=$(ls -d src-tauri/gen/apple/*.xcodeproj | head -1)
-          scheme=$(xcodebuild -list -project "$project" -json | jq -r '.project.schemes[] | select(endswith("_iOS"))' | head -1)
-          xcodebuild -project "$project" -scheme "$scheme" -configuration release -sdk iphoneos \
-            -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
-            build 2>&1 | tee build.log
+        # Xcode の中の Rust のビルドは、tauri ios build が動いているあいだしか通らないので、xcodebuild を直接は呼ばない。
+        # --no-sign は、署名せずに archive して、中の .app を Payload/ に入れた IPA にする
+        run: $TAURI_CLI ios build --ci --no-sign 2>&1 | tee build.log
       - name: 失敗したら、エラーの行を annotation に出す
         if: failure()
         run: bash ../../.github/scripts/annotate-errors.sh build.log
-      - name: IPA にまとめる
+      - name: IPA の名前を変える
         run: |
-          app=$(find build/Build/Products -name '*.app' -maxdepth 2 | head -1)
-          mkdir Payload
-          cp -R "$app" Payload/
-          zip -qr heika-gui-ios-UNSUPPORTED.ipa Payload
+          ipa=$(find src-tauri/gen/apple/build -name '*.ipa' | head -1)
+          mv "$ipa" heika-gui-ios-UNSUPPORTED.ipa
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: heika-gui-ios-UNSUPPORTED

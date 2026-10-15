@@ -1,11 +1,12 @@
 //! ノードに TLS でつなぎ、公開されている情報を問い合わせる。
 //!
 //! 問い合わせは catapult のパケットで行う。形式は catapult の `ionet/NetworkNode.h`、`api/ChainPackets.h`、
-//! `handlers/ChainHandlers.cpp` に合わせている。どれも `#pragma pack(1)` のリトルエンディアンで、パディングはない。
+//! `handlers/ChainHandlers.cpp`、`handlers/TransactionHandlers.cpp` に合わせている。どれも `#pragma pack(1)` のリトルエンディアンで、パディングはない。
 
 use std::fmt;
 use std::time::Duration;
 
+use heika_core::hash::Hash256;
 use heika_core::key::PublicKey;
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_tls::{ConnectError, Connection, Identity, RequestError};
@@ -14,6 +15,7 @@ use heika_tls::{ConnectError, Connection, Identity, RequestError};
 mod packet_type {
     pub const CHAIN_STATISTICS: u32 = 5;
     pub const PULL_BLOCKS: u32 = 8;
+    pub const PULL_TRANSACTIONS: u32 = 10;
     pub const NODE_DISCOVERY_PULL_PING: u32 = 0x111;
     pub const NODE_DISCOVERY_PULL_PEERS: u32 = 0x113;
 }
@@ -84,9 +86,51 @@ impl Node {
             .collect())
     }
 
+    /// ノードの未承認のトランザクションのうち、期限が `min_deadline` 以降で、最大手数料がサイズに
+    /// `min_fee_multiplier` を掛けた額以上のものを取る。`known_short_hashes`（[`short_hash`]）にあるものは返ってこない。
+    ///
+    /// ノードは返すバイト数を設定の上限で切るので、未承認のトランザクションが多いと全部は返ってこない。
+    /// トランザクションの中身は確かめず、1件ずつに切り出すだけにする。
+    pub fn pull_transactions(
+        &mut self,
+        min_deadline: u64,
+        min_fee_multiplier: u32,
+        known_short_hashes: &[u32],
+    ) -> Result<Vec<Vec<u8>>, QueryError> {
+        let request =
+            pull_transactions_request(min_deadline, min_fee_multiplier, known_short_hashes);
+        let body = self.request(packet_type::PULL_TRANSACTIONS, &request)?;
+        // ブロックと同じく、パディングなしで隙間なく並ぶ
+        Ok(split_size_prefixed(&body)?
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect())
+    }
+
     fn request(&mut self, packet_type: u32, body: &[u8]) -> Result<Vec<u8>, QueryError> {
         Ok(self.connection.request(packet_type, body, MAX_BODY_SIZE)?)
     }
+}
+
+/// `Pull_Transactions` の要求の本体。catapult の `TransactionsFilter`（Deadline、FeeMultiplier）に、短いハッシュが続く。
+fn pull_transactions_request(
+    min_deadline: u64,
+    min_fee_multiplier: u32,
+    known_short_hashes: &[u32],
+) -> Vec<u8> {
+    let mut request = Vec::with_capacity(12 + 4 * known_short_hashes.len());
+    request.extend_from_slice(&min_deadline.to_le_bytes());
+    request.extend_from_slice(&min_fee_multiplier.to_le_bytes());
+    for short_hash in known_short_hashes {
+        request.extend_from_slice(&short_hash.to_le_bytes());
+    }
+    request
+}
+
+/// catapult の `utils::ToShortHash`。ハッシュの先頭4バイトを u32 として読んだもの。
+/// [`Node::pull_transactions`] で、もう知っているトランザクションを伝えるのに使う。
+pub fn short_hash(hash: &Hash256) -> u32 {
+    u32::from_le_bytes(hash.0[..4].try_into().expect("4 bytes"))
 }
 
 /// `Chain_Statistics` の応答。
@@ -443,6 +487,24 @@ mod tests {
             })
         );
         assert!(ChainStatistics::decode(&body[..31]).is_err());
+    }
+
+    #[test]
+    fn writes_a_pull_transactions_request() {
+        let mut hash = [0; 32];
+        hash[..4].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let short = short_hash(&Hash256(hash));
+        assert_eq!(short, 0xddcc_bbaa);
+        assert_eq!(
+            pull_transactions_request(0x0102_0304_0506_0708, 100, &[short]),
+            [
+                &[8, 7, 6, 5, 4, 3, 2, 1][..],
+                &[100, 0, 0, 0],
+                &[0xaa, 0xbb, 0xcc, 0xdd]
+            ]
+            .concat()
+        );
+        assert_eq!(pull_transactions_request(0, 0, &[]), [0; 12]);
     }
 
     #[test]

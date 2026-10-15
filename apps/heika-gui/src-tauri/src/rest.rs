@@ -5,7 +5,9 @@
 //! なので、どの REST を信じるかは使う人に決めてもらい、最初は空にしておく。
 //!
 //! 問い合わせは ureq（同期）で、tokio の作業スレッドを止めないように spawn_blocking に投げる。
-//! Android では、OS の証明書を使うために Java 側での初期化が要り、まだしていないので、HTTPS の問い合わせは失敗する。
+//! HTTPS の相手は OS のルート証明書で確かめる。Android では、OS の確かめ方を使うには Java 側の部品と初期化が要るので、
+//! 代わりに OS が持っているルート証明書のファイルを読む。失効は確かめないが、残高はブロックの署名から確かめているので、
+//! TLS が守るのは、どの REST に問い合わせているかまで。
 
 use std::fs;
 use std::path::PathBuf;
@@ -271,13 +273,57 @@ fn agent() -> ureq::Agent {
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)
         .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .root_certs(RootCerts::PlatformVerifier)
+        .root_certs(root_certs())
         .build();
     ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .tls_config(tls)
         .build()
         .into()
+}
+
+#[cfg(not(target_os = "android"))]
+fn root_certs() -> RootCerts {
+    RootCerts::PlatformVerifier
+}
+
+/// Android のルート証明書の置き場所。あるほうのうち、前のものを使う。
+/// Android 14 からは、OS とは別に更新される Conscrypt の中にある
+#[cfg(target_os = "android")]
+const ANDROID_ROOTS: [&str; 2] = [
+    "/apex/com.android.conscrypt/cacerts",
+    "/system/etc/security/cacerts",
+];
+
+#[cfg(target_os = "android")]
+fn root_certs() -> RootCerts {
+    let roots = ANDROID_ROOTS
+        .iter()
+        .map(std::path::Path::new)
+        .find(|directory| directory.is_dir())
+        .map(load_roots)
+        .unwrap_or_default();
+    RootCerts::Specific(Arc::new(roots))
+}
+
+/// `directory` の中のファイルから、PEM の証明書を読む。
+/// Android のファイルは、証明書の中身を人が読める形にした文の後ろに PEM が続く。読めないファイルは飛ばす
+#[cfg(any(target_os = "android", test))]
+fn load_roots(directory: &std::path::Path) -> Vec<ureq::tls::Certificate<'static>> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| fs::read(entry.ok()?.path()).ok())
+        .flat_map(|bytes| {
+            ureq::tls::parse_pem(&bytes)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(certificate)) => Some(certificate),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// REST の `path` を取る。404 なら None
@@ -295,6 +341,8 @@ fn get(agent: &ureq::Agent, origin: &str, path: &str) -> Result<Option<Vec<u8>>,
 
 #[cfg(test)]
 mod tests {
+    use ureq::tls::Certificate;
+
     use super::*;
 
     #[test]
@@ -312,6 +360,30 @@ mod tests {
         assert!(check_origin("ftp://symbol.example").is_err());
         assert!(check_origin("https://").is_err());
         assert!(check_origin("https://a b").is_err());
+    }
+
+    #[test]
+    fn reads_android_style_root_files() {
+        let pem = include_bytes!("../../../../crates/heika-cert/testdata/openssl-v3-ca.pem");
+        let directory = std::env::temp_dir().join(format!("heika-roots-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        // Android のファイルは、`openssl x509 -text` の出力のような文の後ろに PEM が続く
+        let mut android = b"Certificate:\n    Data:\n        Version: 3 (0x2)\n".to_vec();
+        android.extend_from_slice(pem);
+        fs::write(directory.join("5ad8a5d6.0"), android).unwrap();
+        fs::write(
+            directory.join("broken.0"),
+            b"-----BEGIN CERTIFICATE-----\n!!\n",
+        )
+        .unwrap();
+        fs::write(directory.join("empty.0"), b"").unwrap();
+
+        let roots = load_roots(&directory);
+        fs::remove_dir_all(&directory).unwrap();
+        let expected = Certificate::from_pem(pem).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].der(), expected.der());
+        assert!(load_roots(&directory).is_empty());
     }
 
     #[test]

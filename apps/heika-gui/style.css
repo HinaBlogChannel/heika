@@ -1,7 +1,7 @@
 /*
  * 透き通るオトナカワイイ。ふだんの画面は、雪のような白と、深い青のくっきりした対比にする。
  * - 面は角をほぼ立てて、細い線で囲み、後ろのしまが曇りガラス越しに見えるくらい透かす
- * - かわいさは淡いバラ色を点で差すだけにして、量を絞る
+ * - 色は雪の白と深い青だけ。緑と赤は、確かめられた、確かめられなかった、という意味のあるところにだけ使う
  * - 見出しは明朝、本文は角ゴシック。丸ゴシックにはしない
  * - 使わないもの: 大文字で字間を空けた小見出し、押すと沈む錠剤の形のボタン、角の大きく丸い影付きのカード
  *
@@ -20,7 +20,6 @@
   --blue-faint: rgba(27, 58, 122, 0.06);
   --glass: rgba(255, 255, 255, 0.6);
   --glass-hover: rgba(255, 255, 255, 0.85);
-  --rose: #d49aaa;
   --danger: #b4475f;
   --serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif CJK JP", serif;
   --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
@@ -417,7 +416,7 @@ textarea:focus-visible {
   opacity: 0.55;
 }
 
-/* 注意書きの頭に、淡いバラ色の短い線を引く */
+/* 注意書きの頭に、淡い青の短い線を引く */
 .notes {
   margin: 0;
   padding: 0;
@@ -438,7 +437,8 @@ textarea:focus-visible {
   top: 0.9em;
   width: 0.5rem;
   height: 1px;
-  background: var(--rose);
+  background: var(--blue);
+  opacity: 0.45;
 }
 
 .check {
@@ -725,8 +725,13 @@ details {
   margin-top: var(--space-3);
 }
 
+/* くわしくの中では、印は残高の横の盾に任せて、点は付けない */
 details .stamp {
   margin-top: var(--space-3);
+}
+
+details .stamp::before {
+  display: none;
 }
 
 /* 確かめられなかった印は、エラーの色の点 */

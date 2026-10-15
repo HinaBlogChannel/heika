@@ -5,6 +5,8 @@
 # - Android の APK は、ジョブの中で作る使い捨ての鍵で署名する。ビルドごとに鍵が変わるので、入れ直すときは先にアンインストールする
 # - iOS は tauri ios build --no-sign で、署名しない IPA にする。そのままでは入れられず、AltStore などで署名し直す前提。
 #   まだ試しているところなので、失敗してもほかのジョブは止めない
+# - Tauri の CLI はビルドに1つのジョブあたり5分ほどかかるので、キャッシュに入れておく。
+#   入れたらすぐ保存して、そのあとのビルドが落ちても次から使えるようにする。7日使わないと消える
 name: GUI
 
 on:
@@ -90,8 +92,21 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI をキャッシュから戻す
+        id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: Tauri の CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Tauri の CLI をキャッシュに入れる
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: ビルド
         run: |
           $TAURI_CLI icon icon.png
@@ -140,8 +155,21 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-linux-android
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI をキャッシュから戻す
+        id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: Tauri の CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Tauri の CLI をキャッシュに入れる
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: Android のプロジェクトを作る
         # ランナーに入っている Android SDK と NDK を使う
         run: |
@@ -195,8 +223,21 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-ios
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI をキャッシュから戻す
+        id: tauri-cli
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: Tauri の CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Tauri の CLI をキャッシュに入れる
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.TAURI_CLI_VERSION }}-${{ env.RUST_TOOLCHAIN }}
       - name: Xcode のプロジェクトを作る
         run: |
           brew install xcodegen

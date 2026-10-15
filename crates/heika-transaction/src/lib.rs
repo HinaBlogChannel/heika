@@ -19,6 +19,7 @@ mod namespace;
 mod restriction;
 mod scan;
 mod transfer;
+mod validate;
 
 pub use aggregate::{
     Aggregate, AggregateVersion, Cosignature, DetachedCosignature, EmbeddedTransaction,
@@ -45,6 +46,7 @@ pub use restriction::{
 };
 pub use scan::{ScanError, Scanned, scan};
 pub use transfer::{Transfer, TransferError, UnresolvedAddress, UnresolvedMosaicId};
+pub use validate::{Failure, Location, Problem};
 
 /// 署名とハッシュの対象から外れる先頭の部分。catapult の `VerifiableEntity::Header_Size`。
 /// サイズ、予約、署名、署名者の公開鍵、予約の順に並ぶ。
@@ -585,6 +587,18 @@ impl Body {
 
     fn is_aggregate_type(transaction_type: u16) -> bool {
         matches!(transaction_type, 0x4141 | 0x4241)
+    }
+
+    /// 単独で送れるか。メタデータの3種類とマルチシグの変更は、アグリゲートの中でしか使えない
+    /// （catapult の `Only_Embeddable`）。単独で送ると、ノードは理由を返さずに捨てる。
+    pub fn supports_top_level(&self) -> bool {
+        !matches!(
+            self,
+            Self::AccountMetadata(_)
+                | Self::MosaicMetadata(_)
+                | Self::NamespaceMetadata(_)
+                | Self::MultisigAccountModification(_)
+        )
     }
 }
 

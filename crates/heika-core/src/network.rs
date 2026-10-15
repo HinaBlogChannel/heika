@@ -98,6 +98,26 @@ pub struct NetworkParameters {
     pub max_transaction_lifetime: Duration,
     /// `maxCosignaturesPerAggregate`。外側の署名も数える
     pub max_cosignatures_per_aggregate: usize,
+    /// `maxTransactionsPerAggregate`
+    pub max_transactions_per_aggregate: usize,
+    /// `maxMessageSize`。転送のメッセージのバイト数の上限
+    pub max_message_size: usize,
+    /// `maxHashLockDuration`
+    pub max_hash_lock_duration: Duration,
+    /// `maxSecretLockDuration`
+    pub max_secret_lock_duration: Duration,
+    /// `minProofSize`。シークレットプルーフのプルーフのバイト数の下限
+    pub min_proof_size: usize,
+    /// `maxProofSize`
+    pub max_proof_size: usize,
+    /// `maxValueSize`。メタデータの値のバイト数の上限
+    pub max_metadata_value_size: usize,
+    /// `maxNameSize`。ネームスペースの名前のバイト数の上限
+    pub max_namespace_name_size: usize,
+    /// `minNamespaceDuration`。ルートのネームスペースを取る期間の下限
+    pub min_namespace_duration: Duration,
+    /// `maxNamespaceDuration`
+    pub max_namespace_duration: Duration,
     /// `votingSetGrouping`。ファイナライズのエポック1つぶんのブロック数
     pub voting_set_grouping: u64,
     /// `minVotingKeyLifetime`。投票鍵の期間（エポック数）の下限
@@ -122,6 +142,9 @@ pub struct ForkHeights {
     pub unique_aggregate_transaction_hash: u64,
 }
 
+/// 1日の秒数。設定の `2d` のような期間を書くのに使う。
+const DAY: u64 = 24 * 60 * 60;
+
 impl NetworkParameters {
     pub const MAINNET: Self = Self {
         identifier: NetworkIdentifier::MAINNET,
@@ -133,6 +156,16 @@ impl NetworkParameters {
         importance_grouping: 720,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,
+        max_transactions_per_aggregate: 100,
+        max_message_size: 1024,
+        max_hash_lock_duration: Duration::from_secs(2 * DAY),
+        max_secret_lock_duration: Duration::from_secs(365 * DAY),
+        min_proof_size: 0,
+        max_proof_size: 1024,
+        max_metadata_value_size: 1024,
+        max_namespace_name_size: 64,
+        min_namespace_duration: Duration::from_secs(30 * DAY),
+        max_namespace_duration: Duration::from_secs(1825 * DAY),
         voting_set_grouping: 1440,
         min_voting_key_lifetime: 112,
         max_voting_key_lifetime: 360,
@@ -154,6 +187,16 @@ impl NetworkParameters {
         importance_grouping: 180,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,
+        max_transactions_per_aggregate: 100,
+        max_message_size: 1024,
+        max_hash_lock_duration: Duration::from_secs(2 * DAY),
+        max_secret_lock_duration: Duration::from_secs(365 * DAY),
+        min_proof_size: 0,
+        max_proof_size: 1024,
+        max_metadata_value_size: 1024,
+        max_namespace_name_size: 64,
+        min_namespace_duration: Duration::from_secs(30 * DAY),
+        max_namespace_duration: Duration::from_secs(1825 * DAY),
         voting_set_grouping: 720,
         min_voting_key_lifetime: 28,
         max_voting_key_lifetime: 720,
@@ -175,6 +218,12 @@ impl NetworkParameters {
     /// Nemesis の時刻。
     pub fn epoch(&self) -> SystemTime {
         UNIX_EPOCH + self.epoch_adjustment
+    }
+
+    /// 期間をブロック数にする。catapult の `BlockSpan::blocks` と同じく、blockGenerationTargetTime で割って切り捨てる。
+    pub fn blocks(&self, duration: Duration) -> u64 {
+        let blocks = duration.as_millis() / self.block_generation_target_time.as_millis();
+        u64::try_from(blocks).unwrap_or(u64::MAX)
     }
 
     /// ふつうの時刻をネットワーク時刻にする。ミリ秒より細かいところは切り捨てる。
@@ -412,6 +461,17 @@ mod tests {
             NetworkParameters::TESTNET.timestamp_at(later),
             network.timestamp_at(later)
         );
+    }
+
+    #[test]
+    fn converts_durations_to_blocks() {
+        // メインネットの設定の 2d、365d、30d を、30秒のブロックで数えたもの
+        let network = NetworkParameters::MAINNET;
+        assert_eq!(network.blocks(network.max_hash_lock_duration), 5_760);
+        assert_eq!(network.blocks(network.max_secret_lock_duration), 1_051_200);
+        assert_eq!(network.blocks(network.min_namespace_duration), 86_400);
+        // 端数は切り捨てる
+        assert_eq!(network.blocks(Duration::from_secs(59)), 1);
     }
 
     #[test]

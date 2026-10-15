@@ -11,10 +11,11 @@ use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters, NetworkTimestamp};
 use heika_core::signature::Signature;
 use heika_transaction::{
-    AccountRestriction, AccountRestrictionFlags, AggregateVersion, AliasAction, Body, LinkAction,
-    LockHashAlgorithm, Metadata, MosaicFlags, MosaicId, MosaicRestrictionType,
-    MosaicSupplyChangeAction, NamespaceId, NamespaceRegistrationType, Transaction,
-    TransactionsHashCalculation, UnresolvedAddress, UnresolvedMosaic, UnresolvedMosaicId,
+    AccountRestriction, AccountRestrictionFlags, AggregateVersion, AliasAction, Body, Failure,
+    LinkAction, Location, LockHashAlgorithm, Metadata, MosaicFlags, MosaicId,
+    MosaicRestrictionType, MosaicSupplyChangeAction, NamespaceId, NamespaceRegistrationType,
+    Transaction, TransactionsHashCalculation, UnresolvedAddress, UnresolvedMosaic,
+    UnresolvedMosaicId,
 };
 use heika_wallet::harvest_request;
 
@@ -213,7 +214,25 @@ pub fn describe(transaction: &Transaction, now: SystemTime) -> Description {
             description.embedded.push(inner);
         }
     }
+    // ネットワークがわかれば、ノードが状態を見ずに弾くところを、見つかった場所に添える
+    if let Some(network) = context.network {
+        for problem in transaction.validate(network) {
+            let target = match problem.location {
+                Location::Transaction => &mut description,
+                Location::Embedded(index) => &mut description.embedded[index],
+            };
+            target.push("ノードで弾かれる", describe_failure(&problem.failure));
+        }
+    }
     description
+}
+
+/// 弾かれる理由。REST のステータスと見比べられるように、catapult の結果の名前を添える。
+pub fn describe_failure(failure: &Failure) -> String {
+    match failure.result() {
+        Some((name, _)) => format!("{failure}（{name}）"),
+        None => failure.to_string(),
+    }
 }
 
 fn describe_body(

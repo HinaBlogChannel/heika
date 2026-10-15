@@ -36,7 +36,7 @@ const MAX_TRANSACTION_LIFETIME_HOURS: u64 = 6;
 /// catapult の `ionet::PacketType::Push_Transactions`
 const PUSH_TRANSACTIONS: u32 = 9;
 /// ネットワークの通貨（XYM）の可分性。メインネットもテストネットも 6
-const XYM_DIVISIBILITY: usize = 6;
+const XYM_DIVISIBILITY: u8 = 6;
 
 #[derive(Subcommand)]
 pub enum TxCommand {
@@ -605,16 +605,7 @@ fn show_missing_cosigners(transaction: &Transaction) -> Result<(), Failure> {
 
 /// XYM の量（`1.5` など）を、いちばん小さい単位の数にする
 fn parse_xym(text: &str) -> Result<u64, String> {
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
-    if whole.is_empty() || !digits(whole) || !digits(fraction) || text.ends_with('.') {
-        return Err("1.5 のように、数字と小数点で書いてください".to_owned());
-    }
-    if fraction.len() > XYM_DIVISIBILITY {
-        return Err(format!("小数点の下は {XYM_DIVISIBILITY} 桁までです"));
-    }
-    let scaled = format!("{whole}{fraction:0<XYM_DIVISIBILITY$}");
-    scaled.parse().map_err(|_| "量が大きすぎます".to_owned())
+    heika_wallet::amount::parse(text, XYM_DIVISIBILITY).map_err(|error| error.to_string())
 }
 
 /// ネットワークのエポックからのミリ秒。
@@ -639,28 +630,6 @@ pub fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_xym_amounts_in_the_smallest_unit() {
-        assert_eq!(parse_xym("1.5"), Ok(1_500_000));
-        assert_eq!(parse_xym("0.000001"), Ok(1));
-        assert_eq!(parse_xym("12"), Ok(12_000_000));
-        assert_eq!(parse_xym("0"), Ok(0));
-        for wrong in [
-            "",
-            ".5",
-            "1.",
-            "1.2.3",
-            "-1",
-            "1,000",
-            " 1",
-            "1e3",
-            "0.0000001",
-        ] {
-            assert!(parse_xym(wrong).is_err(), "{wrong}");
-        }
-        assert!(parse_xym("18446744073709.551616").is_err());
-    }
 
     #[test]
     fn the_deadline_limit_fits_every_network() {

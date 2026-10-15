@@ -1,14 +1,20 @@
 [package]
 name = "heika-gui-ui"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 publish = false
 
 # heika のワークスペースには入れず、依存と Cargo.lock を分ける。
 # このパッケージは WebView に出す画面（trunk で wasm にする）で、src-tauri がアプリの本体
 [workspace]
 members = ["src-tauri"]
+
+# 版は heika のワークスペースと同じにする。CI で確かめる
+[workspace.package]
+version = "0.6.0"
+edition = "2024"
+license = "AGPL-3.0-only"
 
 [dependencies]
 leptos = { version = "0.8.22", features = ["csr"] }

@@ -1,8 +1,8 @@
 [package]
 name = "heika-gui"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 publish = false
 
 # モバイルでは、この lib を Android と iOS のアプリから読み込む

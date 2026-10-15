@@ -1,142 +1,139 @@
-# v1.2.3 の形のタグで、4つのターゲットのバイナリを作って Release に載せる。
-# 手で回すと、ビルドまでして Release は作らない
+# v1.2.3 の形のタグで、そのコミットの master の CI（ci.yaml）が作ったものを Release と Pages に出す。ビルドはし直さない。
+#
+# - CI がまだ走っていれば、終わるまで待つ。CI が落ちていたら、何も出さずに落ちる
+# - タグと Cargo.toml の版が同じか、Release に載せるファイルがそろっているか、
+#   それぞれに CI の来歴の証明が付いているか、APK が決めた鍵で署名されているかを確かめてから出す
+# - 落ちたら、CI を直して master に push し直すか、CI が通ったあとでこのワークフローを Re-run する
 name: Release
 
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.99.0
+  # APK を署名する鍵の証明書の SHA-256。README の「インストール」にも同じものを書いている
+  APK_CERT_SHA256: 79b38fb9557cf0249f75aadf806805f3e5b4f6b196a69b6f986c075cdb64c5ad
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yaml
-
-  version:
-    if: github.event_name == 'push'
+  release:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: タグと Cargo.toml のバージョンが同じか確かめる
+      - name: タグと Cargo.toml の版が同じか確かめる
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "heika-cli") | .version')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::タグ $GITHUB_REF_NAME と Cargo.toml のバージョン $version が違います"
+            echo "::error::タグ $GITHUB_REF_NAME と Cargo.toml の版 $version が違います"
             exit 1
           fi
-
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-24.04
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-          - target: aarch64-apple-darwin
-            os: macos-15
-          - target: x86_64-pc-windows-msvc
-            os: windows-2025
-    runs-on: ${{ matrix.os }}
-    env:
-      TARGET: ${{ matrix.target }}
-      PACKAGE: heika-${{ github.ref_name }}-${{ matrix.target }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust のツールチェイン
+      - name: このコミットの master の CI が終わるのを待つ
+        id: ci
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
-          rustup default "$RUST_TOOLCHAIN"
-      - name: musl の C コンパイラー（ring が使う）
-        if: endsWith(matrix.target, '-musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked -p heika-cli --target "$TARGET"
-      - name: 埋め込んだソースを、README の手順で実行せずに取り出せるか確かめる
-        run: |
-          case "$RUNNER_OS" in
-            Linux)
-              objcopy -O binary --only-section=.heika_source "target/$TARGET/release/heika" source.zip
-              unzip -tq source.zip ;;
-            macOS)
-              segedit "target/$TARGET/release/heika" -extract __TEXT __heika_source source.zip
-              unzip -tq source.zip ;;
-            Windows)
-              llvm-objcopy --dump-section .hksrc=source.zip "target/$TARGET/release/heika.exe"
-              7z t source.zip ;;
-          esac
-      - name: まとめる
-        run: |
-          mkdir -p "dist/$PACKAGE"
-          if [ "$RUNNER_OS" = Windows ]; then archive="$PACKAGE.zip"; else archive="$PACKAGE.tar.gz"; fi
-          sed -e "s|{{VERSION}}|$GITHUB_REF_NAME|g" \
-              -e "s|{{REPOSITORY}}|$GITHUB_REPOSITORY|g" \
-              -e "s|{{ARCHIVE}}|$archive|g" \
-              crates/heika-cli/assets/README.txt > "dist/$PACKAGE/README.txt"
-          if grep -n '{{' "dist/$PACKAGE/README.txt"; then
-            echo "::error::README.txt に埋めていない {{ }} があります"
-            exit 1
-          fi
-          cp -r docs "dist/$PACKAGE/"
-          cp LICENSE crates/heika-cli/THIRD-PARTY-LICENSES "dist/$PACKAGE/"
-          cp crates/heika-wallet/src/bip39/NOTICE "dist/$PACKAGE/NOTICE-BIP39"
-          if [ "$RUNNER_OS" = Windows ]; then
-            cp "target/$TARGET/release/heika.exe" "dist/$PACKAGE/"
-            (cd dist && 7z a "$PACKAGE.zip" "$PACKAGE")
-          else
-            cp "target/$TARGET/release/heika" "dist/$PACKAGE/"
-            tar -C dist -czf "dist/$PACKAGE.tar.gz" "$PACKAGE"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ env.PACKAGE }}
-          path: dist/${{ env.PACKAGE }}.*
-          if-no-files-found: error
-
-  publish:
-    needs: [ci, build, version]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    steps:
+          while :; do
+            run=$(gh run list --workflow ci.yaml --branch master --event push --commit "$GITHUB_SHA" \
+              --limit 1 --json databaseId,status,conclusion,url --jq '.[0] // empty')
+            if [ -z "$run" ]; then
+              echo "このコミットの CI の実行がまだありません"
+            elif [ "$(jq -r .status <<< "$run")" != completed ]; then
+              echo "CI が走っています: $(jq -r .url <<< "$run")"
+            elif [ "$(jq -r .conclusion <<< "$run")" = success ]; then
+              echo "run-id=$(jq -r .databaseId <<< "$run")" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "::error::このコミットの CI が通っていません（$(jq -r .conclusion <<< "$run")）: $(jq -r .url <<< "$run")"
+              exit 1
+            fi
+            sleep 60
+          done
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          run-id: ${{ steps.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
           pattern: heika-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          run-id: ${{ steps.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+          name: site
+          path: site
+      - name: Release に載せるファイルが、過不足なくそろっているか確かめる
+        run: |
+          v=$GITHUB_REF_NAME
+          expected=(
+            "heika-$v-x86_64-unknown-linux-musl.tar.gz"
+            "heika-$v-aarch64-unknown-linux-musl.tar.gz"
+            "heika-$v-aarch64-apple-darwin.tar.gz"
+            "heika-$v-x86_64-pc-windows-msvc.zip"
+            "heika-gui-$v-linux-x86_64.deb"
+            "heika-gui-$v-linux-x86_64.rpm"
+            "heika-gui-$v-linux-x86_64.AppImage"
+            "heika-gui-$v-macos-aarch64.dmg"
+            "heika-gui-$v-windows-x86_64.msi"
+            "heika-gui-$v-windows-x86_64-setup.exe"
+            "heika-gui-$v-android-aarch64.apk"
+            "heika-gui-$v-ios-aarch64-unsigned.ipa"
+          )
+          if ! diff <(printf '%s\n' "${expected[@]}" | sort) <(ls dist | sort); then
+            echo "::error::Release に載せるファイルが、決めたものと違います（< が足りないもの、> が余計なもの）"
+            exit 1
+          fi
+      - name: どのファイルにも、このリポジトリの CI の来歴の証明が付いているか確かめる
+        run: |
+          for file in dist/*; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yaml" > /dev/null
+            echo "ok: $file"
+          done
+      - name: APK が決めた鍵で署名されているか確かめる
+        run: |
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          digests=$("$build_tools/apksigner" verify --print-certs dist/*.apk | sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' | sort -u)
+          if [ "$digests" != "$APK_CERT_SHA256" ]; then
+            echo "::error::APK の署名の鍵が違います: $digests"
+            exit 1
+          fi
       - name: チェックサム
         run: (cd dist && sha256sum heika-* > SHA256SUMS)
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: dist/heika-*
       - name: Release を作る
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          # v0.2.0-rc.1 のようにハイフンのあるタグは、プレリリースにする
-          prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            prerelease=(--prerelease)
-          fi
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "heika $GITHUB_REF_NAME" --generate-notes "${prerelease[@]}"
+            --verify-tag --title "heika $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md --generate-notes
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  # examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ になる
+  pages:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}examples/web-vanitygen/
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

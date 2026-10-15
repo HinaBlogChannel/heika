@@ -1,5 +1,11 @@
-# master への push と PR で、整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧の確認、examples のビルドをする。
-# release.yaml からも、ビルドと並べて呼ぶ
+# master への push と PR で、確かめることと、リリースに載せるもののビルドを全部する。
+#
+# - 確かめること: 整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧、examples
+# - リリースに載せるもの: CLI の4つのターゲット、GUI のデスクトップの3つと Android と iOS、Pages のサイト
+#
+# master への push では、ビルドしたジョブの中で来歴の証明を付ける。タグを打つと release.yaml が、
+# そのコミットのこの実行が通るのを待ち、ここで作ったものをそのまま Release と Pages に出す。
+# だから、master の CI が緑なら、そのコミットはリリースしてよい。
 name: CI
 
 on:
@@ -7,20 +13,19 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  # release.yaml から呼ばれたときは github.workflow が Release になるので、push の CI を止めない
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+  # master の実行は止めない。どのコミットにもタグを打てるように、最後まで走らせる
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: 1.99.0
   CARGO_ABOUT: 0.9.2
+  APP_IDENTIFIER: ${{ vars.APP_IDENTIFIER || 'io.github.hinablogchannel.heika' }}
 
 jobs:
   check:
@@ -29,10 +34,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust のツールチェイン
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/rust
+        with:
+          components: rustfmt,clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -40,7 +44,7 @@ jobs:
       - name: heika-cert を feature つきのモジュールも含めて
         run: cargo test -p heika-cert --all-features --locked
 
-  # Windows でだけ使うコードと、Unix でだけ読み込むものの取り違えを、タグを打つ前に見つける
+  # Windows でだけ使うコードと、Unix でだけ読み込むものの取り違えを見つける
   windows:
     runs-on: windows-2025
     defaults:
@@ -50,10 +54,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust のツールチェイン
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/rust
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
@@ -63,10 +66,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust のツールチェイン
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: 公式ベクターと SDK のベクターとの照合
         run: cargo test -p heika-vectors --locked -- --include-ignored
@@ -82,10 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust のツールチェイン
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo install cargo-about --version "$CARGO_ABOUT" --locked --features cli
       - name: 依存のライセンスの一覧を作り直して、コミットしたものと同じか確かめる
@@ -94,7 +91,8 @@ jobs:
           cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
           git diff --exit-code
 
-  # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる
+  # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる。
+  # 通ったら、Pages に出すサイトの形に並べて Artifact に上げる
   examples:
     runs-on: ubuntu-24.04
     defaults:
@@ -104,13 +102,344 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust のツールチェイン
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
-          rustup default "$RUST_TOOLCHAIN"
+      - uses: ./.github/actions/rust
+        with:
+          components: rustfmt,clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: examples/web-vanitygen
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
       - run: cargo test --lib --locked
+      - uses: ./.github/actions/trunk
+      - run: trunk build --release --locked
+      - name: サイトの形に並べる
+        working-directory: .
+        run: |
+          mkdir -p site/examples
+          cp -r examples/web-vanitygen/dist site/examples/web-vanitygen
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: site
+          if-no-files-found: error
+
+  # リリースに載せるもののファイル名に入れる版。GUI の版がワークスペースと同じかも、ここで確かめる
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+      - id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "heika-cli") | .version')
+          gui=$(cd apps/heika-gui && cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "heika-gui") | .version')
+          if [ "$gui" != "$version" ]; then
+            echo "::error::heika-gui の版 $gui が、ワークスペースの $version と違います（apps/heika-gui/Cargo.toml）"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  cli:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: v${{ needs.version.outputs.version }}
+      PACKAGE: heika-v${{ needs.version.outputs.version }}-${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl の C コンパイラー（ring が使う）
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p heika-cli --target "$TARGET"
+      - name: 埋め込んだソースを、README の手順で実行せずに取り出せるか確かめる
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              objcopy -O binary --only-section=.heika_source "target/$TARGET/release/heika" source.zip
+              unzip -tq source.zip ;;
+            macOS)
+              segedit "target/$TARGET/release/heika" -extract __TEXT __heika_source source.zip
+              unzip -tq source.zip ;;
+            Windows)
+              llvm-objcopy --dump-section .hksrc=source.zip "target/$TARGET/release/heika.exe"
+              7z t source.zip ;;
+          esac
+      - name: まとめる
+        run: |
+          mkdir -p "dist/$PACKAGE"
+          if [ "$RUNNER_OS" = Windows ]; then archive="$PACKAGE.zip"; else archive="$PACKAGE.tar.gz"; fi
+          sed -e "s|{{VERSION}}|$VERSION|g" \
+              -e "s|{{REPOSITORY}}|$GITHUB_REPOSITORY|g" \
+              -e "s|{{ARCHIVE}}|$archive|g" \
+              crates/heika-cli/assets/README.txt > "dist/$PACKAGE/README.txt"
+          if grep -n '{{' "dist/$PACKAGE/README.txt"; then
+            echo "::error::README.txt に埋めていない {{ }} があります"
+            exit 1
+          fi
+          cp -r docs "dist/$PACKAGE/"
+          cp LICENSE crates/heika-cli/THIRD-PARTY-LICENSES "dist/$PACKAGE/"
+          cp crates/heika-wallet/src/bip39/NOTICE "dist/$PACKAGE/NOTICE-BIP39"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/$TARGET/release/heika.exe" "dist/$PACKAGE/"
+            (cd dist && 7z a "$PACKAGE.zip" "$PACKAGE")
+          else
+            cp "target/$TARGET/release/heika" "dist/$PACKAGE/"
+            tar -C dist -czf "dist/$PACKAGE.tar.gz" "$PACKAGE"
+          fi
+      - if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ env.PACKAGE }}.*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/${{ env.PACKAGE }}.*
+          if-no-files-found: error
+
+  # GUI の画面（trunk で作る wasm）は1回だけ作り、それぞれのジョブに配る
+  gui-frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/heika-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/trunk
+      - run: trunk build --release --locked
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend
+          path: apps/heika-gui/dist
+          if-no-files-found: error
+
+  gui-desktop:
+    needs: [version, gui-frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-aarch64
+          - os: windows-2025
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PREFIX: heika-gui-v${{ needs.version.outputs.version }}-${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/heika-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/gui-project
+      - name: Linux で WebKitGTK などを入れる
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: ./.github/actions/rust
+      - uses: ./.github/actions/tauri-cli
+      - name: ビルド
+        run: |
+          cargo tauri icon icon.png
+          cargo tauri build 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
+      - name: ファイル名をそろえて1か所にまとめる
+        run: |
+          mkdir out
+          bundle=target/release/bundle
+          case "$RUNNER_OS" in
+            Linux)
+              cp "$bundle"/deb/*.deb "out/$PREFIX.deb"
+              cp "$bundle"/rpm/*.rpm "out/$PREFIX.rpm"
+              cp "$bundle"/appimage/*.AppImage "out/$PREFIX.AppImage" ;;
+            macOS)
+              cp "$bundle"/dmg/*.dmg "out/$PREFIX.dmg" ;;
+            Windows)
+              cp "$bundle"/msi/*.msi "out/$PREFIX.msi"
+              cp "$bundle"/nsis/*.exe "out/$PREFIX-setup.exe" ;;
+          esac
+          ls -l out
+      - if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: apps/heika-gui/out/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PREFIX }}
+          path: apps/heika-gui/out/*
+          if-no-files-found: error
+
+  # APK は、Secrets の ANDROID_KEYSTORE（PKCS#12 を base64 にしたもの）と ANDROID_KEYSTORE_PASSWORD の鍵で署名する。
+  # 鍵が変わると入れたアプリを更新できず、アンインストールするとキーストアも消えるので、Release には必ずこの鍵のものを載せる。
+  # Secrets を読めない実行（フォークからの PR など）では、ジョブの中で作る使い捨ての鍵で署名し、名前に -throwaway を付ける
+  gui-android:
+    needs: [version, gui-frontend]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PREFIX: heika-gui-v${{ needs.version.outputs.version }}-android-aarch64
+    defaults:
+      run:
+        working-directory: apps/heika-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/gui-project
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: ./.github/actions/rust
+        with:
+          targets: aarch64-linux-android
+      - uses: ./.github/actions/tauri-cli
+      - name: Android のプロジェクトを作る
+        # ランナーに入っている Android SDK と NDK を使う
+        run: |
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          NDK_HOME="$ANDROID_NDK_LATEST_HOME" cargo tauri android init --ci
+          # プロジェクトを作ったあとに作ると、Android のアイコンもそこに入る
+          cargo tauri icon icon.png
+      - name: ビルド
+        run: cargo tauri android build --apk --target aarch64 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
+      - name: 署名する
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-unsigned.apk' | head -1)
+          keystore="$RUNNER_TEMP/keystore.p12"
+          if [ -n "$ANDROID_KEYSTORE" ]; then
+            printf '%s' "$ANDROID_KEYSTORE" | base64 -d > "$keystore"
+            apk="$PREFIX.apk"
+          else
+            echo "::warning::ANDROID_KEYSTORE がないので、使い捨ての鍵で署名します。Release には載せられません"
+            ANDROID_KEYSTORE_PASSWORD=throwaway
+            keytool -genkeypair -storetype PKCS12 -keystore "$keystore" -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias heika -keyalg RSA -keysize 2048 -validity 1 -dname 'CN=heika-gui throwaway'
+            apk="$PREFIX-throwaway.apk"
+          fi
+          mkdir out
+          "$build_tools/zipalign" -p 4 "$unsigned" aligned.apk
+          "$build_tools/apksigner" sign \
+            --ks "$keystore" --ks-type PKCS12 --ks-key-alias heika --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --out "out/$apk" aligned.apk
+          rm -f "$keystore"
+          "$build_tools/apksigner" verify --print-certs "out/$apk" | grep -E 'DN|SHA-256'
+      - if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: apps/heika-gui/out/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PREFIX }}
+          path: apps/heika-gui/out/*
+          if-no-files-found: error
+
+  # iOS は tauri ios build --no-sign で、署名しない IPA にする。そのままでは入れられず、使う人が署名し直す前提
+  gui-ios:
+    needs: [version, gui-frontend]
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PREFIX: heika-gui-v${{ needs.version.outputs.version }}-ios-aarch64-unsigned
+    defaults:
+      run:
+        working-directory: apps/heika-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/gui-project
+      - uses: ./.github/actions/rust
+        with:
+          targets: aarch64-apple-ios
+      - uses: ./.github/actions/tauri-cli
+      - name: Xcode のプロジェクトを作る
+        run: |
+          brew install xcodegen
+          cargo tauri ios init --ci
+          # プロジェクトを作ったあとに作ると、iOS のアイコンもそこに入る
+          cargo tauri icon icon.png
+      - name: 署名せずにビルドする
+        # Xcode の中の Rust のビルドは、tauri ios build が動いているあいだしか通らないので、xcodebuild を直接は呼ばない。
+        # --no-sign は、署名せずに archive して、中の .app を Payload/ に入れた IPA にする
+        run: cargo tauri ios build --ci --no-sign 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
+      - name: ファイル名をそろえる
+        run: |
+          mkdir out
+          ipa=$(find src-tauri/gen/apple/build -name '*.ipa' | head -1)
+          mv "$ipa" "out/$PREFIX.ipa"
+      - if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: apps/heika-gui/out/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PREFIX }}
+          path: apps/heika-gui/out/*
+          if-no-files-found: error

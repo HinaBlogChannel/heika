@@ -1,0 +1,20 @@
+# heika-gui をビルドする前の準備。画面は frontend のジョブで作ったものを使い、ビルドの前に trunk を走らせない。
+# 識別子（Android のパッケージ名にもなる）は、ワークフローの環境変数 APP_IDENTIFIER から取る
+name: heika-gui の準備
+description: frontend のジョブで作った画面を置き、tauri.conf.json に識別子を入れる
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: frontend
+        path: apps/heika-gui/dist
+    - shell: bash
+      working-directory: apps/heika-gui/src-tauri
+      run: |
+        if ! printf '%s\n' "$APP_IDENTIFIER" | grep -Eqx '[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)+'; then
+          echo "::error::識別子 $APP_IDENTIFIER は、英字で始まる英数字をドットでつないだ形にしてください"
+          exit 1
+        fi
+        jq --arg identifier "$APP_IDENTIFIER" '.identifier = $identifier | .build.beforeBuildCommand = ""' tauri.conf.json > conf.json
+        mv conf.json tauri.conf.json

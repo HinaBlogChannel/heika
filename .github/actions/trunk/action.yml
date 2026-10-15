@@ -1,0 +1,14 @@
+# wasm の画面を作る trunk を、ハッシュを確かめて入れる
+name: trunk
+description: 固定した版の trunk を入れる
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TRUNK: 0.21.14
+        TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+      run: |
+        curl -sSfLo "$RUNNER_TEMP/trunk.tar.gz" "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK/trunk-x86_64-unknown-linux-gnu.tar.gz"
+        echo "$TRUNK_SHA256  $RUNNER_TEMP/trunk.tar.gz" | sha256sum -c -
+        tar xzf "$RUNNER_TEMP/trunk.tar.gz" -C "$HOME/.cargo/bin" trunk

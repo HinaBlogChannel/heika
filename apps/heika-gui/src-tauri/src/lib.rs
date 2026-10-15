@@ -18,6 +18,8 @@ use serde::Serialize;
 use tauri::Manager;
 use zeroize::Zeroizing;
 
+mod rest;
+
 /// 画面の下に出す、どこで動いているか
 #[derive(Serialize)]
 struct About {
@@ -341,6 +343,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let path = keystore_path(app)?;
+            // 設定は、キーストアと同じフォルダーに置く
+            app.manage(rest::Config::load(path.with_file_name("settings.json")));
             app.manage(Wallet(Arc::new(Mutex::new(Session {
                 path,
                 pending: None,
@@ -358,6 +362,9 @@ pub fn run() {
             unlock,
             accounts,
             lock,
+            rest::settings,
+            rest::save_settings,
+            rest::balance,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri のアプリを起動できませんでした");

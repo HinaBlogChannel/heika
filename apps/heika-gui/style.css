@@ -55,6 +55,135 @@ main {
   padding: max(env(safe-area-inset-top), 2.5rem) 1.25rem 2rem;
 }
 
+/*
+ * キーストアを開いたあとのメニュー。狭い画面では下に固定したタブ、広い画面では左の列にする。
+ * 選んでいる項目は、深い青の文字と短い線で示す
+ */
+.menu.glass {
+  display: flex;
+  background: var(--glass);
+}
+
+.menu .brand {
+  display: none;
+}
+
+.menu .item {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.55rem 0.25rem 0.45rem;
+  border: none;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.menu .item:hover {
+  background: none;
+  color: var(--blue);
+}
+
+.menu .item.active {
+  color: var(--blue);
+}
+
+.menu .item.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1.5rem;
+  height: 2px;
+  background: var(--blue);
+  transform: translateX(-50%);
+}
+
+svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (max-width: 719px) {
+  .menu.glass {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 10;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-width: 1px 0 0;
+    border-radius: 0;
+  }
+
+  .shell.inside main {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (min-width: 720px) {
+  .shell.inside {
+    display: grid;
+    grid-template-columns: 13rem 1fr;
+    min-height: 100vh;
+  }
+
+  .shell.inside main {
+    width: 100%;
+    margin: 0;
+    padding-left: 3rem;
+  }
+
+  .shell.inside main > h1 {
+    display: none;
+  }
+
+  .menu.glass {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 2.5rem 1rem;
+    border-width: 0 1px 0 0;
+    border-radius: 0;
+  }
+
+  .menu .brand {
+    display: block;
+    margin: 0 0 2rem 0.75rem;
+    font-family: var(--serif);
+    font-size: 1.6rem;
+    letter-spacing: 0.14em;
+    color: var(--blue);
+  }
+
+  .menu .item {
+    flex: none;
+    flex-direction: row;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.9rem;
+  }
+
+  .menu .item.active::before {
+    top: 50%;
+    left: 0;
+    width: 2px;
+    height: 1.25rem;
+    transform: translateY(-50%);
+  }
+}
+
 /* 名前の右に、消えていく細い線を引く */
 h1 {
   display: flex;
@@ -292,6 +421,7 @@ input[type="checkbox"] {
 
 input[type="text"],
 input[type="password"],
+input[type="url"],
 select {
   width: 100%;
   padding: 0.5rem 0.1rem;
@@ -349,6 +479,25 @@ form > input {
   padding: 1rem 1.25rem;
 }
 
+/* アカウントの一覧は、押すと残高に進む */
+button.card {
+  display: block;
+  width: 100%;
+  border-color: var(--blue-line);
+  text-align: left;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+button.card:hover {
+  background-color: var(--glass-hover);
+  border-color: var(--blue);
+}
+
+button.card .address {
+  display: block;
+}
+
 .card .row {
   margin-top: 0;
 }
@@ -378,6 +527,154 @@ form > input {
   font-size: 0.95rem;
   letter-spacing: 0.04em;
   overflow-wrap: anywhere;
+}
+
+.heading {
+  margin-top: 0;
+}
+
+.heading strong {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.2rem;
+  color: var(--blue);
+}
+
+/* アカウントの名前は、押すとアカウントの一覧に移る */
+button.account {
+  padding: 0;
+  text-decoration: none;
+}
+
+/* 金額を隠す目のボタン */
+button.eye {
+  display: flex;
+  margin-left: auto;
+  padding: 0.25rem;
+  color: var(--ink-soft);
+}
+
+button.card.selected {
+  border-color: var(--blue);
+}
+
+.lead.section {
+  margin-top: 2.5rem;
+}
+
+.address .copy {
+  margin-left: 0.75rem;
+  font-family: var(--sans);
+}
+
+.address.small {
+  font-size: 0.8rem;
+}
+
+/* 残高。整数の部分を大きく、小数と単位を小さく */
+.balance {
+  margin: 2rem 0 1.5rem;
+}
+
+.amount {
+  margin: 0 0 0.5rem;
+  font-family: var(--serif);
+  color: var(--blue);
+  line-height: 1.2;
+}
+
+.amount .whole {
+  font-size: 2.6rem;
+  letter-spacing: 0.04em;
+}
+
+.amount .fraction {
+  font-size: 1.3rem;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.amount .unit {
+  margin-left: 0.6rem;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  letter-spacing: 0.12em;
+  color: var(--ink-soft);
+}
+
+.amount.pending {
+  font-size: 1.3rem;
+  color: var(--ink-soft);
+}
+
+.mosaics {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mosaics li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--blue-line);
+}
+
+.mosaics .id {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.mosaics .value {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+/* 何を確かめて、何を信じたか */
+.verified {
+  padding: 1rem 1.25rem;
+}
+
+.verified .hint {
+  margin: 0;
+}
+
+.stamp {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.25rem;
+  font-family: var(--serif);
+  color: var(--blue);
+  letter-spacing: 0.1em;
+}
+
+.stamp::before {
+  content: "";
+  width: 1.25rem;
+  height: 1px;
+  background: var(--rose);
+}
+
+details {
+  margin-top: 0.75rem;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+
+details .label {
+  margin: 0.75rem 0 0.25rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
 }
 
 .error {

@@ -202,47 +202,10 @@ fn name(mosaic: &VerifiedMosaic, network: &NetworkParameters) -> String {
 
 /// 可分性の桁で区切った量。定義がもうなければ、整数の量のまま出す
 fn amount(mosaic: &VerifiedMosaic) -> String {
-    match mosaic.divisibility {
-        None => format!(
+    mosaic.decimal().unwrap_or_else(|| {
+        format!(
             "{}（定義がもうないので、可分性がわかりません）",
             mosaic.amount
-        ),
-        Some(0) => mosaic.amount.to_string(),
-        Some(divisibility) => {
-            let digits = format!(
-                "{:0>width$}",
-                mosaic.amount,
-                width = usize::from(divisibility) + 1
-            );
-            let (whole, fraction) = digits.split_at(digits.len() - usize::from(divisibility));
-            format!("{whole}.{fraction}")
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mosaic(amount: u64, divisibility: Option<u8>) -> VerifiedMosaic {
-        VerifiedMosaic {
-            id: 1,
-            amount,
-            divisibility,
-        }
-    }
-
-    #[test]
-    fn splits_amounts_by_divisibility() {
-        assert_eq!(amount(&mosaic(1_234_567_890, Some(6))), "1234.567890");
-        assert_eq!(amount(&mosaic(5, Some(6))), "0.000005");
-        assert_eq!(amount(&mosaic(0, Some(2))), "0.00");
-        assert_eq!(amount(&mosaic(42, Some(0))), "42");
-        assert_eq!(
-            amount(&mosaic(u64::MAX, Some(255))).len(),
-            // 0. と、255 桁
-            2 + 255
-        );
-        assert!(amount(&mosaic(7, None)).starts_with("7（"));
-    }
+        )
+    })
 }

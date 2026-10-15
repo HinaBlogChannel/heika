@@ -59,6 +59,19 @@ pub struct VerifiedMosaic {
     pub divisibility: Option<u8>,
 }
 
+impl VerifiedMosaic {
+    /// 可分性の桁で区切った量（`1234.567890` など）。定義がもうなく、可分性がわからなければ `None`
+    pub fn decimal(&self) -> Option<String> {
+        let divisibility = usize::from(self.divisibility?);
+        if divisibility == 0 {
+            return Some(self.amount.to_string());
+        }
+        let digits = format!("{:0>width$}", self.amount, width = divisibility + 1);
+        let (whole, fraction) = digits.split_at(digits.len() - divisibility);
+        Some(format!("{whole}.{fraction}"))
+    }
+}
+
 /// 1つのモザイクの定義について取ってきたもの
 #[derive(Clone, Debug)]
 pub struct MosaicParts {
@@ -394,5 +407,30 @@ where
     match optional(fetch, path.clone()).await? {
         Some(value) => Ok(value),
         None => Err(BalanceError::NotFound { path }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mosaic(amount: u64, divisibility: Option<u8>) -> VerifiedMosaic {
+        VerifiedMosaic {
+            id: 1,
+            amount,
+            divisibility,
+        }
+    }
+
+    #[test]
+    fn splits_amounts_by_divisibility() {
+        let decimal = |amount, divisibility| mosaic(amount, divisibility).decimal();
+        assert_eq!(decimal(1_234_567_890, Some(6)).unwrap(), "1234.567890");
+        assert_eq!(decimal(5, Some(6)).unwrap(), "0.000005");
+        assert_eq!(decimal(0, Some(2)).unwrap(), "0.00");
+        assert_eq!(decimal(42, Some(0)).unwrap(), "42");
+        // 0. と、255 桁
+        assert_eq!(decimal(u64::MAX, Some(255)).unwrap().len(), 2 + 255);
+        assert_eq!(decimal(7, None), None);
     }
 }

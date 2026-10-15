@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "heika",
-        "width": 480,
-        "height": 640,
+        "width": 960,
+        "height": 680,
         "resizable": true
       }
     ],

@@ -55,6 +55,135 @@ main {
   padding: max(env(safe-area-inset-top), 2.5rem) 1.25rem 2rem;
 }
 
+/*
+ * キーストアを開いたあとのメニュー。狭い画面では下に固定したタブ、広い画面では左の列にする。
+ * 選んでいる項目は、深い青の文字と短い線で示す
+ */
+.menu.glass {
+  display: flex;
+  background: var(--glass);
+}
+
+.menu .brand {
+  display: none;
+}
+
+.menu .item {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.55rem 0.25rem 0.45rem;
+  border: none;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.menu .item:hover {
+  background: none;
+  color: var(--blue);
+}
+
+.menu .item.active {
+  color: var(--blue);
+}
+
+.menu .item.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1.5rem;
+  height: 2px;
+  background: var(--blue);
+  transform: translateX(-50%);
+}
+
+svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (max-width: 719px) {
+  .menu.glass {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 10;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-width: 1px 0 0;
+    border-radius: 0;
+  }
+
+  .shell.inside main {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (min-width: 720px) {
+  .shell.inside {
+    display: grid;
+    grid-template-columns: 13rem 1fr;
+    min-height: 100vh;
+  }
+
+  .shell.inside main {
+    width: 100%;
+    margin: 0;
+    padding-left: 3rem;
+  }
+
+  .shell.inside main > h1 {
+    display: none;
+  }
+
+  .menu.glass {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 2.5rem 1rem;
+    border-width: 0 1px 0 0;
+    border-radius: 0;
+  }
+
+  .menu .brand {
+    display: block;
+    margin: 0 0 2rem 0.75rem;
+    font-family: var(--serif);
+    font-size: 1.6rem;
+    letter-spacing: 0.14em;
+    color: var(--blue);
+  }
+
+  .menu .item {
+    flex: none;
+    flex-direction: row;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.9rem;
+  }
+
+  .menu .item.active::before {
+    top: 50%;
+    left: 0;
+    width: 2px;
+    height: 1.25rem;
+    transform: translateY(-50%);
+  }
+}
+
 /* 名前の右に、消えていく細い線を引く */
 h1 {
   display: flex;
@@ -409,6 +538,28 @@ button.card .address {
   font-weight: 400;
   font-size: 1.2rem;
   color: var(--blue);
+}
+
+/* アカウントの名前は、押すとアカウントの一覧に移る */
+button.account {
+  padding: 0;
+  text-decoration: none;
+}
+
+/* 金額を隠す目のボタン */
+button.eye {
+  display: flex;
+  margin-left: auto;
+  padding: 0.25rem;
+  color: var(--ink-soft);
+}
+
+button.card.selected {
+  border-color: var(--blue);
+}
+
+.lead.section {
+  margin-top: 2.5rem;
 }
 
 .address .copy {

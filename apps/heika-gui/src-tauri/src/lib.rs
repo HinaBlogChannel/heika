@@ -363,7 +363,7 @@ pub fn run() {
             accounts,
             lock,
             rest::settings,
-            rest::set_rest,
+            rest::save_settings,
             rest::balance,
         ])
         .run(tauri::generate_context!())

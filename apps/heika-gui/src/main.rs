@@ -62,14 +62,16 @@ struct BalanceArgs {
 }
 
 #[derive(Serialize)]
-struct RestArgs {
-    rest: String,
+struct SettingsArgs {
+    settings: Settings,
 }
 
-/// 本体の `settings` が返すもの
-#[derive(Clone, Deserialize)]
+/// 本体が覚えている設定
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Settings {
     rest: Option<String>,
+    hide_amounts: bool,
+    account: Option<String>,
 }
 
 /// 本体の `balance` が返す、確かめた残高
@@ -142,10 +144,17 @@ enum Screen {
     ImportKey,
     Passphrase(Source),
     Unlock(String),
-    Accounts(Vec<AccountView>),
-    Balance(AccountView),
-    /// 決めたら戻る画面
-    Settings(Box<Screen>),
+    /// ここからはキーストアを開いたあと。メニューを出す
+    Home,
+    Accounts,
+    Settings,
+}
+
+impl Screen {
+    /// キーストアを開いたあとの画面か
+    fn inside(&self) -> bool {
+        matches!(self, Self::Home | Self::Accounts | Self::Settings)
+    }
 }
 
 /// どの画面からも使うもの
@@ -155,6 +164,9 @@ struct Ctx {
     error: RwSignal<Option<String>>,
     /// 本体の返事を待っているあいだは、ボタンを押せなくする
     busy: RwSignal<bool>,
+    /// 開いているキーストアのアカウント
+    accounts: RwSignal<Vec<AccountView>>,
+    settings: RwSignal<Settings>,
 }
 
 impl Ctx {
@@ -182,11 +194,33 @@ impl Ctx {
         });
     }
 
-    /// 開いているキーストアのアカウントの一覧に戻る
-    fn accounts(self) {
-        self.run("accounts", NoArgs {}, move |accounts| {
-            self.go(Screen::Accounts(accounts))
+    /// キーストアを開いたあと。アカウントと設定を覚えて、ホームに出る
+    fn enter(self, accounts: Vec<AccountView>) {
+        self.accounts.set(accounts);
+        self.run("settings", NoArgs {}, move |settings| {
+            self.settings.set(settings);
+            self.go(Screen::Home);
         });
+    }
+
+    /// 設定を変えて、本体に覚えてもらう
+    fn save(self, change: impl FnOnce(&mut Settings)) {
+        let mut settings = self.settings.get_untracked();
+        change(&mut settings);
+        self.run("save_settings", SettingsArgs { settings }, move |saved| {
+            self.settings.set(saved)
+        });
+    }
+
+    /// ホームに出すアカウント。最後に選んだものがなければ、最初のもの
+    fn current(self) -> Option<AccountView> {
+        let accounts = self.accounts.get();
+        let chosen = self.settings.get().account;
+        accounts
+            .iter()
+            .find(|account| Some(&account.address) == chosen.as_ref())
+            .or(accounts.first())
+            .cloned()
     }
 
     /// 本体に、どの画面から始めるか聞く
@@ -194,7 +228,9 @@ impl Ctx {
         self.run("start", NoArgs {}, move |start| match start {
             Start::Welcome => self.go(Screen::Welcome),
             Start::Unlock { path } => self.go(Screen::Unlock(path)),
-            Start::Accounts => self.accounts(),
+            Start::Accounts => {
+                self.run("accounts", NoArgs {}, move |accounts| self.enter(accounts))
+            }
         });
     }
 }
@@ -209,6 +245,8 @@ fn App() -> impl IntoView {
         screen: RwSignal::new(Screen::Loading),
         error: RwSignal::new(None),
         busy: RwSignal::new(false),
+        accounts: RwSignal::new(Vec::new()),
+        settings: RwSignal::new(Settings::default()),
     };
     ctx.restart();
 
@@ -217,34 +255,70 @@ fn App() -> impl IntoView {
         set_about.set(Some(call("about", NoArgs {}).await));
     });
 
+    let footer = move || match about.get() {
+        None => String::new(),
+        Some(Ok(about)) => format!(
+            "heika-gui {}（{} / {}）",
+            about.version, about.os, about.arch
+        ),
+        Some(Err(error)) => format!("本体とつながりません: {error}"),
+    };
     view! {
-        <main>
-            <h1>"heika"</h1>
-            // 画面が変わるたびに section を作り直して、ふわっと出す
-            {move || view! { <section class="screen">{match ctx.screen.get() {
-                Screen::Loading => view! { <p class="lead">"本体に問い合わせています…"</p> }.into_any(),
-                Screen::Welcome => welcome(ctx).into_any(),
-                Screen::ShowWords(mnemonic) => show_words(ctx, mnemonic).into_any(),
-                Screen::Quiz(mnemonic) => quiz(ctx, mnemonic).into_any(),
-                Screen::Restore => restore(ctx).into_any(),
-                Screen::ImportKey => import_key(ctx).into_any(),
-                Screen::Passphrase(source) => passphrase(ctx, source).into_any(),
-                Screen::Unlock(path) => unlock(ctx, path).into_any(),
-                Screen::Accounts(accounts) => accounts_view(ctx, accounts).into_any(),
-                Screen::Balance(account) => balance_view(ctx, account).into_any(),
-                Screen::Settings(back) => settings_view(ctx, *back).into_any(),
-            }}</section> }}
-            {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
-            <footer>
-                {move || match about.get() {
-                    None => String::new(),
-                    Some(Ok(about)) => format!("heika-gui {}（{} / {}）", about.version, about.os, about.arch),
-                    Some(Err(error)) => format!("本体とつながりません: {error}"),
-                }}
-            </footer>
-        </main>
+        <div class="shell" class:inside=move || ctx.screen.with(Screen::inside)>
+            {move || ctx.screen.with(Screen::inside).then(|| menu(ctx))}
+            <main>
+                <h1>"heika"</h1>
+                // 画面が変わるたびに section を作り直して、ふわっと出す
+                {move || view! { <section class="screen">{match ctx.screen.get() {
+                    Screen::Loading => view! { <p class="lead">"本体に問い合わせています…"</p> }.into_any(),
+                    Screen::Welcome => welcome(ctx).into_any(),
+                    Screen::ShowWords(mnemonic) => show_words(ctx, mnemonic).into_any(),
+                    Screen::Quiz(mnemonic) => quiz(ctx, mnemonic).into_any(),
+                    Screen::Restore => restore(ctx).into_any(),
+                    Screen::ImportKey => import_key(ctx).into_any(),
+                    Screen::Passphrase(source) => passphrase(ctx, source).into_any(),
+                    Screen::Unlock(path) => unlock(ctx, path).into_any(),
+                    Screen::Home => home(ctx).into_any(),
+                    Screen::Accounts => accounts_view(ctx).into_any(),
+                    Screen::Settings => settings_view(ctx).into_any(),
+                }}</section> }}
+                {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
+                <footer>{footer}</footer>
+            </main>
+        </div>
     }
 }
+
+/// キーストアを開いたあとのメニュー。スマホでは下のタブ、広い画面では左の列になる（style.css）
+fn menu(ctx: Ctx) -> impl IntoView {
+    let item = move |screen: Screen, label: &'static str, icon: &'static str| {
+        let target = screen.clone();
+        let active =
+            move || std::mem::discriminant(&ctx.screen.get()) == std::mem::discriminant(&target);
+        view! {
+            <button class="item" class:active=active aria-label=label on:click=move |_| ctx.go(screen.clone())>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
+                <span>{label}</span>
+            </button>
+        }
+    };
+    view! {
+        <nav class="menu glass">
+            <p class="brand">"heika"</p>
+            {item(Screen::Home, "ホーム", ICON_HOME)}
+            {item(Screen::Accounts, "アカウント", ICON_ACCOUNTS)}
+            {item(Screen::Settings, "設定", ICON_SETTINGS)}
+        </nav>
+    }
+}
+
+// メニューのアイコン。24 の枠に、線だけで描く
+const ICON_HOME: &str = "M4 11 12 4l8 7M6 9.5V20h12V9.5M10 20v-5h4v5";
+const ICON_ACCOUNTS: &str = "M5 6h14v12H5zM5 10h14M8 14h4";
+const ICON_SETTINGS: &str = "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4";
+const ICON_EYE: &str =
+    "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z";
+const ICON_EYE_OFF: &str = "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM4 20 20 4";
 
 fn welcome(ctx: Ctx) -> impl IntoView {
     let create = move |_| {
@@ -431,9 +505,7 @@ fn passphrase(ctx: Ctx, source: Source) -> impl IntoView {
                 "import_private_key"
             }
         };
-        ctx.run(command, args, move |accounts| {
-            ctx.go(Screen::Accounts(accounts))
-        });
+        ctx.run(command, args, move |accounts| ctx.enter(accounts));
     };
     view! {
         <p class="lead">"このパソコンにしまうときのパスフレーズを決めてください。"</p>
@@ -471,9 +543,7 @@ fn unlock(ctx: Ctx, path: String) -> impl IntoView {
         let args = UnlockArgs {
             passphrase: passphrase.get_untracked(),
         };
-        ctx.run("unlock", args, move |accounts| {
-            ctx.go(Screen::Accounts(accounts))
-        });
+        ctx.run("unlock", args, move |accounts| ctx.enter(accounts));
     };
     view! {
         <p class="lead">"パスフレーズを入れて、キーストアを開いてください。"</p>
@@ -489,34 +559,38 @@ fn unlock(ctx: Ctx, path: String) -> impl IntoView {
     }
 }
 
-fn accounts_view(ctx: Ctx, accounts: Vec<AccountView>) -> impl IntoView {
-    let back = accounts.clone();
-    let items = accounts
-        .into_iter()
-        .map(|account| {
-            let open = account.clone();
-            view! {
-                <li>
-                    <button class="card glass" on:click=move |_| ctx.go(Screen::Balance(open.clone()))>
-                        <span class="row">
-                            <strong>{account.label}</strong>
-                            <span class="badge">{account.network}</span>
-                            <span class="hint">{account.source}</span>
-                        </span>
-                        <span class="address">{account.address}</span>
-                    </button>
-                </li>
-            }
-        })
-        .collect_view();
-    let close = move |_| ctx.run("lock", NoArgs {}, move |()| ctx.restart());
+fn accounts_view(ctx: Ctx) -> impl IntoView {
+    let items = move || {
+        let current = ctx.current().map(|account| account.address);
+        ctx.accounts
+            .get()
+            .into_iter()
+            .map(|account| {
+                let address = account.address.clone();
+                let selected = Some(&account.address) == current.as_ref();
+                let choose = move |_| {
+                    let address = address.clone();
+                    ctx.save(move |settings| settings.account = Some(address));
+                    ctx.go(Screen::Home);
+                };
+                view! {
+                    <li>
+                        <button class="card glass" class:selected=selected on:click=choose>
+                            <span class="row">
+                                <strong>{account.label}</strong>
+                                <span class="badge">{account.network}</span>
+                                <span class="hint">{account.source}</span>
+                            </span>
+                            <span class="address">{account.address}</span>
+                        </button>
+                    </li>
+                }
+            })
+            .collect_view()
+    };
     view! {
-        <p class="lead">"アカウントを選ぶと、残高を確かめます。"</p>
+        <p class="lead">"ホームに出すアカウントを選んでください。"</p>
         <ul class="accounts">{items}</ul>
-        <div class="row">
-            <button on:click=close>"閉じる"</button>
-            <button on:click=move |_| ctx.go(Screen::Settings(Box::new(Screen::Accounts(back.clone()))))>"設定"</button>
-        </div>
     }
 }
 
@@ -531,22 +605,29 @@ enum Check {
     Failed(String),
 }
 
+/// ホーム。選んでいるアカウントの残高
+fn home(ctx: Ctx) -> impl IntoView {
+    match ctx.current() {
+        Some(account) => balance_view(ctx, account).into_any(),
+        None => view! { <p class="lead">"アカウントがありません。"</p> }.into_any(),
+    }
+}
+
 fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
     let check = RwSignal::new(Check::Loading);
     let address = account.address.clone();
     let refresh = move || {
         let address = address.clone();
+        if ctx.settings.get_untracked().rest.is_none() {
+            check.set(Check::NoRest);
+            return;
+        }
         check.set(Check::Loading);
         spawn_local(async move {
-            let next = match call::<Settings>("settings", NoArgs {}).await {
-                Ok(Settings { rest: None }) => Check::NoRest,
-                Ok(_) => match call("balance", BalanceArgs { address }).await {
-                    Ok(balance) => Check::Done(balance),
-                    Err(error) => Check::Failed(error),
-                },
+            check.set(match call("balance", BalanceArgs { address }).await {
+                Ok(balance) => Check::Done(balance),
                 Err(error) => Check::Failed(error),
-            };
-            check.set(next);
+            });
         });
     };
     refresh();
@@ -558,14 +639,21 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             copied.set(true);
         }
     };
-    let settings = {
-        let account = account.clone();
-        move |_| ctx.go(Screen::Settings(Box::new(Screen::Balance(account.clone()))))
-    };
+    let hidden = move || ctx.settings.get().hide_amounts;
+    let toggle = move |_| ctx.save(|settings| settings.hide_amounts = !settings.hide_amounts);
     view! {
         <div class="row heading">
-            <strong>{account.label.clone()}</strong>
+            <button class="quiet account" on:click=move |_| ctx.go(Screen::Accounts)>
+                <strong>{account.label.clone()}</strong>
+            </button>
             <span class="badge">{account.network.clone()}</span>
+            <button
+                class="quiet eye"
+                aria-label=move || if hidden() { "金額を出す" } else { "金額を隠す" }
+                on:click=toggle
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d=move || if hidden() { ICON_EYE_OFF } else { ICON_EYE } /></svg>
+            </button>
         </div>
         <p class="address">
             {account.address.clone()}
@@ -581,7 +669,7 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             Check::NoRest => view! {
                 <div class="balance">
                     <p class="lead">"残高を問い合わせる REST を、まだ決めていません。"</p>
-                    <button class="primary" on:click=settings.clone()>"設定する"</button>
+                    <button class="primary" on:click=move |_| ctx.go(Screen::Settings)>"設定する"</button>
                 </div>
             }.into_any(),
             Check::Failed(error) => view! {
@@ -591,23 +679,24 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
                     <p class="error">{error}</p>
                 </div>
             }.into_any(),
-            Check::Done(balance) => verified(balance).into_any(),
+            Check::Done(balance) => verified(balance, hidden()).into_any(),
         }}
         <div class="row">
-            <button on:click=move |_| ctx.accounts()>"戻る"</button>
             <button class="primary" on:click=move |_| refresh() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
         </div>
     }
 }
 
 /// 確かめた残高と、何を確かめて何を信じたか
-fn verified(balance: BalanceView) -> impl IntoView {
+/// `hidden` なら、金額の代わりに伏せ字を出す
+fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
     let currency = balance.mosaics.iter().find(|mosaic| mosaic.currency);
     // 通貨を持っていなければ 0。XYM の可分性は 6
     let amount = currency
         .and_then(|mosaic| mosaic.amount.clone())
         .unwrap_or_else(|| "0.000000".to_owned());
     let (whole, fraction) = match amount.split_once('.') {
+        _ if hidden => (MASK.to_owned(), String::new()),
         Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
         None => (group(&amount), String::new()),
     };
@@ -617,6 +706,7 @@ fn verified(balance: BalanceView) -> impl IntoView {
         .filter(|mosaic| !mosaic.currency)
         .map(|mosaic| {
             let value = match &mosaic.amount {
+                _ if hidden => MASK.to_owned(),
                 Some(amount) => grouped(amount),
                 // 定義がもうなく、小数点の位置がわからない
                 None => format!("{}（桁不明）", group(&mosaic.raw)),
@@ -676,6 +766,9 @@ fn verified(balance: BalanceView) -> impl IntoView {
     }
 }
 
+/// 隠した金額
+const MASK: &str = "••••••";
+
 /// 整数の部分を3桁ごとに区切る
 fn group(digits: &str) -> String {
     let mut out = String::new();
@@ -696,25 +789,16 @@ fn grouped(amount: &str) -> String {
     }
 }
 
-fn settings_view(ctx: Ctx, back: Screen) -> impl IntoView {
-    let rest = RwSignal::new(String::new());
-    spawn_local(async move {
-        if let Ok(Settings {
-            rest: Some(current),
-        }) = call::<Settings>("settings", NoArgs {}).await
-        {
-            rest.set(current);
-        }
-    });
-    let back_after_save = back.clone();
+fn settings_view(ctx: Ctx) -> impl IntoView {
+    let rest = RwSignal::new(ctx.settings.get_untracked().rest.unwrap_or_default());
+    let saved = RwSignal::new(false);
     let submit = move |event: SubmitEvent| {
         event.prevent_default();
-        let back = back_after_save.clone();
-        let args = RestArgs {
-            rest: rest.get_untracked(),
-        };
-        ctx.run("set_rest", args, move |_: Settings| ctx.go(back));
+        let value = rest.get_untracked();
+        ctx.save(move |settings| settings.rest = Some(value));
+        saved.set(true);
     };
+    let close = move |_| ctx.run("lock", NoArgs {}, move |()| ctx.restart());
     view! {
         <p class="lead">"残高を問い合わせる REST"</p>
         <p class="hint">
@@ -725,12 +809,17 @@ fn settings_view(ctx: Ctx, back: Screen) -> impl IntoView {
         <form on:submit=submit>
             <label class="field">
                 "URL"
-                <input type="url" placeholder="https://ホスト:3001" autocomplete="off" autocapitalize="off" spellcheck="false" bind:value=rest />
+                <input type="url" placeholder="https://ホスト:3001" autocomplete="off" autocapitalize="off" spellcheck="false" bind:value=rest on:input=move |_| saved.set(false) />
             </label>
             <div class="row">
-                <button type="button" on:click=move |_| ctx.go(back.clone())>"戻る"</button>
                 <button type="submit" class="primary" disabled=move || ctx.busy.get()>"決める"</button>
+                {move || (saved.get() && !ctx.busy.get() && ctx.error.get().is_none()).then(|| view! { <span class="hint">"覚えました"</span> })}
             </div>
         </form>
+        <p class="lead section">"キーストア"</p>
+        <p class="hint">"閉じると、もう一度パスフレーズを聞きます。"</p>
+        <div class="row">
+            <button on:click=close>"閉じる"</button>
+        </div>
     }
 }

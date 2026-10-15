@@ -23,11 +23,16 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// 根が合わなかったときに、取り直すまでにおく間。REST の DB がノードに追いつくのを待つ
 const RETRY_PAUSE: Duration = Duration::from_secs(3);
 
-/// 覚えておく設定。秘密は入れない
+/// 覚えておく設定。秘密は入れない。前の版で書いたファイルに項目がなくても読めるようにする
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// 残高を問い合わせる REST のオリジン（`https://ホスト:3001`）
     pub rest: Option<String>,
+    /// 金額を隠す（人前で開くとき）
+    pub hide_amounts: bool,
+    /// ホームに出すアカウントのアドレス。最後に選んだもの
+    pub account: Option<String>,
 }
 
 /// 設定と、それを書くファイル
@@ -81,16 +86,17 @@ pub fn settings(config: tauri::State<'_, Config>) -> Settings {
     config.get()
 }
 
-/// REST のオリジンを決める。空なら消す
+/// 設定をまとめて書く。REST のオリジンは確かめて、空なら消す
 #[tauri::command]
-pub fn set_rest(config: tauri::State<'_, Config>, rest: String) -> Result<Settings, String> {
-    let rest = rest.trim();
-    let rest = if rest.is_empty() {
-        None
-    } else {
-        Some(check_origin(rest)?)
+pub fn save_settings(
+    config: tauri::State<'_, Config>,
+    settings: Settings,
+) -> Result<Settings, String> {
+    let rest = match settings.rest.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(rest) => Some(check_origin(rest)?),
     };
-    let settings = Settings { rest };
+    let settings = Settings { rest, ..settings };
     config.save(settings.clone())?;
     Ok(settings)
 }

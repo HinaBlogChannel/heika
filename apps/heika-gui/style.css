@@ -648,6 +648,20 @@ button.card.selected {
   color: var(--ink-soft);
 }
 
+/* 確かめた印。金額のすぐ横に、緑の盾を置く */
+.amount .mark {
+  display: inline-flex;
+  margin-left: var(--space-2);
+  vertical-align: -0.15em;
+  color: var(--ok);
+}
+
+.amount .mark svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  stroke-width: 1.6;
+}
+
 .amount.pending {
   font-size: 1.3rem;
   color: var(--ink-soft);
@@ -708,6 +722,10 @@ button.card.selected {
 }
 
 details {
+  margin-top: var(--space-3);
+}
+
+details .stamp {
   margin-top: var(--space-3);
 }
 

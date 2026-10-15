@@ -368,6 +368,8 @@ const ICON_SETTINGS: &str = "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4";
 const ICON_EYE: &str =
     "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z";
 const ICON_EYE_OFF: &str = "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM4 20 20 4";
+/// 確かめた残高に添える、チェックの入った盾
+const ICON_VERIFIED: &str = "M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3zM9 12l2 2 4-4";
 
 fn welcome(ctx: Ctx) -> impl IntoView {
     let create = move |_| {
@@ -841,6 +843,9 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
                 <span class="whole">{whole}</span>
                 <span class="fraction">{fraction}</span>
                 <span class="unit">"XYM"</span>
+                <span class="mark" role="img" title=stamp aria-label=stamp>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d=ICON_VERIFIED /></svg>
+                </span>
             </p>
             {(!balance.on_chain).then(|| view! {
                 <p class="hint">"まだチェーンに載っていないアドレスです。一度も受け取っていなければ、こうなります。"</p>
@@ -849,10 +854,10 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
             {expired}
         </div>
         <div class="verified glass">
-            <p class="stamp">{stamp}</p>
             <p class="hint">{format!("高さ {} のブロック", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
             <details>
                 <summary>"くわしく"</summary>
+                <p class="stamp">{stamp}</p>
                 <p class="label">"確かめたこと"</p>
                 <ul class="notes">
                     <li>"ブロックの署名と、9本の根から求めた StateHash"</li>

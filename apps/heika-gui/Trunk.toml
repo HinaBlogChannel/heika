@@ -1,0 +1,13 @@
+[build]
+# Tauri は dist を自分で配るので、パスは相対にしておく
+public_url = "./"
+
+[serve]
+# cargo tauri dev の devUrl と合わせる
+port = 1420
+no_autoreload = true
+
+[tools]
+# 手元と GitHub Actions で同じものを使う。wasm-bindgen は Cargo.lock の版に合わせる
+wasm_bindgen = "0.2.129"
+wasm_opt = "version_133"

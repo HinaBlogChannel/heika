@@ -1,0 +1,100 @@
+/* 外のフォントは読まない。アプリは手元だけで動くようにする */
+:root {
+  color-scheme: light dark;
+  --bg: #f7f5f0;
+  --fg: #22201c;
+  --muted: #6b665c;
+  --accent: #6d4bd6;
+  --card: #ffffff;
+  --line: #e2ddd2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17161a;
+    --fg: #ece9e2;
+    --muted: #a19b8f;
+    --accent: #a48bf0;
+    --card: #222127;
+    --line: #34323a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: max(env(safe-area-inset-top), 1.5rem) 1rem 2rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+}
+
+.lead {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+}
+
+.card {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+button,
+select {
+  font: inherit;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+}
+
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.address {
+  margin-top: 1rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  margin-top: 1rem;
+  color: #c2410c;
+}
+
+footer {
+  margin-top: 1.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.card .lead {
+  margin: 1rem 0 0;
+}

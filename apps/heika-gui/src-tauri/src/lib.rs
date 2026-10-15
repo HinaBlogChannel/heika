@@ -19,6 +19,7 @@ use tauri::Manager;
 use zeroize::Zeroizing;
 
 mod rest;
+mod send;
 
 /// 画面の下に出す、どこで動いているか
 #[derive(Serialize)]
@@ -272,12 +273,34 @@ fn accounts(wallet: tauri::State<'_, Wallet>) -> Result<Vec<AccountView>, String
     }
 }
 
-/// キーストアを閉じる。秘密は drop で0に消える
+/// キーストアを閉じる。秘密は drop で0に消える。送金の下書きと控えも消す
 #[tauri::command]
-fn lock(wallet: tauri::State<'_, Wallet>) {
+fn lock(wallet: tauri::State<'_, Wallet>, outbox: tauri::State<'_, send::Outbox>) {
     let mut session = wallet.lock();
     session.keystore = None;
     session.pending = None;
+    outbox.clear();
+}
+
+/// 開いているキーストアから、`address` のアカウントのラベルと公開鍵を探す
+fn find_account(session: &Session, address: &Address) -> Result<(String, PublicKey), String> {
+    let keystore = session
+        .keystore
+        .as_ref()
+        .ok_or("キーストアを開いていません")?;
+    for (_, account) in keystore.accounts() {
+        if account.network != address.network() {
+            continue;
+        }
+        let (_, private_key) = keystore
+            .private_key(&account.label, "")
+            .map_err(|error| error.to_string())?;
+        let public_key = PublicKey::from_private_key(&private_key);
+        if Address::from_public_key(&public_key, account.network) == *address {
+            return Ok((account.label.clone(), public_key));
+        }
+    }
+    Err("このアカウントは、開いているキーストアにありません".to_owned())
 }
 
 fn describe(keystore: &Keystore) -> Result<Vec<AccountView>, String> {
@@ -345,6 +368,7 @@ pub fn run() {
             let path = keystore_path(app)?;
             // 設定は、キーストアと同じフォルダーに置く
             app.manage(rest::Config::load(path.with_file_name("settings.json")));
+            app.manage(send::Outbox::default());
             app.manage(Wallet(Arc::new(Mutex::new(Session {
                 path,
                 pending: None,
@@ -365,6 +389,9 @@ pub fn run() {
             rest::settings,
             rest::save_settings,
             rest::balance,
+            send::prepare_send,
+            send::send,
+            send::outbox,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri のアプリを起動できませんでした");

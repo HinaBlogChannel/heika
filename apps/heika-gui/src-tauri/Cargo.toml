@@ -17,6 +17,7 @@ tauri-build = { version = "2.7.3", features = [] }
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
 heika-core = { path = "../../../crates/heika-core" }
 heika-rest = { path = "../../../crates/heika-rest" }
+heika-transaction = { path = "../../../crates/heika-transaction" }
 heika-wallet = { path = "../../../crates/heika-wallet" }
 rand_core = "0.10.1"
 # REST に HTTPS でつなぐ。ルート証明書は、同梱の一覧ではなく OS のものを使う

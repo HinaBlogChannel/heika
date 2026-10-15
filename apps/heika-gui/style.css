@@ -21,6 +21,8 @@
   --glass: rgba(255, 255, 255, 0.6);
   --glass-hover: rgba(255, 255, 255, 0.85);
   --danger: #b4475f;
+  /* 署名を承認する画面の地の色 */
+  --deep: #0f2350;
   --serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif CJK JP", serif;
   --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
   --mono: ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
@@ -775,4 +777,176 @@ footer {
 .balance .note {
   margin: var(--space-2) 0 0;
   font-size: 0.8rem;
+}
+
+/* 送る量と手数料の選び方 */
+fieldset.speeds {
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  border: none;
+}
+
+fieldset.speeds legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+}
+
+.speed {
+  display: grid;
+  grid-template-columns: auto 5rem 1fr;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  cursor: pointer;
+}
+
+.speed input {
+  accent-color: var(--blue);
+}
+
+.speed .hint {
+  margin: 0;
+}
+
+/* 送ったもの */
+.sent {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sent li {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--blue-line);
+}
+
+.sent p {
+  margin: 0;
+}
+
+.sent .what {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+
+.sent .value {
+  font-family: var(--mono);
+  color: var(--blue);
+}
+
+.sent .to {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.sent .state {
+  font-size: 0.85rem;
+}
+
+.sent .state.included svg {
+  width: 1rem;
+  height: 1rem;
+  margin-right: var(--space-1);
+  vertical-align: -0.15em;
+  color: var(--ok);
+}
+
+.sent .address.small {
+  margin-top: var(--space-1);
+  color: var(--ink-soft);
+}
+
+/*
+ * 署名を承認する画面。ふだんの雪の白と深い青を裏返し、深い青の地に斜めの細い格子を敷く。
+ * いつもと違うことをしている、とひと目でわかるように
+ */
+.shell.approve {
+  --ink: #fff;
+  --ink-soft: rgba(255, 255, 255, 0.72);
+  --blue: #fff;
+  --blue-hover: #fff;
+  --blue-line: rgba(255, 255, 255, 0.28);
+  --blue-faint: rgba(255, 255, 255, 0.1);
+  min-height: 100vh;
+  background:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 22px),
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 22px),
+    var(--deep);
+  color: var(--ink);
+}
+
+.shell.approve button.primary {
+  border-color: #fff;
+  background-color: #fff;
+  color: var(--deep);
+}
+
+.shell.approve button.primary:hover {
+  background-color: rgba(255, 255, 255, 0.85);
+}
+
+.kicker {
+  margin: 0 0 var(--space-6);
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+}
+
+.shell.approve .label {
+  margin: var(--space-5) 0 var(--space-1);
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+}
+
+.shell.approve .address {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.shell.approve .warn {
+  margin: var(--space-2) 0 0;
+  font-weight: bold;
+}
+
+.terms {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-5) 0;
+  font-size: 0.9rem;
+}
+
+.terms dt {
+  color: var(--ink-soft);
+}
+
+.terms dd {
+  margin: 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.message {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+form.send {
+  margin-top: var(--space-6);
+}
+
+.field .note {
+  margin-top: var(--space-1);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.shell.approve .hint {
+  margin-top: var(--space-5);
 }

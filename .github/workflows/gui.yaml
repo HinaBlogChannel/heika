@@ -18,7 +18,10 @@ env:
   RUST_TOOLCHAIN: 1.99.0
   TRUNK: 0.21.14
   TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
-  TAURI_CLI: npx --yes @tauri-apps/cli@2.12.3
+  # npx で動かすと、Android と iOS のプロジェクトがビルドの途中で npm を呼ぶようになり、package.json がなくて落ちる。
+  # cargo で入れれば、そこからも cargo tauri が呼ばれる
+  TAURI_CLI_VERSION: 2.12.3
+  TAURI_CLI: cargo tauri
 
 defaults:
   run:
@@ -75,10 +78,15 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: ビルド
         run: |
           $TAURI_CLI icon icon.png
-          $TAURI_CLI build
+          $TAURI_CLI build 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: heika-gui-${{ runner.os }}
@@ -112,6 +120,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-linux-android
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Android のプロジェクトを作る
         # ランナーに入っている Android SDK と NDK を使う
         run: |
@@ -120,7 +130,10 @@ jobs:
           # プロジェクトを作ったあとに作ると、Android のアイコンもそこに入る
           $TAURI_CLI icon icon.png
       - name: ビルド
-        run: $TAURI_CLI android build --apk --target aarch64
+        run: $TAURI_CLI android build --apk --target aarch64 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - name: 使い捨ての鍵で署名する
         run: |
           build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
@@ -154,6 +167,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-ios
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Xcode のプロジェクトを作る
         run: |
           brew install xcodegen
@@ -167,7 +182,10 @@ jobs:
           xcodebuild -project "$project" -scheme "$scheme" -configuration release -sdk iphoneos \
             -destination 'generic/platform=iOS' -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
-            build
+            build 2>&1 | tee build.log
+      - name: 失敗したら、エラーの行を annotation に出す
+        if: failure()
+        run: bash ../../.github/scripts/annotate-errors.sh build.log
       - name: IPA にまとめる
         run: |
           app=$(find build/Build/Products -name '*.app' -maxdepth 2 | head -1)

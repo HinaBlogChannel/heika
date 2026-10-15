@@ -510,6 +510,8 @@ name = "heika-transaction"
 version = "0.6.0"
 dependencies = [
  "heika-core",
+ "ripemd",
+ "sha2",
  "sha3",
 ]
 

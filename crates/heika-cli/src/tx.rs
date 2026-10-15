@@ -13,7 +13,7 @@ use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::signature::Signature;
 use heika_transaction::{
-    Aggregate, AggregateVersion, Body, Cosignature, EmbeddedTransaction, Transaction,
+    Aggregate, AggregateVersion, Body, Cosignature, EmbeddedTransaction, Location, Transaction,
 };
 
 use heika_cert::certificate::Certificate;
@@ -355,6 +355,18 @@ fn check_sendable(path: &Path, transaction: &Transaction, network: Network) -> R
             path.display(),
             aggregate.version().number()
         ));
+    }
+    let problems = transaction.validate(network.parameters());
+    if !problems.is_empty() {
+        let mut message = format!("{} はノードで弾かれます", path.display());
+        for problem in problems {
+            message.push_str("\n  ");
+            if let Location::Embedded(index) = problem.location {
+                message.push_str(&format!("中の {} 件目: ", index + 1));
+            }
+            message.push_str(&show::describe_failure(&problem.failure));
+        }
+        return Err(message);
     }
     Ok(())
 }

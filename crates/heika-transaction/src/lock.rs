@@ -2,6 +2,8 @@
 
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
+use ripemd::Ripemd160;
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 
 use crate::bounded::BoundedVec;
@@ -49,6 +51,20 @@ pub enum LockHashAlgorithm {
 }
 
 impl LockHashAlgorithm {
+    /// プルーフからシークレットを求める。catapult の `CalculateHash`。
+    /// RIPEMD-160 の20バイトは、後ろを0で埋めて32バイトにする。
+    pub fn secret(self, proof: &[u8]) -> Hash256 {
+        match self {
+            Self::Sha3_256 => Hash256(Sha3_256::digest(proof).into()),
+            Self::Hash160 => {
+                let mut secret = [0; 32];
+                secret[..20].copy_from_slice(&Ripemd160::digest(Sha256::digest(proof)));
+                Hash256(secret)
+            }
+            Self::Hash256 => Hash256(Sha256::digest(Sha256::digest(proof)).into()),
+        }
+    }
+
     fn to_byte(self) -> u8 {
         match self {
             Self::Sha3_256 => 0,
@@ -167,6 +183,24 @@ mod tests {
             mosaic_id: UnresolvedMosaicId(0x0102),
             amount: 10,
         }
+    }
+
+    #[test]
+    fn computes_secrets_from_proofs() {
+        // 空のバイト列のハッシュ。Hash160 はビットコインのアドレスで使う RIPEMD-160(SHA-256) で、後ろを0で埋める
+        let secret = |algorithm: LockHashAlgorithm| algorithm.secret(b"").to_string();
+        assert_eq!(
+            secret(LockHashAlgorithm::Sha3_256),
+            "A7FFC6F8BF1ED76651C14756A061D662F580FF4DE43B49FA82D80A4B80F8434A"
+        );
+        assert_eq!(
+            secret(LockHashAlgorithm::Hash160),
+            "B472A266D0BD89C13706A4132CCFB16F7C3B9FCB000000000000000000000000"
+        );
+        assert_eq!(
+            secret(LockHashAlgorithm::Hash256),
+            "5DF6E0E2761359D30A8275058E299FCC0381534545F55CF43E41983F5D4C9456"
+        );
     }
 
     #[test]

@@ -283,7 +283,12 @@ fn App() -> impl IntoView {
                     Screen::Settings => settings_view(ctx).into_any(),
                 }}</section> }}
                 {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
-                <footer>{footer}</footer>
+                // 版はふだんの画面には出さず、設定と、開く前の画面にだけ出す。つながらないときはいつも出す
+                {move || {
+                    let quiet = matches!(ctx.screen.get(), Screen::Home | Screen::Accounts)
+                        && matches!(about.get(), Some(Ok(_)));
+                    (!quiet).then(|| view! { <footer>{footer}</footer> })
+                }}
             </main>
         </div>
     }
@@ -581,7 +586,7 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
                                 <span class="badge">{account.network}</span>
                                 <span class="hint">{account.source}</span>
                             </span>
-                            <span class="address">{account.address}</span>
+                            <span class="address">{spaced(&account.address)}</span>
                         </button>
                     </li>
                 }
@@ -656,8 +661,8 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             </button>
         </div>
         <p class="address">
-            {account.address.clone()}
-            <button class="quiet copy" on:click=copy>{move || if copied.get() { "写しました" } else { "写す" }}</button>
+            {spaced(&account.address)}
+            <button class="quiet copy" on:click=copy>{move || if copied.get() { "コピーしました" } else { "コピー" }}</button>
         </p>
         {move || match check.get() {
             Check::Loading => view! {
@@ -700,16 +705,20 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
         Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
         None => (group(&amount), String::new()),
     };
-    let others = balance
+    let others: Vec<_> = balance
         .mosaics
         .iter()
         .filter(|mosaic| !mosaic.currency)
+        .collect();
+    // 定義がもうチェーンになく、小数点の位置がわからないものがあれば、下に断りを書く
+    let unknown = !hidden && others.iter().any(|mosaic| mosaic.amount.is_none());
+    let others = others
+        .into_iter()
         .map(|mosaic| {
             let value = match &mosaic.amount {
                 _ if hidden => MASK.to_owned(),
                 Some(amount) => grouped(amount),
-                // 定義がもうなく、小数点の位置がわからない
-                None => format!("{}（桁不明）", group(&mosaic.raw)),
+                None => format!("{} ＊", group(&mosaic.raw)),
             };
             view! {
                 <li>
@@ -728,10 +737,16 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
         };
         format!("{}（{ago}）", Date::new(time).to_locale_string("ja-JP"))
     });
-    let what = if balance.on_chain {
-        "アカウントと、持っているモザイクの定義が、状態の経路でその根につながること"
+    let (stamp, what) = if balance.on_chain {
+        (
+            "ブロックの署名から、この残高まで確かめました",
+            "アカウントと、持っているモザイクの定義が、状態の経路でその根につながること",
+        )
     } else {
-        "アカウントが、状態の木にないこと"
+        (
+            "ブロックの署名から、まだ載っていないことまで確かめました",
+            "アカウントが、状態の木にないこと",
+        )
     };
     view! {
         <div class="balance">
@@ -744,9 +759,12 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
                 <p class="hint">"まだチェーンに載っていないアドレスです。一度も受け取っていなければ、こうなります。"</p>
             })}
             <ul class="mosaics">{others}</ul>
+            {unknown.then(|| view! {
+                <p class="hint note">"＊ 定義がもうチェーンにないモザイクです。小数点の位置がわからないので、いちばん小さい単位の数のまま出しています。"</p>
+            })}
         </div>
         <div class="verified glass">
-            <p class="stamp">"確かめました"</p>
+            <p class="stamp">{stamp}</p>
             <p class="hint">{format!("高さ {} のブロック", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
             <details>
                 <summary>"くわしく"</summary>
@@ -764,6 +782,16 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
             </details>
         </div>
     }
+}
+
+/// アドレスを6文字ずつ区切って読みやすくする。コピーするのは区切らないもの
+fn spaced(address: &str) -> String {
+    let chars: Vec<char> = address.chars().collect();
+    chars
+        .chunks(6)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// 隠した金額

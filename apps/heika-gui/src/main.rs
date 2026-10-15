@@ -165,7 +165,8 @@ fn App() -> impl IntoView {
     view! {
         <main>
             <h1>"heika"</h1>
-            {move || match ctx.screen.get() {
+            // 画面が変わるたびに section を作り直して、ふわっと出す
+            {move || view! { <section class="screen">{match ctx.screen.get() {
                 Screen::Loading => view! { <p class="lead">"本体に問い合わせています…"</p> }.into_any(),
                 Screen::Welcome => welcome(ctx).into_any(),
                 Screen::ShowWords(mnemonic) => show_words(ctx, mnemonic).into_any(),
@@ -175,7 +176,7 @@ fn App() -> impl IntoView {
                 Screen::Passphrase(source) => passphrase(ctx, source).into_any(),
                 Screen::Unlock(path) => unlock(ctx, path).into_any(),
                 Screen::Accounts(accounts) => accounts_view(ctx, accounts).into_any(),
-            }}
+            }}</section> }}
             {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
             <footer>
                 {move || match about.get() {
@@ -197,10 +198,16 @@ fn welcome(ctx: Ctx) -> impl IntoView {
     view! {
         <p class="lead">"はじめまして。財布をどう用意するか選んでください。"</p>
         <div class="choices">
-            <button class="primary" on:click=create disabled=move || ctx.busy.get()>"新しく作る"</button>
-            <p class="hint">"24個の英単語を作ります。紙に書いて控えてもらいます。"</p>
-            <button on:click=move |_| ctx.go(Screen::Restore)>"単語から戻す"</button>
-            <p class="hint">"ほかのウォレットで控えた単語から、同じアカウントを戻します。"</p>
+            <button class="choice glass" on:click=create disabled=move || ctx.busy.get()>
+                <span class="index">"01"</span>
+                <span class="title">"新しく作る"</span>
+                <span class="desc">"24個の英単語を作ります。紙に書いて控えてもらいます。"</span>
+            </button>
+            <button class="choice glass" on:click=move |_| ctx.go(Screen::Restore)>
+                <span class="index">"02"</span>
+                <span class="title">"単語から戻す"</span>
+                <span class="desc">"ほかのウォレットで控えた単語から、同じアカウントを戻します。"</span>
+            </button>
             <button class="quiet" on:click=move |_| ctx.go(Screen::ImportKey)>"秘密鍵を取り込む（くわしい人向け）"</button>
         </div>
     }
@@ -216,7 +223,7 @@ fn show_words(ctx: Ctx, mnemonic: NewMnemonic) -> impl IntoView {
         .collect_view();
     view! {
         <p class="lead">"この24個の単語を、順番どおりに紙に書いてください。"</p>
-        <ol class="words">{words}</ol>
+        <ol class="words glass">{words}</ol>
         <ul class="notes">
             <li>"この単語を知っている人は、誰でもあなたのお金を動かせます。人に見せないでください。"</li>
             <li>"パソコンが壊れたり、パスフレーズを忘れたりしたときに戻せるのは、この単語だけです。"</li>
@@ -430,7 +437,7 @@ fn accounts_view(ctx: Ctx, accounts: Vec<AccountView>) -> impl IntoView {
         .into_iter()
         .map(|account| {
             view! {
-                <li class="card">
+                <li class="card glass">
                     <div class="row">
                         <strong>{account.label}</strong>
                         <span class="badge">{account.network}</span>

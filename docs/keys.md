@@ -53,3 +53,14 @@ heika account show <アドレス> --rest https://<ホスト>:3001 --json
 ```
 
 `heika account show` は、REST の答えをそのまま出さずに、確かめてから出す。最新のブロックの署名と、9本の根から求めた StateHash を確かめ、アカウントの状態と、持っているモザイクの定義（可分性）が、状態の経路でその根につながることを確かめる。まだチェーンに載っていないアカウントは、載っていないことを状態の経路で確かめる。取るあいだにブロックが進んで根が合わなくなったら、最初から取り直す。信じたままなのは、そのブロックが正しいチェーンのものかどうかで、そこは REST を信じる。出力にも、確かめたことと信じたままのことを書く。モザイクは ID で出し、通貨だけ XYM と出す。REST には HTTPS でつなぎ、ルート証明書は OS のものを使う。
+
+## 送金
+
+```sh
+heika tx transfer --network mainnet --signer <自分の公開鍵> --to <宛先のアドレス> --amount 1.5 --message "ありがとう" --out transfer.bin
+heika tx sign --network mainnet transfer.bin --out transfer.signed.bin --wallet-account main
+heika tx announce --network mainnet --rest https://<ホスト>:3001 transfer.signed.bin
+heika tx status --network mainnet --rest https://<ホスト>:3001 transfer.signed.bin
+```
+
+`heika tx transfer` は、XYM を送る署名していない送金を組む。量は XYM の単位で、小数点の下は6桁まで書ける。メッセージは暗号化しない平文なので、チェーンの上で誰でも読める。手数料はバイト数に `--fee-multiplier`（既定は 100）を掛けたもので、期限は `--deadline-hours`（既定は 2 時間）で決める。宛先のネットワークが違ったり、ノードで弾かれる形だったりすれば書かない。`heika tx announce --rest` は、署名したものを REST に渡す。REST は受け取ったことしか返さないので、ブロックに入ったかは `heika tx status` で確かめる。`heika tx status` は、REST から入ったブロックを聞き、そのブロックの署名と StateHash、このトランザクションからブロックの TransactionsHash への経路を確かめる。経路の葉は REST の答えではなく、手元のトランザクションから求める。見つからなくても、入っていないことは1つの REST からは確かめられないので、期限までの時間を出す。期限を過ぎたトランザクションは、もう入ることはない。REST の transactionStatus も参考に出すが、確かめたものではない。

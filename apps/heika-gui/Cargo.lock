@@ -1724,6 +1724,7 @@ dependencies = [
  "getrandom 0.4.3",
  "heika-core",
  "heika-rest",
+ "heika-transaction",
  "heika-wallet",
  "rand_core",
  "rustls",

@@ -5,12 +5,9 @@ use std::future::{Future, Ready, ready};
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use heika_block::Block;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
-use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::patricia::{self, SubCache, TreeNode};
-use heika_core::vrf;
 use heika_rest::balance::{
     BalanceError, Mismatch, MosaicParts, VerifiedBalance, VerifiedMosaic, VerifyError,
     account_paths, mosaic_paths, verify_balance, verify_balance_parts,
@@ -20,69 +17,11 @@ use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::state::{AccountInfo, MosaicInfo};
 use serde_json::{Value, json};
 
+mod common;
+use common::{block_json, hex};
+
 const XYM: u64 = 0x6BED_913F_A202_23F8;
 const GONE: u64 = 0x0000_0000_0000_0001;
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
-}
-
-/// メインネットの通常のブロックを、9本の根を `roots` にして組んで署名し、REST が返す形の JSON にする
-fn block_json(height: u64, roots: &[Hash256; 9]) -> Value {
-    let harvester = PrivateKey::from_bytes(&[3; 32]);
-    let proof = vrf::prove(&PrivateKey::from_bytes(&[4; 32]), &[0x5A; 32]).unwrap();
-    let state_hash = patricia::state_hash(roots);
-    let mut bytes = vec![0; 376];
-    bytes[..4].copy_from_slice(&376_u32.to_le_bytes());
-    bytes[72..104].copy_from_slice(&PublicKey::from_private_key(&harvester).0);
-    bytes[108] = 1;
-    bytes[109] = 0x68;
-    bytes[110..112].copy_from_slice(&0x8143_u16.to_le_bytes());
-    bytes[112..120].copy_from_slice(&height.to_le_bytes());
-    bytes[120..128].copy_from_slice(&123_456_u64.to_le_bytes());
-    bytes[128..136].copy_from_slice(&100_000_000_000_000_u64.to_le_bytes());
-    bytes[136..168].copy_from_slice(&proof.gamma);
-    bytes[168..184].copy_from_slice(&proof.verification_hash);
-    bytes[184..216].copy_from_slice(&proof.scalar);
-    bytes[216..248].copy_from_slice(&[0x11; 32]);
-    bytes[312..344].copy_from_slice(&state_hash.0);
-    bytes[344] = 0x68;
-    bytes[368..372].copy_from_slice(&100_u32.to_le_bytes());
-    let signature = harvester.sign(&[&bytes[108..372]]);
-    bytes[8..72].copy_from_slice(&signature.0);
-    let block = Block::from_bytes(&bytes).unwrap();
-    json!({
-        "meta": {
-            "hash": block.hash().to_string(),
-            "generationHash": block.generation_hash().to_string(),
-            "totalFee": "0",
-            "stateHashSubCacheMerkleRoots": roots.iter().map(Hash256::to_string).collect::<Vec<_>>(),
-            "totalTransactionsCount": 0,
-            "transactionsCount": 0,
-            "statementsCount": 0,
-        },
-        "block": {
-            "size": 376,
-            "signature": hex(&signature.0),
-            "signerPublicKey": hex(&bytes[72..104]),
-            "version": 1,
-            "network": 104,
-            "type": 0x8143,
-            "height": height.to_string(),
-            "timestamp": "123456",
-            "difficulty": "100000000000000",
-            "proofGamma": hex(&proof.gamma),
-            "proofVerificationHash": hex(&proof.verification_hash),
-            "proofScalar": hex(&proof.scalar),
-            "previousBlockHash": hex(&[0x11; 32]),
-            "transactionsHash": hex(&[0; 32]),
-            "receiptsHash": hex(&[0; 32]),
-            "stateHash": hex(&state_hash.0),
-            "beneficiaryAddress": hex(&bytes[344..368]),
-            "feeMultiplier": 100,
-        },
-    })
-}
 
 /// `key` の葉が1つだけの木の、REST の状態の経路の `raw` と、根
 fn single_leaf(key: &Hash256, value: &Hash256) -> (String, Hash256) {

@@ -56,6 +56,14 @@ impl Config {
         }
     }
 
+    /// 問い合わせる REST。決めていなければエラー
+    pub fn client(&self) -> Result<Client, Failure> {
+        self.get()
+            .rest
+            .map(|origin| Client::new(&origin))
+            .ok_or_else(|| Failure::other("残高を問い合わせる REST を、設定で決めてください"))
+    }
+
     fn get(&self) -> Settings {
         self.settings
             .lock()
@@ -160,7 +168,7 @@ pub struct MosaicView {
 pub struct Failure {
     kind: FailureKind,
     /// くわしいエラー
-    detail: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -180,7 +188,7 @@ enum FailureKind {
 }
 
 impl Failure {
-    fn other(detail: impl Into<String>) -> Self {
+    pub fn other(detail: impl Into<String>) -> Self {
         Self {
             kind: FailureKind::Other,
             detail: detail.into(),
@@ -212,32 +220,16 @@ pub async fn balance(
     config: tauri::State<'_, Config>,
     address: String,
 ) -> Result<BalanceView, Failure> {
-    let origin = config
-        .get()
-        .rest
-        .ok_or_else(|| Failure::other("残高を問い合わせる REST を、設定で決めてください"))?;
+    let client = config.client()?;
     let address: Address = address
         .trim()
         .parse()
         .map_err(|error| Failure::other(format!("アドレスを読めません: {error}")))?;
-    let agent = Arc::new(agent());
-    let fetch = {
-        let origin = origin.clone();
-        move |path: String| {
-            let agent = Arc::clone(&agent);
-            let origin = origin.clone();
-            async move {
-                tauri::async_runtime::spawn_blocking(move || get(&agent, &origin, &path))
-                    .await
-                    .map_err(|error| format!("問い合わせが途中で止まりました: {error}"))?
-            }
-        }
-    };
     let pause = || async {
         // 眠るだけなので、止まっても困らない
         let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(RETRY_PAUSE)).await;
     };
-    let balance = verify_balance(&address, fetch, pause).await?;
+    let balance = verify_balance(&address, |path| client.get(path), pause).await?;
 
     let network = NetworkParameters::from_identifier(balance.block.network);
     let block_time = network
@@ -263,9 +255,53 @@ pub async fn balance(
         height: balance.block.height.to_string(),
         block_hash: balance.block.hash().to_string(),
         block_time,
-        rest: origin,
+        rest: client.origin().to_owned(),
         mosaics,
     })
+}
+
+/// 問い合わせる REST。複製しても同じつなぎ先を使う
+#[derive(Clone)]
+pub struct Client {
+    agent: Arc<ureq::Agent>,
+    origin: Arc<str>,
+}
+
+impl Client {
+    fn new(origin: &str) -> Self {
+        Self {
+            agent: Arc::new(agent()),
+            origin: origin.into(),
+        }
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// REST の `path` を取る。404 なら None。tokio の作業スレッドを止めないように、別のスレッドで問い合わせる
+    pub async fn get(&self, path: String) -> Result<Option<Vec<u8>>, String> {
+        let client = self.clone();
+        tauri::async_runtime::spawn_blocking(move || get(&client.agent, &client.origin, &path))
+            .await
+            .map_err(|error| format!("問い合わせが途中で止まりました: {error}"))?
+    }
+
+    /// REST の `path` に JSON の `body` を PUT する
+    pub async fn put(&self, path: &'static str, body: String) -> Result<(), String> {
+        let client = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            client
+                .agent
+                .put(&format!("{}{path}", client.origin))
+                .header("Content-Type", "application/json")
+                .send(body)
+                .map(drop)
+                .map_err(|error| format!("REST の {path} に送れませんでした: {error}"))
+        })
+        .await
+        .map_err(|error| format!("問い合わせが途中で止まりました: {error}"))?
+    }
 }
 
 /// HTTPS では、OS のルート証明書で相手を確かめる

@@ -20,6 +20,10 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["navigator", "clipboard"], js_name = writeText)]
     fn write_clipboard(text: &str) -> JsValue;
 
+    /// 画面を変えたら、いちばん上から見せる
+    #[wasm_bindgen(js_namespace = window, js_name = scrollTo)]
+    fn scroll_to(x: f64, y: f64);
+
     type Date;
     #[wasm_bindgen(constructor)]
     fn new(milliseconds: f64) -> Date;
@@ -76,6 +80,15 @@ struct UnlockArgs {
 #[derive(Serialize)]
 struct BalanceArgs {
     address: String,
+}
+
+#[derive(Serialize)]
+struct PrepareArgs {
+    from: String,
+    to: String,
+    amount: String,
+    message: String,
+    speed: String,
 }
 
 #[derive(Serialize)]
@@ -137,6 +150,43 @@ impl BalanceFailure {
     }
 }
 
+/// 本体の `prepare_send` が返す、送る前に確かめてもらう下書き
+#[derive(Clone, Deserialize)]
+struct DraftView {
+    from: String,
+    to: String,
+    network: String,
+    amount: String,
+    fee: String,
+    total: String,
+    deadline: f64,
+    message: String,
+    rest: String,
+}
+
+/// 本体の `outbox` が返す、送ったもの
+#[derive(Clone, Deserialize)]
+struct SentView {
+    hash: String,
+    to: String,
+    amount: String,
+    state: SentState,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SentState {
+    Included {
+        height: u64,
+        block_time: Option<f64>,
+    },
+    Waiting {
+        deadline: f64,
+        hint: Option<String>,
+    },
+    Expired,
+}
+
 /// 本体の `about` が返すもの
 #[derive(Clone, Deserialize)]
 struct About {
@@ -190,14 +240,47 @@ enum Screen {
     Unlock(String),
     /// ここからはキーストアを開いたあと。メニューを出す
     Home,
+    Send,
     Accounts,
     Settings,
+    /// 送る前に確かめてもらう。メニューは出さず、送るか戻るかだけにする
+    Approve(DraftView),
 }
 
 impl Screen {
-    /// キーストアを開いたあとの画面か
+    /// キーストアを開いたあとの、メニューを出す画面か
     fn inside(&self) -> bool {
-        matches!(self, Self::Home | Self::Accounts | Self::Settings)
+        matches!(
+            self,
+            Self::Home | Self::Send | Self::Accounts | Self::Settings
+        )
+    }
+}
+
+/// 送金の入力欄。確かめる画面から戻っても、入れたものが残るように Ctx に置く
+#[derive(Clone, Copy)]
+struct SendForm {
+    to: RwSignal<String>,
+    amount: RwSignal<String>,
+    message: RwSignal<String>,
+    /// 手数料の倍率。`slow`、`normal`、`fast`
+    speed: RwSignal<String>,
+}
+
+impl SendForm {
+    fn new() -> Self {
+        Self {
+            to: RwSignal::new(String::new()),
+            amount: RwSignal::new(String::new()),
+            message: RwSignal::new(String::new()),
+            speed: RwSignal::new("normal".to_owned()),
+        }
+    }
+
+    fn clear(self) {
+        self.to.set(String::new());
+        self.amount.set(String::new());
+        self.message.set(String::new());
     }
 }
 
@@ -211,12 +294,14 @@ struct Ctx {
     /// 開いているキーストアのアカウント
     accounts: RwSignal<Vec<AccountView>>,
     settings: RwSignal<Settings>,
+    form: SendForm,
 }
 
 impl Ctx {
     fn go(self, screen: Screen) {
         self.error.set(None);
         self.screen.set(screen);
+        scroll_to(0.0, 0.0);
     }
 
     /// 本体のコマンドを呼び、うまくいったら `then` に渡す。失敗したらエラーを出す
@@ -291,6 +376,7 @@ fn App() -> impl IntoView {
         busy: RwSignal::new(false),
         accounts: RwSignal::new(Vec::new()),
         settings: RwSignal::new(Settings::default()),
+        form: SendForm::new(),
     };
     ctx.restart();
 
@@ -308,7 +394,11 @@ fn App() -> impl IntoView {
         Some(Err(error)) => format!("本体とつながりません: {error}"),
     };
     view! {
-        <div class="shell" class:inside=move || ctx.screen.with(Screen::inside)>
+        <div
+            class="shell"
+            class:inside=move || ctx.screen.with(Screen::inside)
+            class:approve=move || ctx.screen.with(|screen| matches!(screen, Screen::Approve(_)))
+        >
             {move || ctx.screen.with(Screen::inside).then(|| menu(ctx))}
             <main>
                 <h1>"heika"</h1>
@@ -323,13 +413,18 @@ fn App() -> impl IntoView {
                     Screen::Passphrase(source) => passphrase(ctx, source).into_any(),
                     Screen::Unlock(path) => unlock(ctx, path).into_any(),
                     Screen::Home => home(ctx).into_any(),
+                    Screen::Send => send_view(ctx).into_any(),
+                    Screen::Approve(draft) => approve(ctx, draft).into_any(),
                     Screen::Accounts => accounts_view(ctx).into_any(),
                     Screen::Settings => settings_view(ctx).into_any(),
                 }}</section> }}
                 {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
                 // 版はふだんの画面には出さず、設定と、開く前の画面にだけ出す。つながらないときはいつも出す
                 {move || {
-                    let quiet = matches!(ctx.screen.get(), Screen::Home | Screen::Accounts)
+                    let quiet = matches!(
+                        ctx.screen.get(),
+                        Screen::Home | Screen::Send | Screen::Accounts | Screen::Approve(_)
+                    )
                         && matches!(about.get(), Some(Ok(_)));
                     (!quiet).then(|| view! { <footer>{footer}</footer> })
                 }}
@@ -355,6 +450,7 @@ fn menu(ctx: Ctx) -> impl IntoView {
         <nav class="menu glass">
             <p class="brand">"heika"</p>
             {item(Screen::Home, "ホーム", ICON_HOME)}
+            {item(Screen::Send, "送る", ICON_SEND)}
             {item(Screen::Accounts, "アカウント", ICON_ACCOUNTS)}
             {item(Screen::Settings, "設定", ICON_SETTINGS)}
         </nav>
@@ -363,6 +459,7 @@ fn menu(ctx: Ctx) -> impl IntoView {
 
 // メニューのアイコン。24 の枠に、線だけで描く
 const ICON_HOME: &str = "M4 11 12 4l8 7M6 9.5V20h12V9.5M10 20v-5h4v5";
+const ICON_SEND: &str = "M4 12 20 4l-4 16-4-7-8-1zM12 13l8-9";
 const ICON_ACCOUNTS: &str = "M5 6h14v12H5zM5 10h14M8 14h4";
 const ICON_SETTINGS: &str = "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4";
 const ICON_EYE: &str =
@@ -666,9 +763,10 @@ fn home(ctx: Ctx) -> impl IntoView {
 
 fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
     let check = RwSignal::new(Check::Loading);
-    let address = account.address.clone();
+    // 閉包を Copy にして、あちこちから呼べるように、アドレスは StoredValue に置く
+    let address = StoredValue::new(account.address.clone());
     let refresh = move || {
-        let address = address.clone();
+        let address = address.get_value();
         if ctx.settings.get_untracked().rest.is_none() {
             check.set(Check::NoRest);
             return;
@@ -681,7 +779,46 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             });
         });
     };
-    refresh();
+    // 送ったもの。待っているものがあるあいだは、ときどき聞き直す。新しく入ったら残高も確かめ直す
+    let sent = RwSignal::new(Vec::<SentView>::new());
+    let watch = move || {
+        let address = address.get_value();
+        spawn_local(async move {
+            let Ok(list) = call::<Vec<SentView>>("outbox", BalanceArgs { address }).await else {
+                return;
+            };
+            let included = |list: &[SentView]| {
+                list.iter()
+                    .filter(|item| matches!(item.state, SentState::Included { .. }))
+                    .count()
+            };
+            let before = sent.with_untracked(|before| included(before));
+            let newly = included(&list) > before;
+            sent.set(list);
+            if newly {
+                refresh();
+            }
+        });
+    };
+    let refresh_all = move || {
+        refresh();
+        watch();
+    };
+    refresh_all();
+    if let Ok(handle) = set_interval_with_handle(
+        move || {
+            let waiting = sent.with_untracked(|list| {
+                list.iter()
+                    .any(|item| matches!(item.state, SentState::Waiting { .. }))
+            });
+            if waiting {
+                watch();
+            }
+        },
+        Duration::from_secs(10),
+    ) {
+        on_cleanup(move || handle.clear());
+    }
     let copied = RwSignal::new(false);
     let copy = {
         let address = account.address.clone();
@@ -728,7 +865,191 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
             Check::Done(balance) => verified(balance, hidden()).into_any(),
         }}
         <div class="row">
-            <button class="primary" on:click=move |_| refresh() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
+            <button class="primary" on:click=move |_| refresh_all() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
+        </div>
+        {move || {
+            let list = sent.get();
+            (!list.is_empty()).then(|| sent_list(list, hidden()))
+        }}
+    }
+}
+
+/// 送ったものと、それぞれがブロックに入ったか
+fn sent_list(list: Vec<SentView>, hidden: bool) -> impl IntoView {
+    let items = list
+        .into_iter()
+        .map(|item| {
+            let amount = if hidden { MASK.to_owned() } else { grouped(&item.amount) };
+            let state = match item.state {
+                SentState::Included { height, block_time } => view! {
+                    <p class="state included">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d=ICON_VERIFIED /></svg>
+                        {format!("ブロック #{} に入りました", group(&height.to_string()))}
+                        {block_time.map(|time| format!("（{}）", Date::new(time).to_locale_string("ja-JP")))}
+                    </p>
+                }
+                .into_any(),
+                SentState::Waiting { deadline, hint } => view! {
+                    <p class="state">
+                        {format!("ブロックに入るのを待っています。{} までに入らなければ、もう入りません", Date::new(deadline).to_locale_string("ja-JP"))}
+                    </p>
+                    {hint.map(|hint| view! { <p class="hint small">{format!("REST によると: {hint}（確かめたものではありません）")}</p> })}
+                }
+                .into_any(),
+                SentState::Expired => view! {
+                    <p class="state">"期限を過ぎました。ブロックには入っていないので、払っていません"</p>
+                }
+                .into_any(),
+            };
+            view! {
+                <li>
+                    <p class="what">
+                        <span class="value">{amount}" XYM"</span>
+                        <span class="to">{format!("→ {}", spaced(&item.to))}</span>
+                    </p>
+                    {state}
+                    <p class="address small" title="トランザクションのハッシュ">{item.hash}</p>
+                </li>
+            }
+        })
+        .collect_view();
+    view! {
+        <p class="lead section">"送ったもの"</p>
+        <p class="hint">"この記録は、キーストアを閉じるかアプリを終えると消えます。どこにも保存しません。"</p>
+        <ul class="sent">{items}</ul>
+    }
+}
+
+/// XYM を送る。宛先と量を入れてもらい、確かめる画面に進む
+fn send_view(ctx: Ctx) -> impl IntoView {
+    let Some(account) = ctx.current() else {
+        return view! { <p class="lead">"アカウントがありません。"</p> }.into_any();
+    };
+    let form = ctx.form;
+    let from = account.address.clone();
+    // アドレスは、メインネットなら N、テストネットなら T から始まる
+    let placeholder = if account.network == "mainnet" {
+        "N で始まる 39 文字"
+    } else {
+        "T で始まる 39 文字"
+    };
+    let submit = move |event: SubmitEvent| {
+        event.prevent_default();
+        let args = PrepareArgs {
+            from: from.clone(),
+            to: form.to.get_untracked(),
+            amount: form.amount.get_untracked(),
+            message: form.message.get_untracked(),
+            speed: form.speed.get_untracked(),
+        };
+        ctx.run("prepare_send", args, move |draft| {
+            ctx.go(Screen::Approve(draft))
+        });
+    };
+    let speeds = [
+        (
+            "slow",
+            "ゆっくり",
+            "手数料 ×10。混んでいると、入るまで待たされます",
+        ),
+        ("normal", "ふつう", "手数料 ×25"),
+        ("fast", "いそぐ", "手数料 ×100"),
+    ]
+    .into_iter()
+    .map(|(value, label, description)| {
+        view! {
+            <label class="speed">
+                <input
+                    type="radio"
+                    name="speed"
+                    value=value
+                    prop:checked=move || form.speed.get() == value
+                    on:change=move |_| form.speed.set(value.to_owned())
+                />
+                <span class="name">{label}</span>
+                <span class="hint">{description}</span>
+            </label>
+        }
+    })
+    .collect_view();
+    view! {
+        <div class="row heading">
+            <strong>{account.label.clone()}</strong>
+            <span class="badge">{account.network.clone()}</span>
+            <span class="hint">"から送ります"</span>
+        </div>
+        <form on:submit=submit class="send">
+            <label class="field">
+                "宛先のアドレス"
+                <input type="text" class="secret" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder=placeholder bind:value=form.to />
+            </label>
+            <label class="field">
+                "送る量（XYM）"
+                <input type="text" inputmode="decimal" autocomplete="off" placeholder="1.5" bind:value=form.amount />
+            </label>
+            <label class="field">
+                "メッセージ（なくてもかまいません）"
+                <input type="text" autocomplete="off" bind:value=form.message />
+                <span class="note">"暗号化しないので、チェーンの上で誰でも読めます"</span>
+            </label>
+            <fieldset class="speeds">
+                <legend>"手数料"</legend>
+                {speeds}
+            </fieldset>
+            <div class="row">
+                <button type="submit" class="primary" disabled=move || ctx.busy.get()>"確かめる"</button>
+            </div>
+        </form>
+    }
+    .into_any()
+}
+
+/// 送る前に確かめてもらう、深い青の画面。ここで決めてもらうまで、署名しない
+fn approve(ctx: Ctx, draft: DraftView) -> impl IntoView {
+    let send = move |_| {
+        ctx.run("send", NoArgs {}, move |_hash: String| {
+            ctx.form.clear();
+            ctx.go(Screen::Home);
+        })
+    };
+    let (whole, fraction) = match draft.amount.split_once('.') {
+        Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
+        None => (group(&draft.amount), String::new()),
+    };
+    let to_self = draft.from == draft.to;
+    view! {
+        <p class="kicker">"送る前に確かめてください"</p>
+        <p class="label">"宛先"</p>
+        <p class="address">{spaced(&draft.to)}</p>
+        {to_self.then(|| view! { <p class="warn">"自分あての送金です。手数料だけが減ります。"</p> })}
+        <p class="label">"送る量"</p>
+        <p class="amount">
+            <span class="whole">{whole}</span>
+            <span class="fraction">{fraction}</span>
+            <span class="unit">"XYM"</span>
+        </p>
+        <dl class="terms">
+            <dt>"手数料"</dt>
+            <dd>{format!("{} XYM", grouped(&draft.fee))}</dd>
+            <dt>"合わせて減る量"</dt>
+            <dd>{format!("{} XYM", grouped(&draft.total))}</dd>
+            <dt>"ネットワーク"</dt>
+            <dd>{draft.network.clone()}</dd>
+            <dt>"期限"</dt>
+            <dd>{format!("{} まで", Date::new(draft.deadline).to_locale_string("ja-JP"))}</dd>
+            <dt>"渡す REST"</dt>
+            <dd>{draft.rest.clone()}</dd>
+        </dl>
+        {(!draft.message.is_empty()).then(|| view! {
+            <p class="label">"メッセージ（暗号化しません。誰でも読めます）"</p>
+            <p class="message">{draft.message.clone()}</p>
+        })}
+        <p class="hint">"送ると取り消せません。宛先を、相手から聞いたものと1文字ずつ見比べてください。"</p>
+        <div class="row">
+            <button class="primary" on:click=send disabled=move || ctx.busy.get()>
+                {move || if ctx.busy.get() { "送っています…" } else { "署名して送る" }}
+            </button>
+            <button on:click=move |_| ctx.go(Screen::Send) disabled=move || ctx.busy.get()>"戻る"</button>
         </div>
     }
 }

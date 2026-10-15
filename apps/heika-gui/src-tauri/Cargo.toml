@@ -14,6 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
 heika-core = { path = "../../../crates/heika-core" }
+heika-wallet = { path = "../../../crates/heika-wallet" }
+rand_core = "0.10.1"
 serde = { version = "1.0.229", features = ["derive"] }
 tauri = { version = "2.12.4", features = [] }
+zeroize = "1.9.1"

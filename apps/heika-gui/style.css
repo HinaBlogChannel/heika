@@ -1,100 +1,396 @@
-/* 外のフォントは読まない。アプリは手元だけで動くようにする */
+/*
+ * 透き通るオトナカワイイ。ふだんの画面は、雪のような白と、深い青のくっきりした対比にする。
+ * - 面は角をほぼ立てて、細い線で囲み、後ろのしまが曇りガラス越しに見えるくらい透かす
+ * - かわいさは淡いバラ色を点で差すだけにして、量を絞る
+ * - 見出しは明朝、本文は角ゴシック。丸ゴシックにはしない
+ * - 使わないもの: 大文字で字間を空けた小見出し、押すと沈む錠剤の形のボタン、角の大きく丸い影付きのカード
+ *
+ * 外のフォントは読まない。アプリは手元だけで動くようにして、OS にある明朝とゴシックを使う。
+ * ダークモードには合わせず、いつも明るい配色にする（深い青の画面は、署名を承認するときのためにとっておく）
+ */
 :root {
-  color-scheme: light dark;
-  --bg: #f7f5f0;
-  --fg: #22201c;
-  --muted: #6b665c;
-  --accent: #6d4bd6;
-  --card: #ffffff;
-  --line: #e2ddd2;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17161a;
-    --fg: #ece9e2;
-    --muted: #a19b8f;
-    --accent: #a48bf0;
-    --card: #222127;
-    --line: #34323a;
-  }
+  color-scheme: light;
+  --snow: #f6f9fc;
+  --stripe: #ecf2f8;
+  --ink: #142445;
+  --ink-soft: #5d6b85;
+  --blue: #1b3a7a;
+  --blue-hover: #24499a;
+  --blue-line: rgba(27, 58, 122, 0.2);
+  --blue-faint: rgba(27, 58, 122, 0.06);
+  --glass: rgba(255, 255, 255, 0.6);
+  --glass-hover: rgba(255, 255, 255, 0.85);
+  --rose: #d49aaa;
+  --danger: #b4475f;
+  --serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif CJK JP", serif;
+  --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  min-height: 100%;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 50%),
+    repeating-linear-gradient(90deg, var(--snow) 0 6px, var(--stripe) 6px 12px);
+  background-attachment: fixed;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
-  line-height: 1.6;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.8;
+  letter-spacing: 0.02em;
 }
 
 main {
-  max-width: 36rem;
+  max-width: 34rem;
   margin: 0 auto;
-  padding: max(env(safe-area-inset-top), 1.5rem) 1rem 2rem;
+  padding: max(env(safe-area-inset-top), 2.5rem) 1.25rem 2rem;
 }
 
+/* 名前の右に、消えていく細い線を引く */
 h1 {
-  margin: 0 0 0.25rem;
-  font-size: 1.6rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 2rem;
+  font-family: var(--serif);
+  font-size: 1.9rem;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  color: var(--blue);
+}
+
+h1::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--blue-line), transparent);
+}
+
+.screen {
+  animation: appear 0.32s ease-out both;
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen {
+    animation: none;
+  }
 }
 
 .lead {
-  margin: 0 0 1.5rem;
-  color: var(--muted);
+  margin: 0 0 1.25rem;
+  font-family: var(--serif);
+  font-size: 1.05rem;
 }
 
-.card {
-  padding: 1rem;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--card);
+.hint {
+  margin: 0 0 1rem;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
 }
 
-.row {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+.path {
+  overflow-wrap: anywhere;
+}
+
+/* 透ける面。角に、ファインダーのような短い線を置く */
+.glass {
+  border: 1px solid var(--blue-line);
+  border-radius: 2px;
+  background:
+    linear-gradient(var(--blue), var(--blue)) left top / 10px 1px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) left top / 1px 10px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) right bottom / 10px 1px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) right bottom / 1px 10px no-repeat border-box,
+    var(--glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
 }
 
 button,
 select {
   font: inherit;
-  padding: 0.6rem 1rem;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--card);
-  color: var(--fg);
+}
+
+button {
+  padding: 0.65rem 1.5rem;
+  border: 1px solid var(--blue);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--blue);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+}
+
+button:hover {
+  background-color: var(--blue-faint);
 }
 
 button.primary {
-  border-color: var(--accent);
-  background: var(--accent);
+  background-color: var(--blue);
   color: #fff;
 }
 
+button.primary:hover {
+  background-color: var(--blue-hover);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.quiet {
+  padding: 0.25rem 0;
+  border: none;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  text-decoration: underline;
+  text-decoration-color: var(--blue-line);
+  text-underline-offset: 4px;
+}
+
+button.quiet:hover {
+  color: var(--blue);
+}
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.choices .quiet {
+  align-self: flex-start;
+  margin-top: 0.5rem;
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: 2.25rem 1fr;
+  column-gap: 1rem;
+  padding: 1rem 1.25rem;
+  text-align: left;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.choice:hover {
+  background-color: var(--glass-hover);
+  border-color: var(--blue);
+}
+
+.choice .index {
+  grid-row: span 2;
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  line-height: 1.3;
+  color: var(--blue);
+  opacity: 0.45;
+}
+
+.choice .title {
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  color: var(--blue);
+}
+
+.choice .desc {
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.words {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.2rem 1rem;
+  margin: 0 0 1.5rem;
+  padding: 1.25rem 1.5rem;
+  list-style: none;
+  font-family: var(--mono);
+}
+
+.words .number {
+  display: inline-block;
+  width: 2rem;
+  font-family: var(--serif);
+  font-size: 0.8rem;
+  color: var(--blue);
+  opacity: 0.55;
+}
+
+/* 注意書きの頭に、淡いバラ色の短い線を引く */
+.notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.notes li {
+  position: relative;
+  padding-left: 1.1rem;
+}
+
+.notes li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.9em;
+  width: 0.5rem;
+  height: 1px;
+  background: var(--rose);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1.5rem 0 0;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--blue);
+}
+
+/* 入れる欄は下線だけにする */
+.field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 1.25rem;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+}
+
+input[type="text"],
+input[type="password"],
+select {
+  width: 100%;
+  padding: 0.5rem 0.1rem;
+  border: none;
+  border-bottom: 1px solid var(--blue-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+textarea {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--blue-line);
+  border-radius: 2px;
+  background: var(--glass);
+  color: var(--ink);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+input:focus,
+select:focus {
+  border-bottom-color: var(--blue);
+  box-shadow: 0 1px 0 var(--blue);
+}
+
+textarea:focus {
+  border-color: var(--blue);
+}
+
+form > input {
+  margin-bottom: 0.5rem;
+}
+
+.secret {
+  font-family: var(--mono);
+}
+
+.accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  padding: 1rem 1.25rem;
+}
+
+.card .row {
+  margin-top: 0;
+}
+
+.card strong {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.1rem;
+  color: var(--blue);
+}
+
+.badge {
+  padding: 0 0.5rem;
+  border: 1px solid var(--blue-line);
+  color: var(--blue);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+}
+
+.card .hint {
+  margin: 0;
+}
+
 .address {
-  margin-top: 1rem;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  margin: 0.5rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
   overflow-wrap: anywhere;
 }
 
 .error {
-  margin-top: 1rem;
-  color: #c2410c;
+  margin: 1.25rem 0 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--rose);
+  color: var(--danger);
+  font-size: 0.9rem;
 }
 
 footer {
-  margin-top: 1.5rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.card .lead {
-  margin: 1rem 0 0;
+  margin-top: 2.5rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
 }

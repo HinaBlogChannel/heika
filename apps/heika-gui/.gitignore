@@ -1,0 +1,7 @@
+/dist/
+/target/
+/src-tauri/target/
+# cargo tauri android init / ios init で作られる。CI でも作り直す
+/src-tauri/gen/
+# icon.png から cargo tauri icon で作る。heika-cli が埋め込むソースを重くしないように、生成物は入れない
+/src-tauri/icons/

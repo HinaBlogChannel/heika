@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "画面に許すのは Tauri の既定のものだけ。アプリのコマンドは、ここに書かなくても呼べる",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

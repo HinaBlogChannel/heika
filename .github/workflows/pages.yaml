@@ -1,11 +1,11 @@
-# v* のタグで、examples のデモをビルドして GitHub Pages に出す。
+# v1.2.3 の形のタグで、examples のデモをビルドして GitHub Pages に出す。
 # examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ になる。
 # 手で回すと、master のものを出す
 name: Pages
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
 
 permissions:

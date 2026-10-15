@@ -381,7 +381,10 @@ fn mismatch(what: &str, error: Mismatch) -> VerifyError {
     }
 }
 
-async fn optional<T, F, R, E>(fetch: &mut F, path: String) -> Result<Option<T>, BalanceError<E>>
+pub(crate) async fn optional<T, F, R, E>(
+    fetch: &mut F,
+    path: String,
+) -> Result<Option<T>, BalanceError<E>>
 where
     T: DeserializeOwned,
     F: FnMut(String) -> R,
@@ -398,7 +401,7 @@ where
         })
 }
 
-async fn required<T, F, R, E>(fetch: &mut F, path: String) -> Result<T, BalanceError<E>>
+pub(crate) async fn required<T, F, R, E>(fetch: &mut F, path: String) -> Result<T, BalanceError<E>>
 where
     T: DeserializeOwned,
     F: FnMut(String) -> R,

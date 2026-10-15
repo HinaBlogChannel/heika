@@ -1,6 +1,9 @@
 //! 自分で署名したブロックと、自分で作った状態の木を REST の形にして、残高を確かめる流れを通す。
 
 use std::collections::HashMap;
+use std::future::{Future, Ready, ready};
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
 use heika_block::Block;
 use heika_core::address::Address;
@@ -8,7 +11,12 @@ use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::patricia::{self, SubCache, TreeNode};
 use heika_core::vrf;
-use heika_rest::balance::{BalanceError, Mismatch, VerifiedMosaic, verify_balance};
+use heika_rest::balance::{
+    BalanceError, Mismatch, MosaicParts, VerifiedBalance, VerifiedMosaic, VerifyError,
+    account_paths, mosaic_paths, verify_balance, verify_balance_parts,
+};
+use heika_rest::block::BlockInfo;
+use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::state::{AccountInfo, MosaicInfo};
 use serde_json::{Value, json};
 
@@ -185,18 +193,36 @@ impl Rest {
         Self(answers)
     }
 
-    fn fetch(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(self
+    fn fetch(&self, path: &str) -> Ready<Result<Option<Vec<u8>>, String>> {
+        ready(Ok(self
             .0
             .get(path)
-            .map(|value| serde_json::to_vec(value).unwrap()))
+            .map(|value| serde_json::to_vec(value).unwrap())))
+    }
+
+    fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Option<T> {
+        self.0
+            .get(path)
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+    }
+
+    fn verify(&self, address: &Address) -> Result<VerifiedBalance, BalanceError<String>> {
+        run(verify_balance(address, |path| self.fetch(&path)))
+    }
+}
+
+/// 取ってくる関数はすぐに答えを返すので、一度動かせば終わる
+fn run<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("すぐに答えを返したのに、待たされました"),
     }
 }
 
 #[test]
 fn verifies_balances_and_divisibility_against_the_state_hash() {
     let rest = Rest::new(1440, Some(account_json(&[(XYM, 1_234_567_890), (GONE, 5)])));
-    let balance = verify_balance(&address(), |path| rest.fetch(path)).unwrap();
+    let balance = rest.verify(&address()).unwrap();
     assert_eq!(balance.block.height, 1440);
     assert_eq!(
         balance.account.unwrap().mosaics,
@@ -218,7 +244,7 @@ fn verifies_balances_and_divisibility_against_the_state_hash() {
 #[test]
 fn proves_that_an_account_is_not_on_the_chain_yet() {
     let rest = Rest::new(1440, None);
-    let balance = verify_balance(&address(), |path| rest.fetch(path)).unwrap();
+    let balance = rest.verify(&address()).unwrap();
     assert!(balance.account.is_none());
 }
 
@@ -230,28 +256,28 @@ fn refuses_balances_that_are_not_in_the_state_tree() {
         format!("/accounts/{}", address()),
         account_json(&[(XYM, 1_000_000)]),
     );
-    let error = verify_balance(&address(), |path| rest.fetch(path)).unwrap_err();
+    let error = rest.verify(&address()).unwrap_err();
     assert!(
         matches!(
             &error,
-            BalanceError::Invalid {
+            BalanceError::Verify(VerifyError::Invalid {
                 error: Mismatch::StateHash,
                 ..
-            }
+            })
         ),
         "{error:?}"
     );
 
     // REST がアカウントを隠しても、経路はあることを示している
     rest.0.remove(&format!("/accounts/{}", address()));
-    let error = verify_balance(&address(), |path| rest.fetch(path)).unwrap_err();
+    let error = rest.verify(&address()).unwrap_err();
     assert!(
         matches!(
             &error,
-            BalanceError::Invalid {
+            BalanceError::Verify(VerifyError::Invalid {
                 error: Mismatch::UnexpectedPresence,
                 ..
-            }
+            })
         ),
         "{error:?}"
     );
@@ -263,18 +289,18 @@ fn starts_over_when_the_chain_moves_while_fetching() {
     let new = Rest::new(1441, Some(account_json(&[(XYM, 2)])));
     // 最初は古いブロックを返し、状態はもう新しくなっている
     let mut chain_info_calls = 0;
-    let balance = verify_balance(&address(), |path| {
+    let balance = run(verify_balance(&address(), |path| {
         if path == "/chain/info" {
             chain_info_calls += 1;
             if chain_info_calls == 1 {
-                return old.fetch(path);
+                return old.fetch(&path);
             }
         }
         if path == "/blocks/1440" {
-            return old.fetch(path);
+            return old.fetch(&path);
         }
-        new.fetch(path)
-    })
+        new.fetch(&path)
+    }))
     .unwrap();
     assert_eq!(chain_info_calls, 2);
     assert_eq!(balance.block.height, 1441);
@@ -284,6 +310,49 @@ fn starts_over_when_the_chain_moves_while_fetching() {
 #[test]
 fn refuses_an_address_of_another_network() {
     let rest = Rest::new(1440, None);
-    let error = verify_balance(&Address([0x98; 24]), |path| rest.fetch(path)).unwrap_err();
-    assert!(matches!(error, BalanceError::WrongNetwork), "{error:?}");
+    let error = rest.verify(&Address([0x98; 24])).unwrap_err();
+    assert!(
+        matches!(error, BalanceError::Verify(VerifyError::WrongNetwork)),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn verifies_parts_fetched_by_the_caller() {
+    let rest = Rest::new(1440, Some(account_json(&[(XYM, 7), (GONE, 5)])));
+    let block: BlockInfo = rest.get("/blocks/1440").unwrap();
+    let [account_path, account_merkle] = account_paths(&address());
+    let account: AccountInfo = rest.get(&account_path).unwrap();
+    let proof: MerkleStateInfo = rest.get(&account_merkle).unwrap();
+    let parts = |id| {
+        let [path, merkle] = mosaic_paths(id);
+        MosaicParts {
+            id,
+            info: rest.get(&path),
+            proof: rest.get(&merkle).unwrap(),
+        }
+    };
+
+    let balance = verify_balance_parts(
+        &address(),
+        &block,
+        Some(&account),
+        &proof,
+        &[parts(GONE), parts(XYM)],
+    )
+    .unwrap();
+    // 渡した順ではなく、アカウントが持っている順に並ぶ
+    let ids: Vec<u64> = balance
+        .account
+        .unwrap()
+        .mosaics
+        .iter()
+        .map(|mosaic| mosaic.id)
+        .collect();
+    assert_eq!(ids, [XYM, GONE]);
+
+    // 持っているモザイクの定義が足りなければ、確かめられない
+    let error = verify_balance_parts(&address(), &block, Some(&account), &proof, &[parts(XYM)])
+        .unwrap_err();
+    assert_eq!(error, VerifyError::MissingMosaic(GONE));
 }

@@ -8,10 +8,12 @@
 //!
 //! 信じたままなのは、そのブロックが正しいチェーンのものかどうか。ブロックの中の辻褄までは確かめる。
 //!
-//! 状態は取ったときの最新のものしかないので、取るあいだにブロックが進むと根が合わなくなる。
-//! そのときは、最初から何回か取り直す。
+//! 確かめるところ（[`verify_balance_parts`]）は、取ってきたものを受け取るだけの同期の計算で、通信も待ちもしない。
+//! 取る順番と取り直し（[`verify_balance`]）は、取ってくる関数を受け取る非同期の関数にして、
+//! どう取るか（同期の HTTP、スレッド、ブラウザの `fetch`）と、どう待つかは呼び出し側に任せる。
 
 use std::fmt;
+use std::future::IntoFuture;
 
 use heika_block::Block;
 use heika_core::address::Address;
@@ -57,20 +59,26 @@ pub struct VerifiedMosaic {
     pub divisibility: Option<u8>,
 }
 
-/// 残高を確かめられなかった。`E` は取ってくる関数のエラー
-#[derive(Debug)]
-pub enum BalanceError<E> {
-    /// 取ってこられなかった
-    Fetch(E),
-    /// 要るものが REST になかった
-    NotFound { path: String },
-    /// JSON として読めなかった
-    Json { path: String, error: String },
+/// 1つのモザイクの定義について取ってきたもの
+#[derive(Clone, Debug)]
+pub struct MosaicParts {
+    pub id: u64,
+    /// `/mosaics/{id}`。404 なら `None`
+    pub info: Option<MosaicInfo>,
+    /// `/mosaics/{id}/merkle`
+    pub proof: MerkleStateInfo,
+}
+
+/// 取ってきたものを確かめたら、合わなかった
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum VerifyError {
     /// アドレスのネットワークが、ブロックのネットワークと違う
     WrongNetwork,
     /// ノードが状態のハッシュを使っていないので、状態を確かめられない
     NoStateHash,
-    /// 確かめたら合わなかった。取り直しても合わなかったときの、最後のもの
+    /// アカウントが持っているモザイクの定義が、渡されていない
+    MissingMosaic(u64),
+    /// `what`（「アカウント」など）を確かめたら合わなかった。取るあいだにブロックが進んでも起きる
     Invalid { what: String, error: Mismatch },
 }
 
@@ -89,6 +97,19 @@ pub enum Mismatch {
     WrongEntity,
 }
 
+/// 残高を確かめられなかった。`E` は取ってくる関数のエラー
+#[derive(Debug)]
+pub enum BalanceError<E> {
+    /// 取ってこられなかった
+    Fetch(E),
+    /// 要るものが REST になかった
+    NotFound { path: String },
+    /// JSON として読めなかった
+    Json { path: String, error: String },
+    /// 確かめたら合わなかった。取り直しても合わなかったときは、最後のもの
+    Verify(VerifyError),
+}
+
 impl fmt::Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -105,73 +126,88 @@ impl fmt::Display for Mismatch {
     }
 }
 
-impl<E: fmt::Display> fmt::Display for BalanceError<E> {
+impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Fetch(error) => error.fmt(f),
-            Self::NotFound { path } => write!(f, "REST に {path} がありません"),
-            Self::Json { path, error } => write!(f, "{path} を読めません: {error}"),
             Self::WrongNetwork => {
                 f.write_str("アドレスのネットワークが、REST のネットワークと違います")
             }
             Self::NoStateHash => f.write_str(
                 "この REST のノードは状態のハッシュを使っていないので、状態を確かめられません",
             ),
+            Self::MissingMosaic(id) => write!(f, "モザイク {id:016X} の定義がありません"),
             Self::Invalid { what, error } => write!(f, "{what}を確かめられません: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
+impl<E: fmt::Display> fmt::Display for BalanceError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fetch(error) => error.fmt(f),
+            Self::NotFound { path } => write!(f, "REST に {path} がありません"),
+            Self::Json { path, error } => write!(f, "{path} を読めません: {error}"),
+            Self::Verify(error) => error.fmt(f),
         }
     }
 }
 
 impl<E: fmt::Debug + fmt::Display> std::error::Error for BalanceError<E> {}
 
-/// `address` の残高を、REST の最新のブロックの StateHash まで確かめる。
-///
-/// `fetch` は REST のパス（`/chain/info` など）を受け取り、本文のバイト列を返す。
-/// 404 なら `Ok(None)` を返す。それ以外の失敗は `Err` にする。
-pub fn verify_balance<E>(
-    address: &Address,
-    mut fetch: impl FnMut(&str) -> Result<Option<Vec<u8>>, E>,
-) -> Result<VerifiedBalance, BalanceError<E>> {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        match attempt_once(address, &mut fetch) {
-            Err(BalanceError::Invalid { .. }) if attempt < ATTEMPTS => continue,
-            result => return result,
-        }
-    }
+/// アカウントについて取るパス。`/accounts/{address}` と `/accounts/{address}/merkle`
+pub fn account_paths(address: &Address) -> [String; 2] {
+    let path = format!("/accounts/{address}");
+    let merkle = format!("{path}/merkle");
+    [path, merkle]
 }
 
-fn attempt_once<E>(
+/// モザイクの定義について取るパス。`/mosaics/{id}` と `/mosaics/{id}/merkle`
+pub fn mosaic_paths(id: u64) -> [String; 2] {
+    let path = format!("/mosaics/{id:016X}");
+    let merkle = format!("{path}/merkle");
+    [path, merkle]
+}
+
+/// アカウントが持っているモザイクの ID。これらの定義を取って、[`verify_balance_parts`] に渡す
+pub fn mosaic_ids(account: &AccountInfo) -> Result<Vec<u64>, RestError> {
+    account
+        .account
+        .mosaics
+        .iter()
+        .map(|balance| id(&balance.id, "mosaics.id"))
+        .collect()
+}
+
+/// 取ってきたものを突き合わせて、残高を確かめる。通信はしない。
+///
+/// `account` は `/accounts/{address}`（404 なら `None`）、`account_proof` はその経路、
+/// `mosaics` はアカウントが持っているモザイク（[`mosaic_ids`]）の定義と経路。
+/// どれも `block` と同じ時点のものでないと、根が合わずに [`VerifyError::Invalid`] になる。
+pub fn verify_balance_parts(
     address: &Address,
-    fetch: &mut impl FnMut(&str) -> Result<Option<Vec<u8>>, E>,
-) -> Result<VerifiedBalance, BalanceError<E>> {
-    #[derive(Deserialize)]
-    struct ChainInfo {
-        height: String,
+    block: &BlockInfo,
+    account: Option<&AccountInfo>,
+    account_proof: &MerkleStateInfo,
+    mosaics: &[MosaicParts],
+) -> Result<VerifiedBalance, VerifyError> {
+    let verified_block = block.verify().map_err(|error| invalid("ブロック", error))?;
+    if verified_block.network != address.network() {
+        return Err(VerifyError::WrongNetwork);
     }
-    let chain: ChainInfo = required(fetch, "/chain/info")?;
-    let block_info: BlockInfo = required(fetch, &format!("/blocks/{}", chain.height))?;
-    let block = block_info
-        .verify()
-        .map_err(|error| invalid("ブロック", error))?;
-    if block.network != address.network() {
-        return Err(BalanceError::WrongNetwork);
-    }
-    let roots = block_info
+    let roots = block
         .sub_cache_merkle_roots()
         .map_err(|error| invalid("ブロック", error))?;
     if roots.is_empty() {
-        return Err(BalanceError::NoStateHash);
+        return Err(VerifyError::NoStateHash);
     }
 
-    let account_path = format!("/accounts/{address}");
-    let account: Option<AccountInfo> = optional(fetch, &account_path)?;
-    let proof: MerkleStateInfo = required(fetch, &format!("{account_path}/merkle"))?;
+    let key = patricia::address_key(address);
     let leaf = prove(
         "アカウント",
-        &proof,
-        &patricia::address_key(address),
+        account_proof,
+        &key,
         &roots[SubCache::AccountState.index()],
     )?;
     let account = match (account, leaf) {
@@ -179,62 +215,54 @@ fn attempt_once<E>(
         (None, Some(_)) => return Err(mismatch("アカウント", Mismatch::UnexpectedPresence)),
         (Some(_), None) => return Err(mismatch("アカウント", Mismatch::UnexpectedAbsence)),
         (Some(info), Some(leaf)) => {
-            let state = info.account;
-            if state
-                .tree_key()
-                .map_err(|error| invalid("アカウント", error))?
-                != patricia::address_key(address)
-            {
+            let state = &info.account;
+            let rest = |error| invalid("アカウント", error);
+            if state.tree_key().map_err(rest)? != key {
                 return Err(mismatch("アカウント", Mismatch::WrongEntity));
             }
-            if state
-                .state_hash()
-                .map_err(|error| invalid("アカウント", error))?
-                != leaf
-            {
+            if state.state_hash().map_err(rest)? != leaf {
                 return Err(mismatch("アカウント", Mismatch::StateHash));
             }
-            let mut mosaics = Vec::with_capacity(state.mosaics.len());
-            for balance in &state.mosaics {
-                let mosaic_id =
-                    id(&balance.id, "mosaics.id").map_err(|error| invalid("アカウント", error))?;
-                let amount = crate::number(&balance.amount, "mosaics.amount")
-                    .map_err(|error| invalid("アカウント", error))?;
-                let divisibility = verify_divisibility(fetch, mosaic_id, &roots)?;
-                mosaics.push(VerifiedMosaic {
+            let mut verified = Vec::with_capacity(state.mosaics.len());
+            for (mosaic_id, balance) in mosaic_ids(info)
+                .map_err(rest)?
+                .into_iter()
+                .zip(&state.mosaics)
+            {
+                let parts = mosaics
+                    .iter()
+                    .find(|parts| parts.id == mosaic_id)
+                    .ok_or(VerifyError::MissingMosaic(mosaic_id))?;
+                verified.push(VerifiedMosaic {
                     id: mosaic_id,
-                    amount,
-                    divisibility,
+                    amount: crate::number(&balance.amount, "mosaics.amount").map_err(rest)?,
+                    divisibility: verify_divisibility(parts, &roots)?,
                 });
             }
-            Some(VerifiedAccount { state, mosaics })
+            Some(VerifiedAccount {
+                state: state.clone(),
+                mosaics: verified,
+            })
         }
     };
     Ok(VerifiedBalance {
         address: *address,
-        block,
+        block: verified_block,
         account,
     })
 }
 
 /// モザイクの定義を状態の木で確かめて、可分性を返す
-fn verify_divisibility<E>(
-    fetch: &mut impl FnMut(&str) -> Result<Option<Vec<u8>>, E>,
-    mosaic_id: u64,
-    roots: &[Hash256],
-) -> Result<Option<u8>, BalanceError<E>> {
-    let what = format!("モザイク {mosaic_id:016X} ");
-    let path = format!("/mosaics/{mosaic_id:016X}");
-    let mosaic: Option<MosaicInfo> = optional(fetch, &path)?;
-    let proof: MerkleStateInfo = required(fetch, &format!("{path}/merkle"))?;
-    let key = patricia::id_key(mosaic_id);
-    let leaf = prove(&what, &proof, &key, &roots[SubCache::Mosaic.index()])?;
-    match (mosaic, leaf) {
+fn verify_divisibility(parts: &MosaicParts, roots: &[Hash256]) -> Result<Option<u8>, VerifyError> {
+    let what = format!("モザイク {:016X} ", parts.id);
+    let key = patricia::id_key(parts.id);
+    let leaf = prove(&what, &parts.proof, &key, &roots[SubCache::Mosaic.index()])?;
+    match (&parts.info, leaf) {
         (None, None) => Ok(None),
         (None, Some(_)) => Err(mismatch(&what, Mismatch::UnexpectedPresence)),
         (Some(_), None) => Err(mismatch(&what, Mismatch::UnexpectedAbsence)),
         (Some(info), Some(leaf)) => {
-            let state = info.mosaic;
+            let state = &info.mosaic;
             if state.tree_key().map_err(|error| invalid(&what, error))? != key {
                 return Err(mismatch(&what, Mismatch::WrongEntity));
             }
@@ -246,46 +274,117 @@ fn verify_divisibility<E>(
     }
 }
 
-fn prove<E>(
+/// `address` の残高を、REST の最新のブロックの StateHash まで確かめる。
+///
+/// `fetch` は REST のパス（`/chain/info` など）を受け取り、本文のバイト列を返す future（[`IntoFuture`]）を返す。
+/// 404 なら `Ok(None)`、それ以外の失敗は `Err` にする。中身が同期なら [`std::future::ready`] で返せばよい。
+/// 待つこと（タイムアウトや、問い合わせの数を絞られたときの待ち）は `fetch` の側でする。
+///
+/// 取るあいだにブロックが進んで根が合わなくなったら、待たずに最初から取り直す。
+pub async fn verify_balance<F, R, E>(
+    address: &Address,
+    mut fetch: F,
+) -> Result<VerifiedBalance, BalanceError<E>>
+where
+    F: FnMut(String) -> R,
+    R: IntoFuture<Output = Result<Option<Vec<u8>>, E>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match attempt_once(address, &mut fetch).await {
+            Err(BalanceError::Verify(VerifyError::Invalid { .. })) if attempt < ATTEMPTS => {}
+            result => return result,
+        }
+    }
+}
+
+async fn attempt_once<F, R, E>(
+    address: &Address,
+    fetch: &mut F,
+) -> Result<VerifiedBalance, BalanceError<E>>
+where
+    F: FnMut(String) -> R,
+    R: IntoFuture<Output = Result<Option<Vec<u8>>, E>>,
+{
+    #[derive(Deserialize)]
+    struct ChainInfo {
+        height: String,
+    }
+    let chain: ChainInfo = required(fetch, "/chain/info".to_owned()).await?;
+    let block: BlockInfo = required(fetch, format!("/blocks/{}", chain.height)).await?;
+    // 違うネットワークなら、アカウントを問い合わせる前にやめる
+    if block.block.network != address.network().0 {
+        return Err(BalanceError::Verify(VerifyError::WrongNetwork));
+    }
+    let [account_path, account_merkle] = account_paths(address);
+    let account: Option<AccountInfo> = optional(fetch, account_path).await?;
+    let account_proof: MerkleStateInfo = required(fetch, account_merkle).await?;
+
+    let ids = match &account {
+        Some(info) => {
+            mosaic_ids(info).map_err(|error| BalanceError::Verify(invalid("アカウント", error)))?
+        }
+        None => Vec::new(),
+    };
+    let mut mosaics = Vec::with_capacity(ids.len());
+    for id in ids {
+        let [path, merkle] = mosaic_paths(id);
+        mosaics.push(MosaicParts {
+            id,
+            info: optional(fetch, path).await?,
+            proof: required(fetch, merkle).await?,
+        });
+    }
+    verify_balance_parts(address, &block, account.as_ref(), &account_proof, &mosaics)
+        .map_err(BalanceError::Verify)
+}
+
+fn prove(
     what: &str,
     proof: &MerkleStateInfo,
     key: &Hash256,
     root: &Hash256,
-) -> Result<Option<Hash256>, BalanceError<E>> {
+) -> Result<Option<Hash256>, VerifyError> {
     proof.prove(key, root).map_err(|error| invalid(what, error))
 }
 
-fn invalid<E>(what: &str, error: RestError) -> BalanceError<E> {
+fn invalid(what: &str, error: RestError) -> VerifyError {
     mismatch(what, Mismatch::Rest(error))
 }
 
-fn mismatch<E>(what: &str, error: Mismatch) -> BalanceError<E> {
-    BalanceError::Invalid {
+fn mismatch(what: &str, error: Mismatch) -> VerifyError {
+    VerifyError::Invalid {
         what: what.to_owned(),
         error,
     }
 }
 
-fn optional<T: DeserializeOwned, E>(
-    fetch: &mut impl FnMut(&str) -> Result<Option<Vec<u8>>, E>,
-    path: &str,
-) -> Result<Option<T>, BalanceError<E>> {
-    let Some(body) = fetch(path).map_err(BalanceError::Fetch)? else {
+async fn optional<T, F, R, E>(fetch: &mut F, path: String) -> Result<Option<T>, BalanceError<E>>
+where
+    T: DeserializeOwned,
+    F: FnMut(String) -> R,
+    R: IntoFuture<Output = Result<Option<Vec<u8>>, E>>,
+{
+    let Some(body) = fetch(path.clone()).await.map_err(BalanceError::Fetch)? else {
         return Ok(None);
     };
     serde_json::from_slice(&body)
         .map(Some)
         .map_err(|error| BalanceError::Json {
-            path: path.to_owned(),
+            path,
             error: error.to_string(),
         })
 }
 
-fn required<T: DeserializeOwned, E>(
-    fetch: &mut impl FnMut(&str) -> Result<Option<Vec<u8>>, E>,
-    path: &str,
-) -> Result<T, BalanceError<E>> {
-    optional(fetch, path)?.ok_or_else(|| BalanceError::NotFound {
-        path: path.to_owned(),
-    })
+async fn required<T, F, R, E>(fetch: &mut F, path: String) -> Result<T, BalanceError<E>>
+where
+    T: DeserializeOwned,
+    F: FnMut(String) -> R,
+    R: IntoFuture<Output = Result<Option<Vec<u8>>, E>>,
+{
+    match optional(fetch, path.clone()).await? {
+        Some(value) => Ok(value),
+        None => Err(BalanceError::NotFound { path }),
+    }
 }

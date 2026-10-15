@@ -1,7 +1,11 @@
 //! アカウントを REST から取って、ブロックの StateHash まで確かめて出す。
 
+use std::future::{Future, ready};
 use std::io::{self, Write};
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, Thread};
 use std::time::Duration;
 
 use clap::Subcommand;
@@ -54,17 +58,20 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
         .tls_config(tls)
         .build()
         .into();
-    let balance = verify_balance(&address, |path| {
-        match agent
-            .get(&format!("{origin}{path}"))
-            .call()
-            .and_then(|mut response| response.body_mut().read_to_vec())
-        {
-            Ok(body) => Ok(Some(body)),
-            Err(ureq::Error::StatusCode(404)) => Ok(None),
-            Err(error) => Err(format!("REST の {path} を取れませんでした: {error}")),
-        }
-    })
+    // 問い合わせはその場で終えて、済んだ future を返す
+    let balance = block_on(verify_balance(&address, |path| {
+        ready(
+            match agent
+                .get(&format!("{origin}{path}"))
+                .call()
+                .and_then(|mut response| response.body_mut().read_to_vec())
+            {
+                Ok(body) => Ok(Some(body)),
+                Err(ureq::Error::StatusCode(404)) => Ok(None),
+                Err(error) => Err(format!("REST の {path} を取れませんでした: {error}")),
+            },
+        )
+    }))
     .map_err(|error| error.to_string())?;
     let network = NetworkParameters::from_identifier(balance.block.network)
         .ok_or_else(|| "知らないネットワークのブロックです".to_owned())?;
@@ -74,6 +81,25 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
         write_text(&balance, network, origin)?;
     }
     Ok(())
+}
+
+/// future を、このスレッドで終わるまで動かす。待たされたら、起こされるまで眠る
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    struct Unpark(Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => thread::park(),
+        }
+    }
 }
 
 fn write_text(

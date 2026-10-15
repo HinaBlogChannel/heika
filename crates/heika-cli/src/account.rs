@@ -20,6 +20,8 @@ use crate::show::utc;
 
 /// REST の1回の問い合わせを待つ時間
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// 根が合わなかったときに、取り直すまでにおく間。REST の DB がノードに追いつくのを待つ
+const RETRY_PAUSE: Duration = Duration::from_secs(3);
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
@@ -59,7 +61,7 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
         .build()
         .into();
     // 問い合わせはその場で終えて、済んだ future を返す
-    let balance = block_on(verify_balance(&address, |path| {
+    let fetch = |path: String| {
         ready(
             match agent
                 .get(&format!("{origin}{path}"))
@@ -71,8 +73,13 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
                 Err(error) => Err(format!("REST の {path} を取れませんでした: {error}")),
             },
         )
-    }))
-    .map_err(|error| error.to_string())?;
+    };
+    let pause = || {
+        thread::sleep(RETRY_PAUSE);
+        ready(())
+    };
+    let balance =
+        block_on(verify_balance(&address, fetch, pause)).map_err(|error| error.to_string())?;
     let network = NetworkParameters::from_identifier(balance.block.network)
         .ok_or_else(|| "知らないネットワークのブロックです".to_owned())?;
     if json {

@@ -602,6 +602,10 @@ fn rest_balances_are_verified_against_the_state_hash() {
     };
     let origin = origin.as_str();
     let fetch = |path: String| ready(Ok::<_, String>(rest_optional(origin, &path)));
+    let pause = || {
+        std::thread::sleep(Duration::from_secs(3));
+        ready(())
+    };
 
     // アカウント：Nemesis の署名者と、検索の最初のページ
     let nemesis = rest(origin, "/blocks/1");
@@ -621,7 +625,7 @@ fn rest_balances_are_verified_against_the_state_hash() {
     }
     let mut mosaics = 0;
     for (index, address) in addresses.iter().enumerate() {
-        let balance = run(verify_balance(address, fetch))
+        let balance = run(verify_balance(address, fetch, pause))
             .unwrap_or_else(|error| panic!("アカウント {index}: {error}"));
         let account = balance.account.unwrap_or_else(|| {
             panic!("アカウント {index} が、チェーンに載っていないことになりました")
@@ -636,7 +640,7 @@ fn rest_balances_are_verified_against_the_state_hash() {
 
     // まだ使われていないアドレス：決まった公開鍵から作る
     let unused = Address::from_public_key(&PublicKey([0x5A; 32]), network);
-    let balance = run(verify_balance(&unused, fetch))
+    let balance = run(verify_balance(&unused, fetch, pause))
         .unwrap_or_else(|error| panic!("使われていないアドレス: {error}"));
     assert!(
         balance.account.is_none(),

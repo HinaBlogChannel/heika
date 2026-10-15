@@ -9,8 +9,8 @@
 //! 信じたままなのは、そのブロックが正しいチェーンのものかどうか。ブロックの中の辻褄までは確かめる。
 //!
 //! 確かめるところ（[`verify_balance_parts`]）は、取ってきたものを受け取るだけの同期の計算で、通信も待ちもしない。
-//! 取る順番と取り直し（[`verify_balance`]）は、取ってくる関数を受け取る非同期の関数にして、
-//! どう取るか（同期の HTTP、スレッド、ブラウザの `fetch`）と、どう待つかは呼び出し側に任せる。
+//! 取る順番と取り直し（[`verify_balance`]）は、取ってくる関数と間をおく関数を受け取る非同期の関数にして、
+//! どう取るか（同期の HTTP、スレッド、ブラウザの `fetch`）と、どう待つか（スレッドを眠らせる、タイマー）は呼び出し側に任せる。
 
 use std::fmt;
 use std::future::IntoFuture;
@@ -27,8 +27,8 @@ use crate::block::BlockInfo;
 use crate::merkle::MerkleStateInfo;
 use crate::state::{AccountInfo, AccountJson, MosaicInfo, id};
 
-/// ブロックが進んで根が合わなくなったときに、最初から取り直す回数の上限
-const ATTEMPTS: usize = 3;
+/// 根が合わなかったときに、最初から取り直す回数の上限
+const ATTEMPTS: usize = 5;
 
 /// 確かめた残高
 #[derive(Clone, Debug)]
@@ -278,22 +278,30 @@ fn verify_divisibility(parts: &MosaicParts, roots: &[Hash256]) -> Result<Option<
 ///
 /// `fetch` は REST のパス（`/chain/info` など）を受け取り、本文のバイト列を返す future（[`IntoFuture`]）を返す。
 /// 404 なら `Ok(None)`、それ以外の失敗は `Err` にする。中身が同期なら [`std::future::ready`] で返せばよい。
-/// 待つこと（タイムアウトや、問い合わせの数を絞られたときの待ち）は `fetch` の側でする。
+/// タイムアウトや、問い合わせの数を絞られたときの待ちは `fetch` の側でする。
 ///
-/// 取るあいだにブロックが進んで根が合わなくなったら、待たずに最初から取り直す。
-pub async fn verify_balance<F, R, E>(
+/// 根が合わなければ、`pause` が返す future を待ってから、最初から取り直す。
+/// REST は高さとブロックを DB から返すが、状態の経路はノードにその場で問い合わせるので、
+/// ノードが新しいブロックを取り込んでから DB に書かれるまでのあいだは、経路だけが新しくなって根が合わない。
+/// 待たずに取り直すと DB が追いつく前に取り直し終えてしまうので、数秒おくとよい。
+pub async fn verify_balance<F, R, P, S, E>(
     address: &Address,
     mut fetch: F,
+    mut pause: P,
 ) -> Result<VerifiedBalance, BalanceError<E>>
 where
     F: FnMut(String) -> R,
     R: IntoFuture<Output = Result<Option<Vec<u8>>, E>>,
+    P: FnMut() -> S,
+    S: IntoFuture<Output = ()>,
 {
     let mut attempt = 0;
     loop {
         attempt += 1;
         match attempt_once(address, &mut fetch).await {
-            Err(BalanceError::Verify(VerifyError::Invalid { .. })) if attempt < ATTEMPTS => {}
+            Err(BalanceError::Verify(VerifyError::Invalid { .. })) if attempt < ATTEMPTS => {
+                pause().await;
+            }
             result => return result,
         }
     }

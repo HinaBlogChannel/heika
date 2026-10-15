@@ -207,8 +207,12 @@ impl Rest {
     }
 
     fn verify(&self, address: &Address) -> Result<VerifiedBalance, BalanceError<String>> {
-        run(verify_balance(address, |path| self.fetch(&path)))
+        run(verify_balance(address, |path| self.fetch(&path), no_pause))
     }
+}
+
+fn no_pause() -> Ready<()> {
+    ready(())
 }
 
 /// 取ってくる関数はすぐに答えを返すので、一度動かせば終わる
@@ -289,20 +293,29 @@ fn starts_over_when_the_chain_moves_while_fetching() {
     let new = Rest::new(1441, Some(account_json(&[(XYM, 2)])));
     // 最初は古いブロックを返し、状態はもう新しくなっている
     let mut chain_info_calls = 0;
-    let balance = run(verify_balance(&address(), |path| {
-        if path == "/chain/info" {
-            chain_info_calls += 1;
-            if chain_info_calls == 1 {
+    let mut pauses = 0;
+    let balance = run(verify_balance(
+        &address(),
+        |path| {
+            if path == "/chain/info" {
+                chain_info_calls += 1;
+                if chain_info_calls == 1 {
+                    return old.fetch(&path);
+                }
+            }
+            if path == "/blocks/1440" {
                 return old.fetch(&path);
             }
-        }
-        if path == "/blocks/1440" {
-            return old.fetch(&path);
-        }
-        new.fetch(&path)
-    }))
+            new.fetch(&path)
+        },
+        || {
+            pauses += 1;
+            ready(())
+        },
+    ))
     .unwrap();
     assert_eq!(chain_info_calls, 2);
+    assert_eq!(pauses, 1);
     assert_eq!(balance.block.height, 1441);
     assert_eq!(balance.account.unwrap().mosaics[0].amount, 2);
 }

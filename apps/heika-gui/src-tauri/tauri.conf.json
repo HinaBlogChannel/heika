@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "heika",
-  "version": "0.1.0",
   "identifier": "io.github.hinablogchannel.heika",
   "build": {
     "beforeDevCommand": "trunk serve",

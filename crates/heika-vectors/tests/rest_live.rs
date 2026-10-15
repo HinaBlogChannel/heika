@@ -6,6 +6,8 @@
 //! - REST のステートメントを集めて求めた ReceiptsHash が、バイナリのブロックのヘッダーと一致する
 //! - REST の状態（アカウント、モザイク、ネームスペース、メタデータ）から組み直した状態のハッシュが、
 //!   REST の状態の経路で、最新のブロックの9本の根につながる（これは REST だけで動き、HEIKA_TEST_REST だけでよい）
+//! - アカウントの残高を、[`verify_balance`] で最新のブロックの StateHash まで確かめられる。
+//!   まだ使われていないアドレスは、載っていないことを確かめられる（これも HEIKA_TEST_REST だけでよい）
 //!
 //! つなぐノード、名乗る証明書、REST のオリジンは、リポジトリに残さないように環境変数で渡す。
 //!
@@ -21,6 +23,9 @@
 
 use std::env;
 use std::fs;
+use std::future::{Future, ready};
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use heika_block::Block;
@@ -31,10 +36,12 @@ use heika_cert::certificate::Certificate;
 use heika_cert::key;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
 use heika_core::merkle::{self, MerklePathNode};
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_core::patricia::SubCache;
 use heika_p2p::Node;
+use heika_rest::balance::verify_balance;
 use heika_rest::block::{BlockHeader, BlockInfo};
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::state::{AccountInfo, MetadataInfo, MosaicInfo, NamespaceInfo, RootNamespaceState};
@@ -556,4 +563,91 @@ fn rest_states_are_in_the_state_tree() {
         checked[0], checked[1], checked[2], checked[3]
     );
     assert!(checked.iter().all(|&count| count > 0));
+}
+
+/// REST の `path` を取る。404 なら `None`。429 なら、待つ時間を延ばしながら取り直す
+fn rest_optional(origin: &str, path: &str) -> Option<Vec<u8>> {
+    let url = format!("{origin}{path}");
+    let mut wait = Duration::from_secs(1);
+    loop {
+        match ureq::get(&url)
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_vec())
+        {
+            Err(ureq::Error::StatusCode(429)) if wait <= Duration::from_secs(16) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            Err(ureq::Error::StatusCode(404)) => return None,
+            result => {
+                return Some(result.unwrap_or_else(|error| panic!("REST の {path}: {error}")));
+            }
+        }
+    }
+}
+
+/// 取ってくる関数はその場で答えるので、一度動かせば終わる
+fn run<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("その場で答えたのに、待たされました"),
+    }
+}
+
+#[test]
+#[ignore = "環境変数で指定した REST につなぐ"]
+fn rest_balances_are_verified_against_the_state_hash() {
+    let Some(origin) = rest_origin() else {
+        return;
+    };
+    let origin = origin.as_str();
+    let fetch = |path: String| ready(Ok::<_, String>(rest_optional(origin, &path)));
+    let pause = || {
+        std::thread::sleep(Duration::from_secs(3));
+        ready(())
+    };
+
+    // アカウント：Nemesis の署名者と、検索の最初のページ
+    let nemesis = rest(origin, "/blocks/1");
+    let network = NetworkIdentifier(nemesis["block"]["network"].as_u64().unwrap() as u8);
+    let parameters = NetworkParameters::from_identifier(network).unwrap();
+    let signer: PublicKey = nemesis["block"]["signerPublicKey"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut addresses = vec![Address::from_public_key(&signer, network)];
+    for entry in rest(origin, "/accounts?pageSize=10")["data"]
+        .as_array()
+        .unwrap()
+    {
+        addresses.push(Address::from_hex(entry["account"]["address"].as_str().unwrap()).unwrap());
+    }
+    let mut mosaics = 0;
+    for (index, address) in addresses.iter().enumerate() {
+        let balance = run(verify_balance(address, fetch, pause))
+            .unwrap_or_else(|error| panic!("アカウント {index}: {error}"));
+        let account = balance.account.unwrap_or_else(|| {
+            panic!("アカウント {index} が、チェーンに載っていないことになりました")
+        });
+        for mosaic in &account.mosaics {
+            if mosaic.id == parameters.currency_mosaic_id {
+                assert_eq!(mosaic.divisibility, Some(6), "アカウント {index} の XYM");
+            }
+            mosaics += 1;
+        }
+    }
+
+    // まだ使われていないアドレス：決まった公開鍵から作る
+    let unused = Address::from_public_key(&PublicKey([0x5A; 32]), network);
+    let balance = run(verify_balance(&unused, fetch, pause))
+        .unwrap_or_else(|error| panic!("使われていないアドレス: {error}"));
+    assert!(
+        balance.account.is_none(),
+        "使われていないアドレスが、チェーンに載っていることになりました"
+    );
+    eprintln!(
+        "残高を確かめたもの：アカウント {}、モザイク {mosaics}、使われていないアドレス 1",
+        addresses.len()
+    );
 }

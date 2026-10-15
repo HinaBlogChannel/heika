@@ -28,6 +28,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// アカウントを REST から取って確かめる
+    #[command(subcommand)]
+    Account(account::AccountCommand),
     /// 鍵とアドレス
     #[command(subcommand)]
     Key(KeyCommand),
@@ -212,6 +215,7 @@ macro_rules! outln {
 }
 
 // `outln!` を使うので、マクロより後に置く
+mod account;
 mod cert;
 mod delegations;
 mod harvesting;
@@ -226,6 +230,7 @@ mod wallet;
 
 fn run(command: Command) -> Result<(), Failure> {
     match command {
+        Command::Account(command) => account::run(command)?,
         Command::Cert(command) => cert::run(command)?,
         Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,

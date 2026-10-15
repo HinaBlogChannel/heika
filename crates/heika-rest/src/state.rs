@@ -494,6 +494,6 @@ fn sha3(bytes: &[u8]) -> Hash256 {
 }
 
 /// REST は ID を上位から16進で書く
-fn id(text: &str, field: &'static str) -> Result<u64, RestError> {
+pub(crate) fn id(text: &str, field: &'static str) -> Result<u64, RestError> {
     hex_array(text, field).map(u64::from_be_bytes)
 }

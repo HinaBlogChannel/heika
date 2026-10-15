@@ -637,7 +637,7 @@ pub(crate) fn approximate(duration: Duration) -> String {
 }
 
 /// UTC の日時。Howard Hinnant の `civil_from_days` で、1970-01-01 からの日数を年月日にする
-fn utc(time: SystemTime) -> String {
+pub(crate) fn utc(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());

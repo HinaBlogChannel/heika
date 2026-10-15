@@ -314,6 +314,35 @@ button.quiet:hover {
   color: var(--blue);
 }
 
+/* キーボードで動かしたときだけ、いまどこにいるかを深い青の線で示す。入れる欄は下線で示す */
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/*
+ * 指で押すときは、小さいボタンの押せる範囲を、見た目を変えずに 44px 四方くらいまで広げる
+ */
+@media (pointer: coarse) {
+  button.quiet,
+  summary {
+    position: relative;
+  }
+
+  button.quiet::after,
+  summary::after {
+    content: "";
+    position: absolute;
+    inset: -10px -8px;
+  }
+}
+
 .choices {
   display: flex;
   flex-direction: column;
@@ -680,6 +709,15 @@ button.card.selected {
 
 details {
   margin-top: var(--space-3);
+}
+
+/* 確かめられなかった印は、エラーの色の点 */
+.stamp.failed::before {
+  background: var(--danger);
+}
+
+.balance details.expired {
+  margin-top: var(--space-4);
 }
 
 summary {

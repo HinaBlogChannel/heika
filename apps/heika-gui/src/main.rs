@@ -1,6 +1,8 @@
 //! 画面。中身の計算はしないで、Tauri の `invoke` でアプリの本体（src-tauri）に頼み、返ってきたものを出すだけにする。
 //! 秘密鍵は本体の中にしまい、ここには出さない。作ったばかりのニーモニックの単語だけは、紙に控えてもらうために出す。
 
+use std::time::Duration;
+
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -35,6 +37,21 @@ async fn call<T: DeserializeOwned>(command: &str, args: impl Serialize) -> Resul
         .await
         .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
+/// 残高を確かめる。確かめられなかったら、本体が付けたわけの種類と一緒に返す
+async fn check_balance(address: String) -> Result<BalanceView, BalanceFailure> {
+    let args = serde_wasm_bindgen::to_value(&BalanceArgs { address })
+        .map_err(|error| BalanceFailure::other(error.to_string()))?;
+    match invoke("balance", args).await {
+        Ok(value) => serde_wasm_bindgen::from_value(value)
+            .map_err(|error| BalanceFailure::other(error.to_string())),
+        Err(error) => Err(
+            serde_wasm_bindgen::from_value(error.clone()).unwrap_or_else(|_| {
+                BalanceFailure::other(error.as_string().unwrap_or_else(|| format!("{error:?}")))
+            }),
+        ),
+    }
 }
 
 #[derive(Serialize)]
@@ -91,6 +108,33 @@ struct MosaicView {
     currency: bool,
     amount: Option<String>,
     raw: String,
+}
+
+/// 本体の `balance` が返す、確かめられなかったわけ
+#[derive(Clone, Deserialize)]
+struct BalanceFailure {
+    kind: FailureKind,
+    detail: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureKind {
+    Unreachable,
+    Unreadable,
+    WrongNetwork,
+    Unsupported,
+    Mismatch,
+    Other,
+}
+
+impl BalanceFailure {
+    fn other(detail: String) -> Self {
+        Self {
+            kind: FailureKind::Other,
+            detail,
+        }
+    }
 }
 
 /// 本体の `about` が返すもの
@@ -607,7 +651,7 @@ enum Check {
     NoRest,
     Done(BalanceView),
     /// 確かめられなかった。数字は出さない
-    Failed(String),
+    Failed(BalanceFailure),
 }
 
 /// ホーム。選んでいるアカウントの残高
@@ -629,7 +673,7 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
         }
         check.set(Check::Loading);
         spawn_local(async move {
-            check.set(match call("balance", BalanceArgs { address }).await {
+            check.set(match check_balance(address).await {
                 Ok(balance) => Check::Done(balance),
                 Err(error) => Check::Failed(error),
             });
@@ -642,6 +686,7 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
         move |_| {
             write_clipboard(&address);
             copied.set(true);
+            set_timeout(move || copied.set(false), Duration::from_secs(2));
         }
     };
     let hidden = move || ctx.settings.get().hide_amounts;
@@ -677,17 +722,52 @@ fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
                     <button class="primary" on:click=move |_| ctx.go(Screen::Settings)>"設定する"</button>
                 </div>
             }.into_any(),
-            Check::Failed(error) => view! {
-                <div class="balance">
-                    <p class="amount pending">"確かめられませんでした"</p>
-                    <p class="hint">"確かめられない数字は出しません。"</p>
-                    <p class="error">{error}</p>
-                </div>
-            }.into_any(),
+            Check::Failed(failure) => failed(ctx, failure, &account.network).into_any(),
             Check::Done(balance) => verified(balance, hidden()).into_any(),
         }}
         <div class="row">
             <button class="primary" on:click=move |_| refresh() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
+        </div>
+    }
+}
+
+/// 確かめられなかったとき。何が起きて、何をすればいいかを出し、元のエラーはくわしくに回す
+fn failed(ctx: Ctx, failure: BalanceFailure, network: &str) -> impl IntoView {
+    let (title, advice) = match failure.kind {
+        FailureKind::Unreachable => (
+            "REST につながりませんでした",
+            "設定の URL が合っているか、ネットにつながっているかを見てください。少し待って確かめ直すと、通ることもあります。".to_owned(),
+        ),
+        FailureKind::Unreadable => (
+            "REST の答えを読めませんでした",
+            "設定の URL が、Symbol の REST（ふつうはポート 3001）を指しているかを見てください。".to_owned(),
+        ),
+        FailureKind::WrongNetwork => (
+            "ネットワークが違います",
+            format!("このアカウントは {network} のものですが、設定の REST は別のネットワークのものです。{network} の REST にしてください。"),
+        ),
+        FailureKind::Unsupported => (
+            "この REST では確かめられません",
+            "この REST のノードは、残高を確かめるのに要る状態のハッシュを出していません。別の REST にしてください。".to_owned(),
+        ),
+        FailureKind::Mismatch => (
+            "REST の答えが、ブロックと合いませんでした",
+            "何度か取り直しても合いませんでした。この REST の答えは信じないほうが安全です。別の REST を試してください。".to_owned(),
+        ),
+        FailureKind::Other => ("確かめられませんでした", String::new()),
+    };
+    let settings = failure.kind != FailureKind::Other;
+    view! {
+        <div class="balance">
+            <p class="stamp failed">{title}</p>
+            <p class="hint">{format!("{advice}確かめられない数字は出しません。")}</p>
+            {settings.then(|| view! {
+                <button on:click=move |_| ctx.go(Screen::Settings)>"設定を開く"</button>
+            })}
+            <details>
+                <summary>"くわしく"</summary>
+                <p class="address small">{failure.detail}</p>
+            </details>
         </div>
     }
 }
@@ -705,29 +785,36 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
         Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
         None => (group(&amount), String::new()),
     };
-    let others: Vec<_> = balance
+    // 定義の期限が切れてもうチェーンにないモザイクは、使えないので畳んで奥にしまう。
+    // 小数点の位置もわからないので、いちばん小さい単位の数のまま出す
+    let (others, expired): (Vec<_>, Vec<_>) = balance
         .mosaics
         .iter()
         .filter(|mosaic| !mosaic.currency)
-        .collect();
-    // 定義がもうチェーンになく、小数点の位置がわからないものがあれば、下に断りを書く
-    let unknown = !hidden && others.iter().any(|mosaic| mosaic.amount.is_none());
-    let others = others
-        .into_iter()
-        .map(|mosaic| {
-            let value = match &mosaic.amount {
-                _ if hidden => MASK.to_owned(),
-                Some(amount) => grouped(amount),
-                None => format!("{} ＊", group(&mosaic.raw)),
-            };
-            view! {
-                <li>
-                    <span class="id">{format!("0x{}", mosaic.id)}</span>
-                    <span class="value">{value}</span>
-                </li>
-            }
-        })
-        .collect_view();
+        .partition(|mosaic| mosaic.amount.is_some());
+    let row = |mosaic: &MosaicView| {
+        let value = match &mosaic.amount {
+            _ if hidden => MASK.to_owned(),
+            Some(amount) => grouped(amount),
+            None => group(&mosaic.raw),
+        };
+        view! {
+            <li>
+                <span class="id">{format!("0x{}", mosaic.id)}</span>
+                <span class="value">{value}</span>
+            </li>
+        }
+    };
+    let expired = (!expired.is_empty()).then(|| {
+        view! {
+            <details class="expired">
+                <summary>{format!("期限の切れたモザイク {} 件", expired.len())}</summary>
+                <p class="hint note">"定義の期限が切れて、もうチェーンにないモザイクです。送ることも受け取ることもできません。小数点の位置がわからないので、いちばん小さい単位の数のまま出しています。"</p>
+                <ul class="mosaics">{expired.into_iter().map(row).collect_view()}</ul>
+            </details>
+        }
+    });
+    let others = others.into_iter().map(row).collect_view();
     let when = balance.block_time.map(|time| {
         let minutes = ((Date::now() - time) / 60_000.0).max(0.0) as u64;
         let ago = if minutes == 0 {
@@ -759,9 +846,7 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
                 <p class="hint">"まだチェーンに載っていないアドレスです。一度も受け取っていなければ、こうなります。"</p>
             })}
             <ul class="mosaics">{others}</ul>
-            {unknown.then(|| view! {
-                <p class="hint note">"＊ 定義がもうチェーンにないモザイクです。小数点の位置がわからないので、いちばん小さい単位の数のまま出しています。"</p>
-            })}
+            {expired}
         </div>
         <div class="verified glass">
             <p class="stamp">{stamp}</p>

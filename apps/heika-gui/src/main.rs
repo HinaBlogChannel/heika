@@ -854,7 +854,7 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
             {expired}
         </div>
         <div class="verified glass">
-            <p class="hint">{format!("高さ {} のブロック", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
+            <p class="hint">{format!("ブロック #{}", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
             <details>
                 <summary>"くわしく"</summary>
                 <p class="stamp">{stamp}</p>

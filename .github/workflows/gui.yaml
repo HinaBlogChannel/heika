@@ -18,7 +18,10 @@ env:
   RUST_TOOLCHAIN: 1.99.0
   TRUNK: 0.21.14
   TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
-  TAURI_CLI: npx --yes @tauri-apps/cli@2.12.3
+  # npx で動かすと、Android と iOS のプロジェクトがビルドの途中で npm を呼ぶようになり、package.json がなくて落ちる。
+  # cargo で入れれば、そこからも cargo tauri が呼ばれる
+  TAURI_CLI_VERSION: 2.12.3
+  TAURI_CLI: cargo tauri
 
 defaults:
   run:
@@ -75,6 +78,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: ビルド
         run: |
           $TAURI_CLI icon icon.png
@@ -115,6 +120,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-linux-android
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Android のプロジェクトを作る
         # ランナーに入っている Android SDK と NDK を使う
         run: |
@@ -160,6 +167,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-ios
           rustup default "$RUST_TOOLCHAIN"
+      - name: Tauri の CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Xcode のプロジェクトを作る
         run: |
           brew install xcodegen

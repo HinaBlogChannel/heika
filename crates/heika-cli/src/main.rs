@@ -222,6 +222,7 @@ mod harvesting;
 mod json;
 mod legal;
 mod node;
+mod rest;
 mod show;
 mod terminal;
 mod tx;

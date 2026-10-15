@@ -3,23 +3,29 @@
 //! 組むことと署名することを分ける。組むのに要るのは公開されている情報だけで、
 //! 秘密鍵は署名するときに標準入力から1つだけ読む。
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::future::ready;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
+use heika_core::address::Address;
 use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::signature::Signature;
+use heika_rest::send::{ANNOUNCE_PATH, TransactionStatus, announce_body, find_inclusion};
 use heika_transaction::{
     Aggregate, AggregateVersion, Body, Cosignature, EmbeddedTransaction, Location, Transaction,
+    Transfer, UnresolvedAddress, UnresolvedMosaicId,
 };
 
 use heika_cert::certificate::Certificate;
 use heika_tls::{ClientCertificate, Identity};
 
 use crate::cert::{AnyPrivateKey, CONNECT_TIMEOUT, read_chain};
+use crate::rest::{Rest, block_on};
 use crate::wallet::WalletKeyArgs;
 use crate::{Failure, Network, read_secret, show};
 
@@ -29,6 +35,8 @@ const HOUR: Duration = Duration::from_secs(60 * 60);
 const MAX_TRANSACTION_LIFETIME_HOURS: u64 = 6;
 /// catapult の `ionet::PacketType::Push_Transactions`
 const PUSH_TRANSACTIONS: u32 = 9;
+/// ネットワークの通貨（XYM）の可分性。メインネットもテストネットも 6
+const XYM_DIVISIBILITY: usize = 6;
 
 #[derive(Subcommand)]
 pub enum TxCommand {
@@ -55,6 +63,27 @@ pub enum TxCommand {
         #[command(flatten)]
         key: WalletKeyArgs,
     },
+    /// XYM を送る、署名していない送金を組んで書く
+    ///
+    /// 量は XYM の単位で書く（例: 1.5）。メッセージは暗号化しない平文なので、チェーンの上で誰でも読める。
+    Transfer {
+        #[arg(long, value_enum)]
+        network: Network,
+        /// 送る人の公開鍵
+        #[arg(long)]
+        signer: PublicKey,
+        /// 宛先のアドレス
+        #[arg(long)]
+        to: Address,
+        /// 送る XYM の量（例: 1.5）。小数点の下は6桁まで
+        #[arg(long, value_parser = parse_xym)]
+        amount: u64,
+        /// 平文のメッセージ。チェーンの上で誰でも読める
+        #[arg(long)]
+        message: Option<String>,
+        #[command(flatten)]
+        unsigned: Unsigned,
+    },
     /// 署名したアグリゲートに、標準入力から読んだ秘密鍵か、キーストアのアカウントの鍵で連署する
     ///
     /// 連署するのは外側の署名を含むハッシュなので、先に heika tx sign で署名しておく。
@@ -70,24 +99,47 @@ pub enum TxCommand {
         #[command(flatten)]
         key: WalletKeyArgs,
     },
-    /// 署名したトランザクションを、ノードと TLS でつないで送る
+    /// 署名したトランザクションを、REST に渡すか、ノードと TLS でつないで送る
     ///
-    /// 送る前に、ネットワーク、署名と連署、期限を確かめる。名乗るのはノードの証明書で、ノードの秘密鍵は標準入力から読む。
-    /// ノードは受け取ったことを返さないので、ブロックに入ったかは、表示するハッシュで別に確かめる。
+    /// 送る前に、ネットワーク、署名と連署、期限を確かめる。
+    /// `--rest` なら REST に渡す。`--connect` ならノードに直接つなぎ、名乗るのはノードの証明書で、ノードの秘密鍵は標準入力から読む。
+    /// どちらも受け取ったことしか返さないので、ブロックに入ったかは heika tx status で確かめる。
+    #[command(group(ArgGroup::new("destination").required(true)))]
     Announce {
         #[arg(long, value_enum)]
         network: Network,
         /// 送る、署名したトランザクションのファイル
         signed: PathBuf,
+        /// 渡す REST（例: https://symbol.example:3001）
+        #[arg(long, value_name = "URL", group = "destination")]
+        rest: Option<String>,
         /// 送り先のノード
-        #[arg(long, value_name = "HOST:PORT")]
-        connect: String,
-        /// 名乗る証明書のチェーン（ノード、CA の順の PEM）
-        #[arg(long, value_name = "PATH")]
-        client_cert: PathBuf,
-        /// 送ったあと、切られないか待つ秒数
+        #[arg(
+            long,
+            value_name = "HOST:PORT",
+            group = "destination",
+            requires = "client_cert"
+        )]
+        connect: Option<String>,
+        /// 名乗る証明書のチェーン（ノード、CA の順の PEM）。`--connect` のときに使う
+        #[arg(long, value_name = "PATH", requires = "connect")]
+        client_cert: Option<PathBuf>,
+        /// `--connect` で送ったあと、切られないか待つ秒数
         #[arg(long, default_value_t = 3)]
         wait: u64,
+    },
+    /// 送ったトランザクションがブロックに入ったかを、REST に聞いて確かめる
+    ///
+    /// 入っていれば、ブロックの署名と StateHash、トランザクションからブロックの TransactionsHash への経路まで確かめる。
+    /// 見つからなくても、入っていないことは確かめられない。期限を過ぎていれば、もう入ることはない。
+    Status {
+        #[arg(long, value_enum)]
+        network: Network,
+        /// 送った、署名したトランザクションのファイル
+        signed: PathBuf,
+        /// 問い合わせる REST（例: https://symbol.example:3001）
+        #[arg(long, value_name = "URL")]
+        rest: String,
     },
 }
 
@@ -119,17 +171,27 @@ impl Unsigned {
             .map(|body| EmbeddedTransaction::new(signer, identifier, body))
             .collect();
         let aggregate = Aggregate::new(transactions).expect("no aggregate is nested");
+        self.write_body(network, signer, Body::AggregateComplete(aggregate))
+    }
 
+    /// 本体を1つ、アグリゲートに入れずに、手数料と期限を付けて書く。ノードで弾かれるものは書かない
+    pub fn write_body(
+        &self,
+        network: Network,
+        signer: PublicKey,
+        body: Body,
+    ) -> Result<(), Failure> {
         let deadline = SystemTime::now() + self.deadline_hours as u32 * HOUR;
         let mut transaction = Transaction::new(
             signer,
-            identifier,
+            NetworkIdentifier::from(network),
             0,
             network_milliseconds(network, deadline)?,
-            Body::AggregateComplete(aggregate),
+            body,
         );
         let size = transaction.size();
         transaction.fee = transaction.fee_for(self.fee_multiplier, 0);
+        check_sendable(&self.out, &transaction, network)?;
         write_new(&self.out, &transaction.to_bytes())?;
 
         outln!(
@@ -224,9 +286,38 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             outln!("ハッシュ: {}", transaction.hash(&seed));
             show_missing_cosigners(&transaction)?;
         }
+        TxCommand::Transfer {
+            network,
+            signer,
+            to,
+            amount,
+            message,
+            unsigned,
+        } => {
+            if to.network() != NetworkIdentifier::from(network) {
+                return Err("宛先は --network と違うネットワークのアドレスです"
+                    .to_owned()
+                    .into());
+            }
+            let currency = network.parameters().currency_mosaic_id;
+            // 平文のメッセージは、頭に 0 のバイトを付ける
+            let message = message.map_or_else(Vec::new, |text| {
+                let mut bytes = vec![0];
+                bytes.extend_from_slice(text.as_bytes());
+                bytes
+            });
+            let body = Transfer::new(
+                UnresolvedAddress::from(to),
+                BTreeMap::from([(UnresolvedMosaicId(currency), amount)]),
+                message,
+            )
+            .map_err(|error| error.to_string())?;
+            unsigned.write_body(network, signer, Body::Transfer(body))?;
+        }
         TxCommand::Announce {
             network,
             signed,
+            rest,
             connect,
             client_cert,
             wait,
@@ -256,6 +347,20 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
                 .into());
             }
 
+            if let Some(url) = rest {
+                let rest = Rest::new(&url);
+                rest.put(ANNOUNCE_PATH, &announce_body(&transaction))?;
+                outln!("ハッシュ: {}", transaction.hash(&seed));
+                show_missing_cosigners(&transaction)?;
+                outln!("{} に渡しました", rest.origin());
+                outln!(
+                    "REST は受け取ったことしか返さないので、ブロックに入ったかは heika tx status で確かめてください"
+                );
+                return Ok(());
+            }
+            let (Some(connect), Some(client_cert)) = (connect, client_cert) else {
+                unreachable!("clap requires --rest or --connect with --client-cert");
+            };
             let chain = read_chain(&client_cert)?;
             let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
             let identity = Identity::new(&chain, &key)
@@ -299,6 +404,74 @@ pub fn run(command: TxCommand) -> Result<(), Failure> {
             outln!(
                 "ノードは受け取ったことを返さないので、ブロックに入ったかはハッシュで確かめてください"
             );
+        }
+        TxCommand::Status {
+            network,
+            signed,
+            rest,
+        } => {
+            let (_, transaction) = read_signed(&signed, network)?;
+            let seed = network.parameters().generation_hash_seed;
+            let rest = Rest::new(&rest);
+            let found = block_on(find_inclusion(&transaction, &seed, |path| {
+                ready(rest.get(&path))
+            }))
+            .map_err(|error| error.to_string())?;
+            outln!("ハッシュ: {}", transaction.hash(&seed));
+            match found {
+                Some(inclusion) => {
+                    let block = &inclusion.block;
+                    let time = network
+                        .parameters()
+                        .time_of(heika_core::network::NetworkTimestamp(block.timestamp))
+                        .map_or_else(
+                            || format!("エポックから {} ミリ秒", block.timestamp),
+                            show::utc,
+                        );
+                    outln!("ブロック #{} に入りました（{time}）", block.height);
+                    outln!("ブロックのハッシュ: {}", block.hash());
+                    outln!();
+                    outln!("確かめたこと:");
+                    outln!("  ブロックの署名と、9本の根から求めた StateHash");
+                    outln!(
+                        "  このトランザクションから、ブロックの TransactionsHash へ経路でつながること"
+                    );
+                    outln!("信じていること:");
+                    outln!(
+                        "  このブロックが正しいチェーンのものであること（{} を信じています）",
+                        rest.origin()
+                    );
+                }
+                None => {
+                    outln!(
+                        "{} には、ブロックに入ったものとして見えていません",
+                        rest.origin()
+                    );
+                    let now = network_milliseconds(network, SystemTime::now())?;
+                    if transaction.deadline <= now {
+                        outln!("期限を過ぎているので、これから入ることはありません");
+                    } else {
+                        let minutes = (transaction.deadline - now).div_ceil(60_000);
+                        outln!(
+                            "期限まであと {minutes} 分です。それまでは、これから入ることがあります"
+                        );
+                        // 早く知るための目安。REST が言っているだけで、確かめたものではない
+                        if let Ok(Some(body)) =
+                            rest.get(&TransactionStatus::path(&transaction, &seed))
+                            && let Ok(status) = TransactionStatus::from_slice(&body)
+                        {
+                            outln!(
+                                "REST によると: {}{}（確かめたものではありません）",
+                                status.group,
+                                status
+                                    .code
+                                    .map(|code| format!(" {code}"))
+                                    .unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -430,6 +603,20 @@ fn show_missing_cosigners(transaction: &Transaction) -> Result<(), Failure> {
     Ok(())
 }
 
+/// XYM の量（`1.5` など）を、いちばん小さい単位の数にする
+fn parse_xym(text: &str) -> Result<u64, String> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) || text.ends_with('.') {
+        return Err("1.5 のように、数字と小数点で書いてください".to_owned());
+    }
+    if fraction.len() > XYM_DIVISIBILITY {
+        return Err(format!("小数点の下は {XYM_DIVISIBILITY} 桁までです"));
+    }
+    let scaled = format!("{whole}{fraction:0<XYM_DIVISIBILITY$}");
+    scaled.parse().map_err(|_| "量が大きすぎます".to_owned())
+}
+
 /// ネットワークのエポックからのミリ秒。
 fn network_milliseconds(network: Network, time: SystemTime) -> Result<u64, String> {
     network
@@ -452,6 +639,28 @@ pub fn write_new(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_xym_amounts_in_the_smallest_unit() {
+        assert_eq!(parse_xym("1.5"), Ok(1_500_000));
+        assert_eq!(parse_xym("0.000001"), Ok(1));
+        assert_eq!(parse_xym("12"), Ok(12_000_000));
+        assert_eq!(parse_xym("0"), Ok(0));
+        for wrong in [
+            "",
+            ".5",
+            "1.",
+            "1.2.3",
+            "-1",
+            "1,000",
+            " 1",
+            "1e3",
+            "0.0000001",
+        ] {
+            assert!(parse_xym(wrong).is_err(), "{wrong}");
+        }
+        assert!(parse_xym("18446744073709.551616").is_err());
+    }
 
     #[test]
     fn the_deadline_limit_fits_every_network() {

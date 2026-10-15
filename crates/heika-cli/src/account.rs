@@ -1,27 +1,18 @@
 //! アカウントを REST から取って、ブロックの StateHash まで確かめて出す。
 
-use std::future::{Future, ready};
+use std::future::ready;
 use std::io::{self, Write};
-use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, Thread};
-use std::time::Duration;
+use std::thread;
 
 use clap::Subcommand;
 use heika_core::address::Address;
 use heika_core::network::{NetworkParameters, NetworkTimestamp};
 use heika_rest::balance::{VerifiedBalance, VerifiedMosaic, verify_balance};
-use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 use crate::Failure;
 use crate::json::Value;
+use crate::rest::{RETRY_PAUSE, Rest, block_on};
 use crate::show::utc;
-
-/// REST の1回の問い合わせを待つ時間
-const TIMEOUT: Duration = Duration::from_secs(10);
-/// 根が合わなかったときに、取り直すまでにおく間。REST の DB がノードに追いつくのを待つ
-const RETRY_PAUSE: Duration = Duration::from_secs(3);
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
@@ -49,31 +40,9 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
         rest,
         json,
     } = command;
-    let origin = rest.trim_end_matches('/');
-    let tls = TlsConfig::builder()
-        .provider(TlsProvider::Rustls)
-        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .root_certs(RootCerts::PlatformVerifier)
-        .build();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .tls_config(tls)
-        .build()
-        .into();
+    let rest = Rest::new(&rest);
     // 問い合わせはその場で終えて、済んだ future を返す
-    let fetch = |path: String| {
-        ready(
-            match agent
-                .get(&format!("{origin}{path}"))
-                .call()
-                .and_then(|mut response| response.body_mut().read_to_vec())
-            {
-                Ok(body) => Ok(Some(body)),
-                Err(ureq::Error::StatusCode(404)) => Ok(None),
-                Err(error) => Err(format!("REST の {path} を取れませんでした: {error}")),
-            },
-        )
-    };
+    let fetch = |path: String| ready(rest.get(&path));
     let pause = || {
         thread::sleep(RETRY_PAUSE);
         ready(())
@@ -85,28 +54,9 @@ pub fn run(command: AccountCommand) -> Result<(), Failure> {
     if json {
         write_json(&balance, network)?;
     } else {
-        write_text(&balance, network, origin)?;
+        write_text(&balance, network, rest.origin())?;
     }
     Ok(())
-}
-
-/// future を、このスレッドで終わるまで動かす。待たされたら、起こされるまで眠る
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    struct Unpark(Thread);
-    impl Wake for Unpark {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let waker = Waker::from(Arc::new(Unpark(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => thread::park(),
-        }
-    }
 }
 
 fn write_text(

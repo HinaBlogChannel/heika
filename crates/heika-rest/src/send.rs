@@ -49,6 +49,18 @@ pub struct TransactionStatus {
     pub height: Option<String>,
 }
 
+impl TransactionStatus {
+    /// `/transactionStatus/{hash}` のパス
+    pub fn path(transaction: &Transaction, seed: &GenerationHashSeed) -> String {
+        format!("/transactionStatus/{}", transaction.hash(seed))
+    }
+
+    /// REST の本文を読む
+    pub fn from_slice(body: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(body).map_err(|error| error.to_string())
+    }
+}
+
 /// 入ったことを確かめたトランザクション
 #[derive(Clone, Debug)]
 pub struct VerifiedInclusion {

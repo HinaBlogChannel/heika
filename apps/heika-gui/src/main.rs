@@ -13,6 +13,18 @@ extern "C" {
     /// Tauri の `invoke`。tauri.conf.json の `withGlobalTauri` で `window.__TAURI__` に出ている
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
     async fn invoke(command: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    /// クリップボードに書く。WebView の外には出さない
+    #[wasm_bindgen(js_namespace = ["navigator", "clipboard"], js_name = writeText)]
+    fn write_clipboard(text: &str) -> JsValue;
+
+    type Date;
+    #[wasm_bindgen(constructor)]
+    fn new(milliseconds: f64) -> Date;
+    #[wasm_bindgen(method, js_name = toLocaleString)]
+    fn to_locale_string(this: &Date, locale: &str) -> String;
+    #[wasm_bindgen(static_method_of = Date)]
+    fn now() -> f64;
 }
 
 /// 本体のコマンドを呼ぶ。本体が返したエラーは文字列で届く。
@@ -42,6 +54,41 @@ struct CreateArgs {
 #[derive(Serialize)]
 struct UnlockArgs {
     passphrase: String,
+}
+
+#[derive(Serialize)]
+struct BalanceArgs {
+    address: String,
+}
+
+#[derive(Serialize)]
+struct RestArgs {
+    rest: String,
+}
+
+/// 本体の `settings` が返すもの
+#[derive(Clone, Deserialize)]
+struct Settings {
+    rest: Option<String>,
+}
+
+/// 本体の `balance` が返す、確かめた残高
+#[derive(Clone, Deserialize)]
+struct BalanceView {
+    on_chain: bool,
+    height: String,
+    block_hash: String,
+    block_time: Option<f64>,
+    rest: String,
+    mosaics: Vec<MosaicView>,
+}
+
+#[derive(Clone, Deserialize)]
+struct MosaicView {
+    id: String,
+    currency: bool,
+    amount: Option<String>,
+    raw: String,
 }
 
 /// 本体の `about` が返すもの
@@ -96,6 +143,9 @@ enum Screen {
     Passphrase(Source),
     Unlock(String),
     Accounts(Vec<AccountView>),
+    Balance(AccountView),
+    /// 決めたら戻る画面
+    Settings(Box<Screen>),
 }
 
 /// どの画面からも使うもの
@@ -132,14 +182,19 @@ impl Ctx {
         });
     }
 
+    /// 開いているキーストアのアカウントの一覧に戻る
+    fn accounts(self) {
+        self.run("accounts", NoArgs {}, move |accounts| {
+            self.go(Screen::Accounts(accounts))
+        });
+    }
+
     /// 本体に、どの画面から始めるか聞く
     fn restart(self) {
         self.run("start", NoArgs {}, move |start| match start {
             Start::Welcome => self.go(Screen::Welcome),
             Start::Unlock { path } => self.go(Screen::Unlock(path)),
-            Start::Accounts => self.run("accounts", NoArgs {}, move |accounts| {
-                self.go(Screen::Accounts(accounts))
-            }),
+            Start::Accounts => self.accounts(),
         });
     }
 }
@@ -176,6 +231,8 @@ fn App() -> impl IntoView {
                 Screen::Passphrase(source) => passphrase(ctx, source).into_any(),
                 Screen::Unlock(path) => unlock(ctx, path).into_any(),
                 Screen::Accounts(accounts) => accounts_view(ctx, accounts).into_any(),
+                Screen::Balance(account) => balance_view(ctx, account).into_any(),
+                Screen::Settings(back) => settings_view(ctx, *back).into_any(),
             }}</section> }}
             {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
             <footer>
@@ -433,26 +490,247 @@ fn unlock(ctx: Ctx, path: String) -> impl IntoView {
 }
 
 fn accounts_view(ctx: Ctx, accounts: Vec<AccountView>) -> impl IntoView {
+    let back = accounts.clone();
     let items = accounts
         .into_iter()
         .map(|account| {
+            let open = account.clone();
             view! {
-                <li class="card glass">
-                    <div class="row">
-                        <strong>{account.label}</strong>
-                        <span class="badge">{account.network}</span>
-                        <span class="hint">{account.source}</span>
-                    </div>
-                    <p class="address">{account.address}</p>
+                <li>
+                    <button class="card glass" on:click=move |_| ctx.go(Screen::Balance(open.clone()))>
+                        <span class="row">
+                            <strong>{account.label}</strong>
+                            <span class="badge">{account.network}</span>
+                            <span class="hint">{account.source}</span>
+                        </span>
+                        <span class="address">{account.address}</span>
+                    </button>
                 </li>
             }
         })
         .collect_view();
     let close = move |_| ctx.run("lock", NoArgs {}, move |()| ctx.restart());
     view! {
+        <p class="lead">"アカウントを選ぶと、残高を確かめます。"</p>
         <ul class="accounts">{items}</ul>
         <div class="row">
             <button on:click=close>"閉じる"</button>
+            <button on:click=move |_| ctx.go(Screen::Settings(Box::new(Screen::Accounts(back.clone()))))>"設定"</button>
         </div>
+    }
+}
+
+/// 残高を確かめているところ
+#[derive(Clone)]
+enum Check {
+    Loading,
+    /// 問い合わせる REST を決めていない
+    NoRest,
+    Done(BalanceView),
+    /// 確かめられなかった。数字は出さない
+    Failed(String),
+}
+
+fn balance_view(ctx: Ctx, account: AccountView) -> impl IntoView {
+    let check = RwSignal::new(Check::Loading);
+    let address = account.address.clone();
+    let refresh = move || {
+        let address = address.clone();
+        check.set(Check::Loading);
+        spawn_local(async move {
+            let next = match call::<Settings>("settings", NoArgs {}).await {
+                Ok(Settings { rest: None }) => Check::NoRest,
+                Ok(_) => match call("balance", BalanceArgs { address }).await {
+                    Ok(balance) => Check::Done(balance),
+                    Err(error) => Check::Failed(error),
+                },
+                Err(error) => Check::Failed(error),
+            };
+            check.set(next);
+        });
+    };
+    refresh();
+    let copied = RwSignal::new(false);
+    let copy = {
+        let address = account.address.clone();
+        move |_| {
+            write_clipboard(&address);
+            copied.set(true);
+        }
+    };
+    let settings = {
+        let account = account.clone();
+        move |_| ctx.go(Screen::Settings(Box::new(Screen::Balance(account.clone()))))
+    };
+    view! {
+        <div class="row heading">
+            <strong>{account.label.clone()}</strong>
+            <span class="badge">{account.network.clone()}</span>
+        </div>
+        <p class="address">
+            {account.address.clone()}
+            <button class="quiet copy" on:click=copy>{move || if copied.get() { "写しました" } else { "写す" }}</button>
+        </p>
+        {move || match check.get() {
+            Check::Loading => view! {
+                <div class="balance">
+                    <p class="amount pending">"確かめています…"</p>
+                    <p class="hint">"ブロックの署名を確かめ、状態の経路をたどっています。"</p>
+                </div>
+            }.into_any(),
+            Check::NoRest => view! {
+                <div class="balance">
+                    <p class="lead">"残高を問い合わせる REST を、まだ決めていません。"</p>
+                    <button class="primary" on:click=settings.clone()>"設定する"</button>
+                </div>
+            }.into_any(),
+            Check::Failed(error) => view! {
+                <div class="balance">
+                    <p class="amount pending">"確かめられませんでした"</p>
+                    <p class="hint">"確かめられない数字は出しません。"</p>
+                    <p class="error">{error}</p>
+                </div>
+            }.into_any(),
+            Check::Done(balance) => verified(balance).into_any(),
+        }}
+        <div class="row">
+            <button on:click=move |_| ctx.accounts()>"戻る"</button>
+            <button class="primary" on:click=move |_| refresh() disabled=move || matches!(check.get(), Check::Loading)>"確かめ直す"</button>
+        </div>
+    }
+}
+
+/// 確かめた残高と、何を確かめて何を信じたか
+fn verified(balance: BalanceView) -> impl IntoView {
+    let currency = balance.mosaics.iter().find(|mosaic| mosaic.currency);
+    // 通貨を持っていなければ 0。XYM の可分性は 6
+    let amount = currency
+        .and_then(|mosaic| mosaic.amount.clone())
+        .unwrap_or_else(|| "0.000000".to_owned());
+    let (whole, fraction) = match amount.split_once('.') {
+        Some((whole, fraction)) => (group(whole), format!(".{fraction}")),
+        None => (group(&amount), String::new()),
+    };
+    let others = balance
+        .mosaics
+        .iter()
+        .filter(|mosaic| !mosaic.currency)
+        .map(|mosaic| {
+            let value = match &mosaic.amount {
+                Some(amount) => grouped(amount),
+                // 定義がもうなく、小数点の位置がわからない
+                None => format!("{}（桁不明）", group(&mosaic.raw)),
+            };
+            view! {
+                <li>
+                    <span class="id">{format!("0x{}", mosaic.id)}</span>
+                    <span class="value">{value}</span>
+                </li>
+            }
+        })
+        .collect_view();
+    let when = balance.block_time.map(|time| {
+        let minutes = ((Date::now() - time) / 60_000.0).max(0.0) as u64;
+        let ago = if minutes == 0 {
+            "1分以内".to_owned()
+        } else {
+            format!("{minutes}分前")
+        };
+        format!("{}（{ago}）", Date::new(time).to_locale_string("ja-JP"))
+    });
+    let what = if balance.on_chain {
+        "アカウントと、持っているモザイクの定義が、状態の経路でその根につながること"
+    } else {
+        "アカウントが、状態の木にないこと"
+    };
+    view! {
+        <div class="balance">
+            <p class="amount">
+                <span class="whole">{whole}</span>
+                <span class="fraction">{fraction}</span>
+                <span class="unit">"XYM"</span>
+            </p>
+            {(!balance.on_chain).then(|| view! {
+                <p class="hint">"まだチェーンに載っていないアドレスです。一度も受け取っていなければ、こうなります。"</p>
+            })}
+            <ul class="mosaics">{others}</ul>
+        </div>
+        <div class="verified glass">
+            <p class="stamp">"確かめました"</p>
+            <p class="hint">{format!("高さ {} のブロック", group(&balance.height))}{when.map(|when| format!(" ・ {when}"))}</p>
+            <details>
+                <summary>"くわしく"</summary>
+                <p class="label">"確かめたこと"</p>
+                <ul class="notes">
+                    <li>"ブロックの署名と、9本の根から求めた StateHash"</li>
+                    <li>{what}</li>
+                </ul>
+                <p class="label">"信じていること"</p>
+                <ul class="notes">
+                    <li>{format!("このブロックが正しいチェーンのものであること。そこは {} を信じています", balance.rest)}</li>
+                </ul>
+                <p class="label">"ブロックのハッシュ"</p>
+                <p class="address small">{balance.block_hash}</p>
+            </details>
+        </div>
+    }
+}
+
+/// 整数の部分を3桁ごとに区切る
+fn group(digits: &str) -> String {
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// 小数点のある量の、整数の部分を区切る
+fn grouped(amount: &str) -> String {
+    match amount.split_once('.') {
+        Some((whole, fraction)) => format!("{}.{fraction}", group(whole)),
+        None => group(amount),
+    }
+}
+
+fn settings_view(ctx: Ctx, back: Screen) -> impl IntoView {
+    let rest = RwSignal::new(String::new());
+    spawn_local(async move {
+        if let Ok(Settings {
+            rest: Some(current),
+        }) = call::<Settings>("settings", NoArgs {}).await
+        {
+            rest.set(current);
+        }
+    });
+    let back_after_save = back.clone();
+    let submit = move |event: SubmitEvent| {
+        event.prevent_default();
+        let back = back_after_save.clone();
+        let args = RestArgs {
+            rest: rest.get_untracked(),
+        };
+        ctx.run("set_rest", args, move |_: Settings| ctx.go(back));
+    };
+    view! {
+        <p class="lead">"残高を問い合わせる REST"</p>
+        <p class="hint">
+            "残高は、この REST から取ったものを、ブロックの署名と StateHash まで確かめてから出します。"
+            "ただ、そのブロックが正しいチェーンのものかどうかは、この REST を信じることになります。"
+            "自分のノードか、信じられる人のノードにしてください。"
+        </p>
+        <form on:submit=submit>
+            <label class="field">
+                "URL"
+                <input type="url" placeholder="https://ホスト:3001" autocomplete="off" autocapitalize="off" spellcheck="false" bind:value=rest />
+            </label>
+            <div class="row">
+                <button type="button" on:click=move |_| ctx.go(back.clone())>"戻る"</button>
+                <button type="submit" class="primary" disabled=move || ctx.busy.get()>"決める"</button>
+            </div>
+        </form>
     }
 }

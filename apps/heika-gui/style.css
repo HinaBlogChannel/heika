@@ -133,7 +133,10 @@ svg {
     z-index: 10;
     padding-bottom: env(safe-area-inset-bottom);
     border-width: 1px 0 0;
+    border-color: rgba(27, 58, 122, 0.3);
     border-radius: 0;
+    /* 後ろの画面が透けると読みにくい。ぼかしが効かない WebView もあるので、ほぼ塗りつぶす */
+    background: rgba(246, 249, 252, 0.94);
   }
 
   .shell.inside main {

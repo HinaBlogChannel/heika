@@ -1,0 +1,24 @@
+# Rust のツールチェインを入れて既定にする。版はここの1か所で固定する
+name: Rust のツールチェイン
+description: 固定した版の Rust を入れ、ターゲットとコンポーネントを足す
+inputs:
+  targets:
+    description: 足すターゲット（空白で区切る）
+    default: ''
+  components:
+    description: 足すコンポーネント（カンマで区切る）
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOOLCHAIN: 1.99.0
+        TARGETS: ${{ inputs.targets }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        args=(--profile minimal)
+        if [ -n "$COMPONENTS" ]; then args+=(--component "$COMPONENTS"); fi
+        for target in $TARGETS; do args+=(--target "$target"); done
+        rustup toolchain install "$TOOLCHAIN" "${args[@]}"
+        rustup default "$TOOLCHAIN"

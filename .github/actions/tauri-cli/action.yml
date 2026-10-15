@@ -1,0 +1,29 @@
+# Tauri の CLI を cargo で入れる。ビルドに1つのジョブあたり5分ほどかかるので、キャッシュに入れておく。
+# 入れたらすぐ保存して、そのあとのビルドが落ちても次から使えるようにする。7日使わないと消える。
+# npx で動かすと、Android と iOS のプロジェクトがビルドの途中で npm を呼ぶようになり、package.json がなくて落ちる。
+# cargo で入れれば、そこからも cargo tauri が呼ばれる
+name: Tauri の CLI
+description: 固定した版の Tauri の CLI を、キャッシュから戻すか cargo で入れる。先に Rust のツールチェインを入れておく
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      env:
+        TAURI_CLI: 2.12.3
+      run: |
+        echo "TAURI_CLI=$TAURI_CLI" >> "$GITHUB_ENV"
+        echo "key=tauri-cli-$RUNNER_OS-$RUNNER_ARCH-$TAURI_CLI-$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+    - id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/cargo-tauri*
+        key: ${{ steps.key.outputs.key }}
+    - if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install tauri-cli --version "$TAURI_CLI" --locked
+    - if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/cargo-tauri*
+        key: ${{ steps.key.outputs.key }}

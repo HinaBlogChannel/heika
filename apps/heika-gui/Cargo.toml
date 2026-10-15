@@ -17,6 +17,10 @@ serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 
+# 依存は debug でも最適化する。しないと、キーストアの scrypt に何秒もかかる
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

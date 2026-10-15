@@ -59,6 +59,14 @@ macOS のバイナリは Apple の公証を受けていない。ブラウザー�
 
 Windows でも、標準入力から読んだ秘密鍵を std のバッファに残さず、コンソールから打った文字は画面に出さない。ただし、書き出す秘密鍵のファイルは、Unix のように自分だけが読めるようにはできず、置いたフォルダーの権限を引き継ぐ。自分のユーザーのフォルダーの中に置く。
 
+ウォレットの GUI（`heika-gui-v…`）も、同じ Release に置いている。どれも上と同じように確かめられる。
+
+- Linux の x86_64: `.deb`、`.rpm`、`.AppImage`
+- macOS の Apple Silicon: `.dmg`。公証を受けていないので、上の `xattr` で印を外してから開く
+- Windows の x86_64: `.msi` と `-setup.exe`。署名していないので、SmartScreen に止められたら「詳細情報」から実行する
+- Android の aarch64: `.apk`。署名の証明書の SHA-256 は `79b38fb9557cf0249f75aadf806805f3e5b4f6b196a69b6f986c075cdb64c5ad` で、`apksigner verify --print-certs` で確かめられる。どの版もこの鍵で署名するので、上書きして更新できる
+- iOS: `-unsigned.ipa`。署名していないので、自分で署名し直して入れる
+
 ソースからなら、Rust 1.99 以上で次のようにする。
 
 ```sh

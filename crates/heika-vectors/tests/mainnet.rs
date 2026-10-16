@@ -1,4 +1,4 @@
-//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュ、TransactionsHash、VRF の証明を確かめる。
+//! メインネットのノードから取ったブロックで、ブロックの読み込み、署名、ハッシュ、TransactionsHash、VRF の証明、難易度を確かめる。
 //!
 //! 実際のチェーンが正なので、公式ベクターでは確かめられない署名とハッシュのつながりをここで見る。
 //! つなぐノードと名乗る証明書は、リポジトリに残さないように環境変数で渡す。
@@ -18,6 +18,7 @@ use std::env;
 use std::fs;
 use std::time::Duration;
 
+use heika_block::scoring::{BlockStatistic, difficulty};
 use heika_block::{Block, BlockType};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
@@ -241,4 +242,53 @@ fn mainnet_blocks_are_signed_chained_proven_and_scannable() {
     eprintln!("VRF の証明を確かめたブロック: {proven}");
     assert!(proven > 1);
     assert!(types.len() > 1);
+}
+
+/// 難易度を確かめる範囲。どれも決まった規則で選んでいる。直前の `maxDifficultyBlocks` 個も一緒に取る
+const DIFFICULTY_RANGES: [(&str, u64, u32); 2] = [
+    // 高さ 2 は直前が Nemesis だけなので既定値、そこから 60 個たまるまで
+    ("Nemesis から", 1, 80),
+    // アグリゲートがバージョン 3 になったフォーク（uniqueAggregateTransactionHash、高さ 4,759,100）の前後
+    ("バージョン 3 のフォーク", 4_759_040, 82),
+];
+
+#[test]
+#[ignore = "環境変数で指定したメインネットのノードにつなぐ"]
+fn mainnet_difficulties_follow_the_previous_blocks() {
+    let Some(mut node) = connect() else {
+        return;
+    };
+    let mut checked = 0;
+    for (name, start, count) in DIFFICULTY_RANGES {
+        let mut blocks = Vec::new();
+        while (blocks.len() as u32) < count {
+            let height = start + blocks.len() as u64;
+            let more = node
+                .pull_blocks(height, count - blocks.len() as u32, 16 * 1024 * 1024)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                !more.is_empty(),
+                "{name}: 高さ {height} のブロックがありません"
+            );
+            blocks.extend(more.iter().map(|bytes| Block::from_bytes(bytes).unwrap()));
+        }
+        let statistics: Vec<BlockStatistic> = blocks.iter().map(BlockStatistic::from).collect();
+        // 範囲の初めのほうは直前のブロックが足りないので、Nemesis から取ったときだけ確かめる
+        let first = if start == 1 {
+            1
+        } else {
+            MAINNET.max_difficulty_blocks
+        };
+        for index in first..blocks.len() {
+            assert_eq!(
+                difficulty(&statistics[..index], &MAINNET),
+                blocks[index].difficulty,
+                "{name}: 高さ {} の難易度",
+                blocks[index].height
+            );
+            checked += 1;
+        }
+    }
+    eprintln!("難易度を確かめたブロック: {checked}");
+    assert!(checked > 100);
 }

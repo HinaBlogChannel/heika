@@ -92,6 +92,12 @@ pub struct NetworkParameters {
     pub currency_mosaic_id: u64,
     /// `blockGenerationTargetTime`
     pub block_generation_target_time: Duration,
+    /// `blockTimeSmoothingFactor`。ブロックの間隔が目標から外れたときに、ハーベストの的をどれだけ動かすか（1000 で 1 倍）
+    pub block_time_smoothing_factor: u64,
+    /// `maxDifficultyBlocks`。難易度を決めるのに見る、直前のブロックの数
+    pub max_difficulty_blocks: usize,
+    /// `totalChainImportance`。Importance の合計
+    pub total_chain_importance: u64,
     /// `importanceGrouping`。この高さの倍数のブロックが、Importance を計算し直すブロックになる
     pub importance_grouping: u64,
     /// `maxTransactionLifetime`
@@ -153,6 +159,9 @@ impl NetworkParameters {
         epoch_adjustment: Duration::from_secs(1_615_853_185),
         currency_mosaic_id: 0x6BED_913F_A202_23F8,
         block_generation_target_time: Duration::from_secs(30),
+        block_time_smoothing_factor: 3000,
+        max_difficulty_blocks: 60,
+        total_chain_importance: 7_842_928_625_000_000,
         importance_grouping: 720,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,
@@ -184,6 +193,9 @@ impl NetworkParameters {
         epoch_adjustment: Duration::from_secs(1_667_250_467),
         currency_mosaic_id: 0x72C0_212E_67A0_8BCE,
         block_generation_target_time: Duration::from_secs(30),
+        block_time_smoothing_factor: 3000,
+        max_difficulty_blocks: 60,
+        total_chain_importance: 7_842_928_625_000_000,
         importance_grouping: 180,
         max_transaction_lifetime: Duration::from_secs(6 * 60 * 60),
         max_cosignatures_per_aggregate: 25,

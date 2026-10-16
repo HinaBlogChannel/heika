@@ -101,7 +101,7 @@ struct SettingsArgs {
 struct Settings {
     rest: Option<String>,
     hide_amounts: bool,
-    account: Option<String>,
+    account_index: Option<usize>,
 }
 
 /// 本体の `balance` が返す、確かめた残高
@@ -344,10 +344,9 @@ impl Ctx {
     /// ホームに出すアカウント。最後に選んだものがなければ、最初のもの
     fn current(self) -> Option<AccountView> {
         let accounts = self.accounts.get();
-        let chosen = self.settings.get().account;
-        accounts
-            .iter()
-            .find(|account| Some(&account.address) == chosen.as_ref())
+        let chosen = self.settings.get().account_index;
+        chosen
+            .and_then(|index| accounts.get(index))
             .or(accounts.first())
             .cloned()
     }
@@ -713,12 +712,11 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
         ctx.accounts
             .get()
             .into_iter()
-            .map(|account| {
-                let address = account.address.clone();
+            .enumerate()
+            .map(|(index, account)| {
                 let selected = Some(&account.address) == current.as_ref();
                 let choose = move |_| {
-                    let address = address.clone();
-                    ctx.save(move |settings| settings.account = Some(address));
+                    ctx.save(move |settings| settings.account_index = Some(index));
                     ctx.go(Screen::Home);
                 };
                 view! {

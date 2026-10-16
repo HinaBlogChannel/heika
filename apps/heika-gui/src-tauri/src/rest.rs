@@ -33,8 +33,9 @@ pub struct Settings {
     pub rest: Option<String>,
     /// 金額を隠す（人前で開くとき）
     pub hide_amounts: bool,
-    /// ホームに出すアカウントのアドレス。最後に選んだもの
-    pub account: Option<String>,
+    /// ホームに出すアカウントの、キーストアの中での位置。最後に選んだもの。
+    /// アドレスは書かない。キーストアの外にアカウントの手がかりを平文で残さないため
+    pub account_index: Option<usize>,
 }
 
 /// 設定と、それを書くファイル
@@ -46,14 +47,25 @@ pub struct Config {
 impl Config {
     /// ファイルから読む。なければ、読めなければ、空の設定から始める
     pub fn load(path: PathBuf) -> Self {
-        let settings = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        let bytes = fs::read(&path).ok();
+        let settings: Settings = bytes
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
             .unwrap_or_default();
-        Self {
+        let config = Self {
             path,
-            settings: Mutex::new(settings),
+            settings: Mutex::new(settings.clone()),
+        };
+        // 0.7.0 までは、最後に選んだアカウントのアドレス（`account`）を書いていた。残っていたら書き直して消す
+        let legacy = bytes
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok()
+            })
+            .is_some_and(|fields| fields.contains_key("account"));
+        if legacy {
+            let _ = config.save(settings);
         }
+        config
     }
 
     /// 問い合わせる REST。決めていなければエラー

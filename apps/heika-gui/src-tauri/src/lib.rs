@@ -18,6 +18,8 @@ use serde::Serialize;
 use tauri::Manager;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "linux")]
+mod clipboard;
 mod rest;
 mod send;
 
@@ -365,6 +367,8 @@ fn keystore_path(app: &tauri::App) -> Result<PathBuf, String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            clipboard::keep_owned();
             let path = keystore_path(app)?;
             // 設定は、キーストアと同じフォルダーに置く
             app.manage(rest::Config::load(path.with_file_name("settings.json")));

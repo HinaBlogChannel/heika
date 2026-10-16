@@ -1722,6 +1722,7 @@ name = "heika-gui"
 version = "0.7.0"
 dependencies = [
  "getrandom 0.4.3",
+ "gtk",
  "heika-core",
  "heika-rest",
  "heika-transaction",

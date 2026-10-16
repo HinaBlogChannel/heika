@@ -115,7 +115,7 @@ cargo test -p heika-cert --all-features             # heika-cert だけを、fea
 
 ## ライセンス
 
-AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。バイナリに入る依存のクレートのライセンスは [crates/heika-cli/THIRD-PARTY-LICENSES](crates/heika-cli/THIRD-PARTY-LICENSES) にまとめてあり、Release のアーカイブにも入れている。バイナリそのものにも、heika と依存のライセンスと、ビルドしたときのソースを入れてあり、`heika legal` で取り出せる。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。
+AGPL-3.0-only。BIP 39 の単語リストは MIT（[crates/heika-wallet/src/bip39/NOTICE](crates/heika-wallet/src/bip39/NOTICE)）。バイナリに入る依存のクレートのライセンスは [crates/heika-cli/THIRD-PARTY-LICENSES](crates/heika-cli/THIRD-PARTY-LICENSES) にまとめてあり、Release のアーカイブにも入れている。バイナリそのものにも、heika と依存のライセンスと、ビルドしたときのソースを入れてあり、`heika legal` で取り出せる。 GUI の依存のライセンスは [apps/heika-gui/THIRD-PARTY-LICENSES](apps/heika-gui/THIRD-PARTY-LICENSES) にあり、アプリの設定の「ライセンスを見る」でも読める。ベクターを作るスクリプト（`crates/heika-vectors/scripts/`）は MIT。
 
 ```sh
 heika legal third-party

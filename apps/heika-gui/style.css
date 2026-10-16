@@ -745,6 +745,21 @@ details .stamp::before {
   margin-top: var(--space-4);
 }
 
+/* ライセンスの全文。長いので、枠の中で送る */
+pre.legal {
+  max-height: 60vh;
+  overflow: auto;
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border: 1px solid var(--blue-line);
+  background: var(--glass);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 summary {
   cursor: pointer;
   color: var(--blue);

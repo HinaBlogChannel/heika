@@ -1,0 +1,19 @@
+heika-gui のアプリに入っている、ほかのソフトウェアのライセンス
+
+heika そのものは AGPL-3.0-only で、LICENSE にある。
+BIP 39 の単語リストは MIT で、そのライセンスは NOTICE-BIP39 として添えている。
+以下は依存するクレートのライセンスで、cargo about で作った。
+Android のアプリには、ほかに Tauri と AndroidX の Java と Kotlin の部品が入っていて、Apache License 2.0 で配られている。
+{{#each licenses}}
+{{#unless (eq id "AGPL-3.0-only")}}
+
+================================================================================
+{{{name}}}
+
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+{{/unless}}
+{{/each}}

@@ -99,7 +99,7 @@ cargo test
 ## GitHub Actions
 
 - `.github/workflows/ci.yaml`: `master` への push と PR で、確かめることと、リリースに載せるもののビルドを全部する。
-  - 確かめること: 整形、clippy（Linux と Windows。警告はエラーにする）、`cargo test`、`heika-cert` の `--all-features`、公式ベクターと SDK のベクターとの照合、examples。SDK のベクターと依存のライセンスの一覧（`crates/heika-cli/THIRD-PARTY-LICENSES`）は作り直し、コミットしたものと差分がないことを確かめる。依存を変えたら、`crates/heika-cli` で `cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES` をしてコミットする。
+  - 確かめること: 整形、clippy（Linux と Windows。警告はエラーにする）、`cargo test`、`heika-cert` の `--all-features`、公式ベクターと SDK のベクターとの照合、examples。SDK のベクターと依存のライセンスの一覧（`crates/heika-cli/THIRD-PARTY-LICENSES` と `apps/heika-gui/THIRD-PARTY-LICENSES`）は作り直し、コミットしたものと差分がないことを確かめる。依存を変えたら、`crates/heika-cli` で `cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES` をしてコミットする。 GUI の依存を変えたら、`apps/heika-gui` で `cargo about generate --workspace --locked about.hbs -o THIRD-PARTY-LICENSES` をしてコミットする。
   - ビルド: CLI の4つのターゲット、GUI（Linux、macOS、Windows、Android、iOS）、Pages のサイト。CLI はバイナリに埋め込んだソースを README の手順（objcopy、segedit、llvm-objcopy）で取り出し、ZIP として読めるかも確かめる。GUI の版が `Cargo.toml` のワークスペースの版と同じかも確かめる。
   - `master` への push では、ビルドしたジョブの中で来歴の証明を付ける。master の実行は、あとから push しても止めない。
   - APK は Secrets の `ANDROID_KEYSTORE`（PKCS#12 を base64 にしたもの）と `ANDROID_KEYSTORE_PASSWORD` の鍵で署名する。Secrets を読めない実行では使い捨ての鍵で署名し、名前に `-throwaway` を付ける。

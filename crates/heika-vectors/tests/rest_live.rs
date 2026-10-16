@@ -8,6 +8,7 @@
 //!   REST の状態の経路で、最新のブロックの9本の根につながる（これは REST だけで動き、HEIKA_TEST_REST だけでよい）
 //! - アカウントの残高を、[`verify_balance`] で最新のブロックの StateHash まで確かめられる。
 //!   まだ使われていないアドレスは、載っていないことを確かめられる（これも HEIKA_TEST_REST だけでよい）
+//! - 最近のブロックが、ハーベストしたアカウントの Importance で当たりになっている（これも HEIKA_TEST_REST だけでよい）
 //!
 //! つなぐノード、名乗る証明書、REST のオリジンは、リポジトリに残さないように環境変数で渡す。
 //!
@@ -29,6 +30,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use heika_block::Block;
+use heika_block::scoring::is_hit;
 use heika_block::statement::{
     AddressResolutionStatement, MosaicResolutionStatement, TransactionStatement,
 };
@@ -650,4 +652,72 @@ fn rest_balances_are_verified_against_the_state_hash() {
         "残高を確かめたもの：アカウント {}、モザイク {mosaics}、使われていないアドレス 1",
         addresses.len()
     );
+}
+
+/// 最新のブロックの少し前から、ブロックを出したアカウントの hit が target より小さいことを確かめる。
+/// Importance は REST の今のものしか取れないので、Importance を計算し直してからのブロックだけを見る。
+/// リモートハーベストなら、リンクしたメインアカウントの Importance を使う（catapult の `ImportanceView`）
+#[test]
+#[ignore = "環境変数で指定した REST につなぐ"]
+fn rest_blocks_are_hits_for_their_harvesters() {
+    let Some(origin) = rest_origin() else {
+        return;
+    };
+    let parameters = NetworkParameters::MAINNET;
+    let latest: u64 = rest(&origin, "/chain/info")["height"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let block_at = |height: u64| {
+        let info: BlockInfo =
+            serde_json::from_value(rest(&origin, &format!("/blocks/{height}"))).unwrap();
+        info.verify().unwrap()
+    };
+    // catapult の `ConvertToImportanceHeight`
+    let grouping = parameters.importance_grouping;
+    let importance_height = |height: u64| ((height - 1) / grouping * grouping).max(1);
+    let mut parent = block_at(latest - 20);
+    let mut checked = 0;
+    let mut missed_with_half = 0;
+    for height in latest - 19..=latest {
+        let block = block_at(height);
+        let mut account: AccountInfo = serde_json::from_value(rest(
+            &origin,
+            &format!("/accounts/{}", block.signer_public_key),
+        ))
+        .unwrap();
+        // 2 は Remote
+        if account.account.account_type == 2 {
+            let linked = account
+                .account
+                .supplemental_public_keys
+                .linked
+                .clone()
+                .unwrap();
+            account =
+                serde_json::from_value(rest(&origin, &format!("/accounts/{}", linked.public_key)))
+                    .unwrap();
+        }
+        let importance_at: u64 = account.account.importance_height.parse().unwrap();
+        if importance_at == importance_height(height) {
+            let importance = account.account.importance.parse().unwrap();
+            assert!(
+                is_hit(&parent, &block, importance, &parameters),
+                "高さ {height} が当たりになりません"
+            );
+            // ブロックは target が hit を越えた最初の秒に出るので、hit は target のすぐ下にある。
+            // Importance が半分なら、まず外れる
+            if !is_hit(&parent, &block, importance / 2, &parameters) {
+                missed_with_half += 1;
+            }
+            checked += 1;
+        }
+        parent = block;
+    }
+    eprintln!(
+        "hit を確かめたブロック: {checked}、Importance が半分なら外れるもの: {missed_with_half}"
+    );
+    assert!(checked > 0);
+    assert!(missed_with_half * 2 > checked);
 }

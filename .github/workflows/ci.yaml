@@ -90,6 +90,11 @@ jobs:
         run: |
           cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
           git diff --exit-code
+      - name: GUI の依存のライセンスの一覧を作り直して、コミットしたものと同じか確かめる
+        working-directory: apps/heika-gui
+        run: |
+          cargo about generate --workspace --locked about.hbs -o THIRD-PARTY-LICENSES
+          git diff --exit-code
 
   # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる。
   # 通ったら、Pages に出すサイトの形に並べて Artifact に上げる

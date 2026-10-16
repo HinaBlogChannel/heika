@@ -31,6 +31,31 @@ struct About {
     arch: &'static str,
 }
 
+/// heika のライセンス
+const LICENSE: &str = include_str!("../../../../LICENSE");
+/// 依存のクレートのライセンス。about.toml の手順で作り直す
+const THIRD_PARTY_LICENSES: &str = include_str!("../../THIRD-PARTY-LICENSES");
+
+/// 設定の下から開く、ライセンスの画面に出すもの
+#[derive(Serialize)]
+struct Licenses {
+    license: &'static str,
+    third_party: String,
+}
+
+#[tauri::command]
+fn licenses() -> Licenses {
+    Licenses {
+        license: LICENSE,
+        third_party: format!(
+            "{}\n\n{}\nNOTICE-BIP39\n\n{}",
+            THIRD_PARTY_LICENSES.trim_end(),
+            "=".repeat(80),
+            heika_wallet::bip39::ENGLISH_NOTICE.trim_end()
+        ),
+    }
+}
+
 #[tauri::command]
 fn about() -> About {
     About {
@@ -382,6 +407,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             about,
+            licenses,
             start,
             new_mnemonic,
             create_wallet,

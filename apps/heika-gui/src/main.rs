@@ -195,6 +195,13 @@ struct About {
     arch: String,
 }
 
+/// 本体の `licenses` が返す、ライセンスの全文
+#[derive(Clone, Deserialize)]
+struct Licenses {
+    license: String,
+    third_party: String,
+}
+
 /// 本体の `start` が返す、最初に出す画面
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -243,6 +250,8 @@ enum Screen {
     Send,
     Accounts,
     Settings,
+    /// 設定の下から開く
+    Licenses,
     /// 送る前に確かめてもらう。メニューは出さず、送るか戻るかだけにする
     Approve(DraftView),
 }
@@ -252,7 +261,7 @@ impl Screen {
     fn inside(&self) -> bool {
         matches!(
             self,
-            Self::Home | Self::Send | Self::Accounts | Self::Settings
+            Self::Home | Self::Send | Self::Accounts | Self::Settings | Self::Licenses
         )
     }
 }
@@ -416,6 +425,7 @@ fn App() -> impl IntoView {
                     Screen::Approve(draft) => approve(ctx, draft).into_any(),
                     Screen::Accounts => accounts_view(ctx).into_any(),
                     Screen::Settings => settings_view(ctx).into_any(),
+                    Screen::Licenses => licenses_view(ctx).into_any(),
                 }}</section> }}
                 {move || ctx.error.get().map(|error| view! { <p class="error">{error}</p> })}
                 // 版はふだんの画面には出さず、設定と、開く前の画面にだけ出す。つながらないときはいつも出す
@@ -436,8 +446,14 @@ fn App() -> impl IntoView {
 fn menu(ctx: Ctx) -> impl IntoView {
     let item = move |screen: Screen, label: &'static str, icon: &'static str| {
         let target = screen.clone();
-        let active =
-            move || std::mem::discriminant(&ctx.screen.get()) == std::mem::discriminant(&target);
+        // ライセンスの画面は、設定の中の画面として扱う
+        let active = move || {
+            let current = match ctx.screen.get() {
+                Screen::Licenses => Screen::Settings,
+                screen => screen,
+            };
+            std::mem::discriminant(&current) == std::mem::discriminant(&target)
+        };
         view! {
             <button class="item" class:active=active aria-label=label on:click=move |_| ctx.go(screen.clone())>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d=icon /></svg>
@@ -1257,6 +1273,46 @@ fn settings_view(ctx: Ctx) -> impl IntoView {
         <p class="hint">"閉じると、もう一度パスフレーズを聞きます。"</p>
         <div class="row">
             <button on:click=close>"閉じる"</button>
+        </div>
+        <p class="lead section">"ライセンス"</p>
+        <p class="hint">
+            "heika は AGPL-3.0-only で配っています。ソースは "
+            <span class="address">{REPOSITORY}</span>
+            " にあります。"
+        </p>
+        <div class="row">
+            <button on:click=move |_| ctx.go(Screen::Licenses)>"ライセンスを見る"</button>
+        </div>
+    }
+}
+
+/// heika のリポジトリ。ライセンスの画面から案内する
+const REPOSITORY: &str = "https://github.com/HinaBlogChannel/heika";
+
+/// heika と、アプリに入っている依存のライセンスの全文
+fn licenses_view(ctx: Ctx) -> impl IntoView {
+    let licenses = RwSignal::new(None::<Licenses>);
+    ctx.run("licenses", NoArgs {}, move |loaded| {
+        licenses.set(Some(loaded))
+    });
+    view! {
+        <p class="lead">"ライセンス"</p>
+        <p class="hint">
+            "heika は AGPL-3.0-only です。このアプリには、ほかの人が作ったソフトウェアも入っていて、"
+            "それぞれのライセンスの全文を下に載せています。"
+        </p>
+        {move || licenses.get().map(|licenses| view! {
+            <details>
+                <summary>"heika のライセンス（AGPL-3.0-only）"</summary>
+                <pre class="legal">{licenses.license}</pre>
+            </details>
+            <details>
+                <summary>"ほかのソフトウェアのライセンス"</summary>
+                <pre class="legal">{licenses.third_party}</pre>
+            </details>
+        })}
+        <div class="row">
+            <button on:click=move |_| ctx.go(Screen::Settings)>"戻る"</button>
         </div>
     }
 }

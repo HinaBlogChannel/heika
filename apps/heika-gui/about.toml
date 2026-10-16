@@ -1,0 +1,18 @@
+# heika-gui のアプリに入る依存のライセンスを、cargo about で THIRD-PARTY-LICENSES にまとめる。
+# 作り直すには、このフォルダーで cargo about generate --workspace --locked about.hbs -o THIRD-PARTY-LICENSES
+# MPL-2.0 は Tauri の CSS の部品など、CDLA-Permissive-2.0 は OS の証明書の確かめ方が使うルート証明書の一覧
+accepted = [
+    "Apache-2.0", "MIT", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "BSL-1.0", "CC0-1.0",
+    "MPL-2.0", "CDLA-Permissive-2.0", "AGPL-3.0-only",
+]
+# Release で配るターゲットと、画面の wasm だけを見る
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
+    "wasm32-unknown-unknown",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

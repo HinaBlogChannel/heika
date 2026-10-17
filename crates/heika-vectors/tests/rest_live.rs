@@ -42,7 +42,7 @@ use heika_core::key::PublicKey;
 use heika_core::merkle::{self, MerklePathNode};
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_core::patricia::SubCache;
-use heika_p2p::Node;
+use heika_p2p::Client;
 use heika_rest::balance::verify_balance;
 use heika_rest::block::{BlockHeader, BlockInfo};
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
@@ -80,7 +80,7 @@ fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("{path} を読めません: {error}"))
 }
 
-fn connect() -> Option<(Node, String)> {
+fn connect() -> Option<(Client, String)> {
     let (Ok(rest), Ok(address)) = (env::var("HEIKA_TEST_REST"), env::var("HEIKA_TEST_NODE")) else {
         eprintln!(
             "HEIKA_TEST_REST か HEIKA_TEST_NODE がないので、REST とバイナリの突き合わせはしません"
@@ -95,7 +95,7 @@ fn connect() -> Option<(Node, String)> {
         .unwrap_or_else(|error| panic!("{key_path}: {error}"));
     let identity = Identity::new(&chain, &key).unwrap();
     // ノードのアドレスと REST のオリジンは出さない
-    let node = Node::connect(&address, &identity, TIMEOUT)
+    let node = Client::connect(&address, &identity, TIMEOUT)
         .unwrap_or_else(|error| panic!("HEIKA_TEST_NODE につなげません: {error}"));
     Some((node, rest.trim_end_matches('/').to_owned()))
 }
@@ -144,7 +144,7 @@ fn pages(origin: &str, path: &str) -> Vec<Value> {
     all
 }
 
-fn pull(node: &mut Node, name: &str, start: u64, count: u32) -> Vec<(Vec<u8>, Block)> {
+fn pull(node: &mut Client, name: &str, start: u64, count: u32) -> Vec<(Vec<u8>, Block)> {
     let mut blocks = Vec::new();
     while (blocks.len() as u32) < count {
         let height = start + blocks.len() as u64;

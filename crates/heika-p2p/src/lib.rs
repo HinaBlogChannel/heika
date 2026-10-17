@@ -15,13 +15,13 @@ use heika_tls::{ConnectError, Connection, Identity, RequestError};
 /// メインネットのネメシスのブロック（4.7 MB）が収まるだけの余裕をとる。
 const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
 
-/// ノードとの接続。
+/// ノードへ問い合わせる側の接続。要求を1つ送って、応答を1つ受け取る。
 #[derive(Debug)]
-pub struct Node {
+pub struct Client {
     connection: Connection,
 }
 
-impl Node {
+impl Client {
     /// `address` に接続する。相手のチェーンは catapult と同じ条件で確かめる。
     pub fn connect(
         address: &str,

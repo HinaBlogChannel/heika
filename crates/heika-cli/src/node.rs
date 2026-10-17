@@ -10,7 +10,8 @@ use clap::Subcommand;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
-use heika_p2p::{NetworkNode, Node, NodeRoles};
+use heika_p2p::Node;
+use heika_packet::{NetworkNode, NodeRoles};
 use heika_tls::Identity;
 
 use crate::cert::{AnyPrivateKey, read_chain};
@@ -518,10 +519,10 @@ mod tests {
     fn measurement(height: u64, measured_at: Instant) -> Measurement {
         Measurement {
             node: NetworkNode {
-                version: heika_p2p::NodeVersion(0),
+                version: heika_packet::NodeVersion(0),
                 identity_key: heika_core::key::PublicKey([0; 32]),
                 network_generation_hash_seed: heika_core::network::GenerationHashSeed([0; 32]),
-                roles: heika_p2p::NodeRoles(1),
+                roles: NodeRoles(1),
                 port: 7900,
                 network_identifier: NetworkIdentifier::MAINNET,
                 host: String::new(),

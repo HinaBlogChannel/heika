@@ -9,4 +9,5 @@ description = "Symbol のノードと同じ設定での TLS の接続"
 [dependencies]
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core", default-features = false }
+heika-packet = { path = "../heika-packet" }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }

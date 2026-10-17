@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["crates/*"]
 # heika-vectors はネットワークから公式ベクターを取ってくるので、明示したときだけ対象にする
-default-members = ["crates/heika-block", "crates/heika-cert", "crates/heika-cli", "crates/heika-core", "crates/heika-harvesting", "crates/heika-p2p", "crates/heika-rest", "crates/heika-tls", "crates/heika-transaction", "crates/heika-wallet"]
+default-members = ["crates/heika-block", "crates/heika-cert", "crates/heika-cli", "crates/heika-core", "crates/heika-harvesting", "crates/heika-p2p", "crates/heika-packet", "crates/heika-rest", "crates/heika-tls", "crates/heika-transaction", "crates/heika-wallet"]
 
 [workspace.package]
 version = "0.7.0"

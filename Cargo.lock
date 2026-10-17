@@ -474,6 +474,7 @@ dependencies = [
  "heika-core",
  "heika-harvesting",
  "heika-p2p",
+ "heika-packet",
  "heika-rest",
  "heika-tls",
  "heika-transaction",
@@ -515,8 +516,15 @@ dependencies = [
 name = "heika-p2p"
 version = "0.7.0"
 dependencies = [
- "heika-core",
+ "heika-packet",
  "heika-tls",
+]
+
+[[package]]
+name = "heika-packet"
+version = "0.7.0"
+dependencies = [
+ "heika-core",
 ]
 
 [[package]]
@@ -537,6 +545,7 @@ version = "0.7.0"
 dependencies = [
  "heika-cert",
  "heika-core",
+ "heika-packet",
  "rustls",
 ]
 

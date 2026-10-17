@@ -7,5 +7,5 @@ rust-version.workspace = true
 description = "Symbol のノードへの問い合わせ"
 
 [dependencies]
-heika-core = { path = "../heika-core", default-features = false }
+heika-packet = { path = "../heika-packet" }
 heika-tls = { path = "../heika-tls" }

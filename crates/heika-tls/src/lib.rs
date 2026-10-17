@@ -260,7 +260,7 @@ pub fn send(
     timeout: Duration,
     wait: Duration,
 ) -> Result<Inspection, ConnectError> {
-    let packet = packet(packet_type, body)
+    let packet = heika_packet::encode(packet_type, body)
         .map_err(|_| ConnectError::Io(io::Error::other("パケットが大きすぎます")))?;
     exchange(
         address,
@@ -270,19 +270,6 @@ pub fn send(
         timeout,
         wait,
     )
-}
-
-/// パケットのヘッダーは、ヘッダーを含む全長 `u32` と種類 `u32` の8バイト。
-const PACKET_HEADER_SIZE: usize = 8;
-
-/// ヘッダーを付けたパケット。全長が `u32` に収まらなければ `Err`。
-fn packet(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, ()> {
-    let size = u32::try_from(PACKET_HEADER_SIZE + body.len()).map_err(|_| ())?;
-    let mut packet = Vec::with_capacity(size as usize);
-    packet.extend_from_slice(&size.to_le_bytes());
-    packet.extend_from_slice(&packet_type.to_le_bytes());
-    packet.extend_from_slice(body);
-    Ok(packet)
 }
 
 /// ノードとの TLS の接続。Symbol のパケットで要求を送り、応答を受け取る。
@@ -325,34 +312,47 @@ impl Connection {
         body: &[u8],
         max_body_size: usize,
     ) -> Result<Vec<u8>, RequestError> {
-        let packet = packet(packet_type, body).map_err(|()| RequestError::TooLarge(body.len()))?;
-        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
-        let result = (|| {
-            stream.write_all(&packet)?;
-            stream.flush()?;
-            let mut header = [0; PACKET_HEADER_SIZE];
-            stream.read_exact(&mut header)?;
-            Ok::<_, io::Error>(header)
-        })();
-        let header = result.map_err(|error| match alert(&error) {
-            Some(alert) => RequestError::Rejected(alert),
-            None => RequestError::Io(error),
-        })?;
-        let [s0, s1, s2, s3, t0, t1, t2, t3] = header;
-        let size = u32::from_le_bytes([s0, s1, s2, s3]);
-        let response_type = u32::from_le_bytes([t0, t1, t2, t3]);
+        self.send_packet(packet_type, body)?;
+        let (response_type, body) = self.receive_packet(max_body_size)?;
         if response_type != packet_type {
             return Err(RequestError::UnexpectedType(response_type));
         }
-        let body_size = (size as usize)
-            .checked_sub(PACKET_HEADER_SIZE)
-            .ok_or(RequestError::InvalidSize(size))?;
+        Ok(body)
+    }
+
+    /// 種類が `packet_type` で本体が `body` のパケットを1つ送る。
+    pub fn send_packet(&mut self, packet_type: u32, body: &[u8]) -> Result<(), RequestError> {
+        let packet = heika_packet::encode(packet_type, body).map_err(RequestError::TooLarge)?;
+        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
+        stream
+            .write_all(&packet)
+            .and_then(|()| stream.flush())
+            .map_err(request_error)
+    }
+
+    /// パケットを1つ受け取って、種類と本体を返す。本体が `max_body_size` を超えるなら、読まずに失敗する。
+    pub fn receive_packet(&mut self, max_body_size: usize) -> Result<(u32, Vec<u8>), RequestError> {
+        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
+        let mut header = [0; heika_packet::HEADER_SIZE];
+        stream.read_exact(&mut header).map_err(request_error)?;
+        let header = heika_packet::Header::parse(&header);
+        let body_size = header
+            .body_size()
+            .ok_or(RequestError::InvalidSize(header.size))?;
         if body_size > max_body_size {
             return Err(RequestError::TooLarge(body_size));
         }
         let mut body = vec![0; body_size];
         stream.read_exact(&mut body).map_err(RequestError::Io)?;
-        Ok(body)
+        Ok((header.packet_type, body))
+    }
+}
+
+/// 送るか、見出しを読むときのエラー。TLS のアラートなら、こちらの証明書が弾かれた
+fn request_error(error: io::Error) -> RequestError {
+    match alert(&error) {
+        Some(alert) => RequestError::Rejected(alert),
+        None => RequestError::Io(error),
     }
 }
 
@@ -369,7 +369,7 @@ impl fmt::Debug for Connection {
     }
 }
 
-/// [`Connection::request`] が失敗した理由。
+/// [`Connection::request`] などが失敗した理由。
 #[derive(Debug)]
 pub enum RequestError {
     /// こちらの証明書が TLS のアラートで弾かれた。中身はアラートの種類
@@ -868,7 +868,7 @@ mod tests {
             stream.read_exact(&mut body).unwrap();
             sender.send([&header[..], &body].concat()).unwrap();
             stream
-                .write_all(&packet(response_type, response).unwrap())
+                .write_all(&heika_packet::encode(response_type, response).unwrap())
                 .unwrap();
             stream.flush().unwrap();
             let _ = stream.read_to_end(&mut Vec::new());

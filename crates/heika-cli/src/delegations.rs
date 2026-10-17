@@ -14,7 +14,7 @@ use heika_core::hash::Hash256;
 use heika_core::network::NetworkParameters;
 use heika_harvesting::delegation::{DelegationTracker, LinkKind, Status};
 use heika_harvesting::harvesters_dat;
-use heika_p2p::Client;
+use heika_p2p::ClientConnection;
 use heika_tls::Identity;
 use heika_transaction::scan;
 
@@ -64,7 +64,8 @@ pub fn run(args: Args) -> Result<(), Failure> {
         None => None,
     };
     let connect = |address: &str| {
-        Client::connect(address, &identity, TIMEOUT).map_err(|error| format!("{address}: {error}"))
+        ClientConnection::connect(address, &identity, TIMEOUT)
+            .map_err(|error| format!("{address}: {error}"))
     };
 
     let mut node = connect(args.connect)?;

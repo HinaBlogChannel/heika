@@ -17,11 +17,11 @@ const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
 
 /// ノードへ問い合わせる側の接続。要求を1つ送って、応答を1つ受け取る。
 #[derive(Debug)]
-pub struct Client {
+pub struct ClientConnection {
     connection: Connection,
 }
 
-impl Client {
+impl ClientConnection {
     /// `address` に接続する。相手のチェーンは catapult と同じ条件で確かめる。
     pub fn connect(
         address: &str,

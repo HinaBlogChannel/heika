@@ -23,7 +23,7 @@ use heika_block::{Block, BlockType};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
 use heika_core::network::NetworkParameters;
-use heika_p2p::Client;
+use heika_p2p::ClientConnection;
 use heika_tls::Identity;
 use heika_transaction::{Body, LinkAction, Transaction, TransactionsHashCalculation, scan};
 
@@ -52,7 +52,7 @@ fn read(path: &str) -> String {
 }
 
 /// HEIKA_TEST_NODE がなければ None。CI のように、ほかの照合と一緒に `--include-ignored` で回したときのため。
-fn connect() -> Option<Client> {
+fn connect() -> Option<ClientConnection> {
     let Ok(address) = env::var("HEIKA_TEST_NODE") else {
         eprintln!("HEIKA_TEST_NODE がないので、メインネットのブロックでの確認はしません");
         return None;
@@ -65,7 +65,7 @@ fn connect() -> Option<Client> {
         .unwrap_or_else(|error| panic!("{key_path}: {error}"));
     let identity = Identity::new(&chain, &key).unwrap();
     // ノードのアドレスは出さない
-    let node = Client::connect(&address, &identity, TIMEOUT)
+    let node = ClientConnection::connect(&address, &identity, TIMEOUT)
         .unwrap_or_else(|error| panic!("HEIKA_TEST_NODE につなげません: {error}"));
     Some(node)
 }

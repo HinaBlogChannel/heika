@@ -10,7 +10,7 @@ use clap::Subcommand;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
-use heika_p2p::Client;
+use heika_p2p::ClientConnection;
 use heika_packet::{NetworkNode, NodeRoles};
 use heika_tls::Identity;
 
@@ -151,7 +151,7 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 .map_err(|error| format!("{}: {error}", client_cert.display()))?;
             drop(key);
 
-            let mut seed = Client::connect(&connect, &identity, TIMEOUT)
+            let mut seed = ClientConnection::connect(&connect, &identity, TIMEOUT)
                 .map_err(|error| format!("{connect}: {error}"))?;
             let query = |error| format!("{connect}: {error}");
             let seed_info = seed.info().map_err(query)?;
@@ -312,7 +312,7 @@ fn measure(
 ) -> Result<(Measurement, Vec<NetworkNode>), String> {
     let started = Instant::now();
     let mut node =
-        Client::connect(address, identity, TIMEOUT).map_err(|error| error.to_string())?;
+        ClientConnection::connect(address, identity, TIMEOUT).map_err(|error| error.to_string())?;
     let connect = started.elapsed();
     let ca_key = ca_key(&node)?;
     let info = node.info().map_err(|error| error.to_string())?;
@@ -347,7 +347,7 @@ fn measure(
 }
 
 /// 相手が TLS で出した、CA の証明書の公開鍵。接続できたなら、チェーンは catapult の条件で確かめてある。
-fn ca_key(node: &Client) -> Result<PublicKey, String> {
+fn ca_key(node: &ClientConnection) -> Result<PublicKey, String> {
     let certificates = node.peer_certificates();
     let ca = certificates
         .get(1)

@@ -139,6 +139,10 @@ impl CertsDir {
             temporaries.push((temporary, target));
         }
         for (temporary, target) in temporaries {
+            // Windows では読み取り専用のファイルの上に名前を変えられないので、先に外す。
+            // 新しいファイルは元の権限を引き継いでいるので、名前を変えたあとはまた読み取り専用になる
+            #[cfg(windows)]
+            clear_readonly(&target).map_err(|error| CertsDirError::Write(target.clone(), error))?;
             fs::rename(&temporary, &target).map_err(|error| CertsDirError::Write(target, error))?;
         }
         // 名前の変更をディスクに残す。できない環境もあるので失敗は無視する
@@ -175,6 +179,17 @@ fn write_new(path: &Path, contents: &[u8], like: &Path) -> io::Result<()> {
     file.sync_all()?;
     // umask で絞られた分を元に戻す
     fs::set_permissions(path, permissions)
+}
+
+#[cfg(windows)]
+fn clear_readonly(path: &Path) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    if permissions.readonly() {
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
 }
 
 /// フォルダーの証明書を読めない、または置き換えられない理由。

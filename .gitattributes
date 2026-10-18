@@ -1,0 +1,6 @@
+# Windows の core.autocrlf でも、include_str! で埋め込むファイルやテストの期待値が CRLF にならないように、LF で取り出す
+* text=auto eol=lf
+
+# バイト列をそのまま比べるので、改行を変えない
+crates/heika-vectors/testdata/** -text
+apps/heika-gui/THIRD-PARTY-LICENSES -text

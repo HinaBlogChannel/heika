@@ -246,7 +246,9 @@ impl Terminal {
                 ));
             }
             length += read as usize;
-            if read == 0 || buffer[..length].contains(&u16::from(b'\n')) {
+            // ENABLE_PROCESSED_INPUT を切っていると、Enter は \r だけで \n は付かない
+            let line_end = |unit: &u16| *unit == u16::from(b'\r') || *unit == u16::from(b'\n');
+            if read == 0 || buffer[..length].iter().any(line_end) {
                 break;
             }
         }

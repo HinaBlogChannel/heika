@@ -37,6 +37,21 @@ impl From<&Block> for BlockStatistic {
     }
 }
 
+/// Nemesis だけのチェーンのスコア。catapult は Nemesis を処理したあとでスコアを 1 にする（`LocalNodeStateFileStorage`）
+pub const NEMESIS_CHAIN_SCORE: u128 = 1;
+
+/// ブロックのスコア。catapult の `CalculateScore`。前のブロックより時刻が後なら、難易度から経過秒数（ミリ秒を 1000 で
+/// 切り捨て）を引いたもの、そうでなければ 0。チェーンのスコアは、Nemesis のあとで 1（[`NEMESIS_CHAIN_SCORE`]）とし、
+/// そこにブロックのスコアを u128 で足したもの
+pub fn block_score(parent: &BlockStatistic, block: &BlockStatistic) -> u64 {
+    if block.timestamp <= parent.timestamp {
+        return 0;
+    }
+    block
+        .difficulty
+        .wrapping_sub((block.timestamp - parent.timestamp) / 1000)
+}
+
 /// 次のブロックの難易度。catapult の `CalculateDifficulty`。
 ///
 /// `previous` は直前のブロックを古い順に並べたもので、`maxDifficultyBlocks` 個まで（高さ1から数えて足りなければ、あるだけ）。
@@ -469,5 +484,16 @@ mod tests {
         assert_eq!(bytes[23], 2);
         assert!(U256::from(1).shl(1).greater_than_u64(1));
         assert!(!U256::from(5).greater_than_u64(5));
+    }
+
+    #[test]
+    fn scores_a_block_by_its_difficulty_minus_the_seconds_since_the_parent() {
+        let at = |timestamp, difficulty| BlockStatistic {
+            timestamp,
+            difficulty,
+        };
+        assert_eq!(block_score(&at(1_000, 7), &at(31_999, 100)), 100 - 30);
+        assert_eq!(block_score(&at(1_000, 7), &at(1_000, 100)), 0);
+        assert_eq!(block_score(&at(2_000, 7), &at(1_000, 100)), 0);
     }
 }

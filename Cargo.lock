@@ -516,6 +516,7 @@ dependencies = [
 name = "heika-p2p"
 version = "0.7.0"
 dependencies = [
+ "heika-block",
  "heika-packet",
  "heika-tls",
 ]

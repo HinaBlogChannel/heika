@@ -363,7 +363,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                     "変えたあとも、前のパスフレーズで開ける {} が残ります。消すと漏れたときの心配は減りますが、新しいパスフレーズを忘れたときに戻せなくなります",
                     backup.display()
                 );
-                terminal::confirm("Remove it? [y/N]: ")?
+                terminal::confirm("消しますか？ [y/N]: ")?
             };
             save(&path, &store, &next)?;
             outln!("パスフレーズを変えました: {}", path.display());
@@ -504,7 +504,7 @@ impl KeystoreArgs {
                 format!("{} を読めませんでした: {error}", path.display())
             }
         })?;
-        let passphrase = self.passphrase("Passphrase: ")?;
+        let passphrase = self.passphrase("パスフレーズ: ")?;
         let keystore = Keystore::open(passphrase.as_bytes(), &sealed)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok((path, passphrase, keystore))
@@ -522,13 +522,13 @@ impl KeystoreArgs {
 fn new_passphrase(file: Option<&Path>) -> Result<Zeroizing<String>, String> {
     let passphrase = match file {
         Some(path) => read_passphrase_file(path)?,
-        None => terminal::prompt_line("New passphrase: ")?,
+        None => terminal::prompt_line("新しいパスフレーズ: ")?,
     };
     if passphrase.is_empty() {
         return Err("パスフレーズを空にはできません".to_owned());
     }
     if file.is_none() {
-        let again = terminal::prompt_line("Repeat passphrase: ")?;
+        let again = terminal::prompt_line("もう一度: ")?;
         if *again != *passphrase {
             return Err("2回のパスフレーズが違います".to_owned());
         }
@@ -542,7 +542,7 @@ impl ExpertArgs {
         if !self.expert {
             return Ok(Zeroizing::new(String::new()));
         }
-        let passphrase = terminal::prompt_line("BIP39 passphrase (optional): ")?;
+        let passphrase = terminal::prompt_line("BIP39 のパスフレーズ（なければ Enter）: ")?;
         if !passphrase.is_empty() {
             eprintln!(
                 "注意: BIP39 のパスフレーズを使ったので、ニーモニックのアカウントは公式ウォレットでは開けない鍵になります"

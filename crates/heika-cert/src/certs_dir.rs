@@ -74,7 +74,7 @@ impl CertsDir {
     ///
     /// shoestring はフォルダーの中に決まったファイルしかないことを確かめるので、中には置かない。
     pub fn default_backup_dir(&self, now: SystemTime) -> io::Result<PathBuf> {
-        let path = fs::canonicalize(&self.path)?;
+        let path = canonicalize(&self.path)?;
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::other("フォルダーの名前がありません"))?
@@ -156,6 +156,24 @@ impl CertsDir {
             fs::read_to_string(&path).map_err(|error| CertsDirError::Read(path.clone(), error))?;
         Certificate::from_pem(&pem).map_err(|error| CertsDirError::Parse(path, error))
     }
+}
+
+/// `fs::canonicalize` と同じだが、Windows で `\\?\C:\…` の形になったものは、普通の形で書けるなら普通の形にする。
+fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    let path = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    if let Some(rest) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\")) {
+        // 普通の形で書けるのは、ドライブ文字から始まって MAX_PATH に収まるもの
+        let bytes = rest.as_bytes();
+        if bytes.len() < 260
+            && bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && &bytes[1..3] == br":\"
+        {
+            return Ok(PathBuf::from(rest));
+        }
+    }
+    Ok(path)
 }
 
 /// `source` を、権限ごと、新しいファイル `destination` にコピーする。
@@ -446,9 +464,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             backup,
-            fs::canonicalize(&parent.0)
+            canonicalize(&parent.0)
                 .unwrap()
                 .join("certificates.20261011T123456Z.bak")
         );
+        // Windows でも、人に見せる場所に \\?\ が付かない
+        assert!(!backup.to_string_lossy().starts_with(r"\\?\"));
     }
 }

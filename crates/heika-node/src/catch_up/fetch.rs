@@ -40,7 +40,7 @@ const RANGES_AHEAD_PER_PEER: usize = 8;
 const REPORT_EVERY: u64 = 500_000;
 
 /// `candidates` に並列につないでみて、答えたものを最大 `want` 個返す
-fn connect_any(
+pub(crate) fn connect_any(
     candidates: &[String],
     identity: &Identity,
     want: usize,

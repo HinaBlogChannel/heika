@@ -25,6 +25,7 @@ use heika_store_redb::{Db, DbError};
 use heika_tls::Identity;
 
 use fetch::Fetched;
+pub(crate) use fetch::connect_any;
 pub use fetch::{Discovered, Peer};
 
 use crate::driver::NodeError;

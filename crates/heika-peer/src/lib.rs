@@ -173,6 +173,13 @@ impl Peers {
                         },
                     );
                     self.actions.push(PeerAction::Ask { id, ask: Ask::Info });
+                    // 知っているノードが、つないでおきたい数に足りなければ、すぐ一覧も聞く
+                    if self.book.known() <= self.want {
+                        self.actions.push(PeerAction::Ask {
+                            id,
+                            ask: Ask::Peers,
+                        });
+                    }
                 }
             }
             PeerEvent::ConnectFailed { id, myself } => {
@@ -341,6 +348,28 @@ mod tests {
         peers.handle(PeerEvent::Tick, start, 1);
         assert!(peers.take_actions().is_empty());
         assert_eq!(peers.len(), 2);
+    }
+
+    #[test]
+    fn asks_for_a_list_at_once_when_it_knows_too_few() {
+        let start = Instant::now();
+        let mut peers = peers(&["seed:7900"], 4, start);
+        peers.handle(PeerEvent::Tick, start, 1);
+        let actions = peers.take_actions();
+        let [PeerAction::Connect { id, .. }] = actions[..] else {
+            panic!("{actions:?}")
+        };
+        peers.handle(PeerEvent::Connected { id }, start, 1);
+        assert_eq!(
+            peers.take_actions(),
+            [
+                PeerAction::Ask { id, ask: Ask::Info },
+                PeerAction::Ask {
+                    id,
+                    ask: Ask::Peers
+                }
+            ]
+        );
     }
 
     #[test]

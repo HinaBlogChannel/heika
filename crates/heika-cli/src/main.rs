@@ -56,6 +56,9 @@ enum Command {
     /// heika と依存のライセンスと、このバイナリのソース
     #[command(subcommand)]
     Legal(legal::LegalCommand),
+    /// 試験的な機能。コマンドの形も、設定の中身も、断りなく変わる
+    #[command(subcommand)]
+    Experimental(experimental::ExperimentalCommand),
 }
 
 #[derive(Subcommand)]
@@ -218,6 +221,7 @@ macro_rules! outln {
 mod account;
 mod cert;
 mod delegations;
+mod experimental;
 mod harvesting;
 mod json;
 mod legal;
@@ -235,6 +239,7 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Cert(command) => cert::run(command)?,
         Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
+        Command::Experimental(command) => experimental::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Wallet(command) => wallet::run(command)?,
         Command::Tx(command) => tx::run(command)?,

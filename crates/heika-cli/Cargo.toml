@@ -11,6 +11,7 @@ name = "heika"
 path = "src/main.rs"
 
 [dependencies]
+heika-node = { path = "../heika-node" }
 clap = { version = "4.6.7", features = ["derive"] }
 der = "0.8.2"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }

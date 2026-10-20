@@ -577,6 +577,8 @@ dependencies = [
  "heika-packet",
  "heika-peer",
  "heika-peer-protocol",
+ "heika-store-redb",
+ "heika-tls",
  "rayon",
  "serde",
  "serde_norway",

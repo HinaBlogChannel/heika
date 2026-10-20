@@ -4,3 +4,4 @@
 pub mod config;
 pub mod keys;
 pub mod peer_thread;
+pub mod serve;

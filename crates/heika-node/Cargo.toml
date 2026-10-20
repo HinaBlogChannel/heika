@@ -1,0 +1,11 @@
+[package]
+name = "heika-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のノードを組み立てて動かす。設定、ピアのスレッド、待ち受け、追いつく段階と先端の段階"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_norway = "0.9.42"

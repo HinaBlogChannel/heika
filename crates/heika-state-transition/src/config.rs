@@ -4,6 +4,9 @@
 //!
 //! 読むのはテキストから。ファイルから読む口（[`ChainConfig::load`]、[`load_network_parameters`]）は、ノードの
 //! `resources` フォルダーを読んで渡すだけ。
+//!
+//! メインネットとテストネットの [`ChainConfig`] は、ファイルなしで使えるように決め打ちでも持つ
+//! （[`ChainConfig::mainnet`]、[`ChainConfig::testnet`]）。`examples/builtin_config.rs` で、ファイルから作る。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -18,6 +21,9 @@ use heika_core::key::PublicKey;
 use heika_core::network::{ForkHeights, GenerationHashSeed, NetworkIdentifier, NetworkParameters};
 use heika_core::signature::Signature;
 use heika_transaction::NamespaceId;
+
+mod mainnet;
+mod testnet;
 
 const NETWORK_FILE: &str = "config-network.properties";
 const INFLATION_FILE: &str = "config-inflation.properties";
@@ -277,6 +283,16 @@ pub struct ChainConfig {
 }
 
 impl ChainConfig {
+    /// メインネットの、決め打ちの設定
+    pub fn mainnet() -> Self {
+        mainnet::config()
+    }
+
+    /// テストネットの、決め打ちの設定
+    pub fn testnet() -> Self {
+        testnet::config()
+    }
+
     /// ノードの `resources` フォルダーの3つのファイルから読む。
     pub fn load(resources: &Path) -> Result<Self, ConfigError> {
         Self::parse(
@@ -377,7 +393,12 @@ impl ChainConfig {
                         ConfigError(format!("国庫の再発行の署名が読めません: {signature}"))
                     })
                 })
-                .collect::<Result<_, _>>()?,
+                .collect::<Result<Vec<Signature>, _>>()
+                .map(|mut signatures| {
+                    // ファイルの順に依らないように並べる
+                    signatures.sort_unstable_by_key(|signature| signature.0);
+                    signatures
+                })?,
             treasury_reissuance_height: treasury,
             max_block_future_time: network.milliseconds(chain, "maxBlockFutureTime")?,
             max_transaction_lifetime: network.seconds(chain, "maxTransactionLifetime")? * 1000,
@@ -454,7 +475,11 @@ impl ChainConfig {
                                 ))
                             })
                     })
-                    .collect::<Result<_, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|mut addresses| {
+                        addresses.sort_unstable();
+                        addresses
+                    })?,
             },
         })
     }
@@ -484,6 +509,18 @@ impl ChainConfig {
             (height.saturating_sub(1)) / self.importance_grouping * self.importance_grouping;
         grouped.max(1)
     }
+}
+
+/// 決め打ちの設定に書く、16進のバイト列
+fn bytes<const N: usize>(text: &str) -> [u8; N] {
+    assert_eq!(text.len(), 2 * N, "決め打ちの16進の長さ");
+    std::array::from_fn(|index| {
+        u8::from_str_radix(&text[2 * index..2 * index + 2], 16).expect("決め打ちの16進")
+    })
+}
+
+fn address(text: &str) -> Address {
+    Address(bytes(text))
 }
 
 /// [`network_parameters`] を、ノードの `resources` フォルダーの `config-network.properties` から読む

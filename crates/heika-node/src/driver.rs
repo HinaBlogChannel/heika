@@ -87,7 +87,7 @@ impl<'a> Setup<'a> {
             spec,
             parameters,
             nemesis,
-            config: ChainConfig::load(&spec.network.resources)?,
+            config: chain_config(spec)?,
             identity: Arc::new(load_identity(&spec.certificates.directory)?),
             harvesters: Arc::new(read_harvesters(spec)?),
         })
@@ -408,8 +408,23 @@ fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, N
         NetworkType::Mainnet => &NetworkParameters::MAINNET,
         NetworkType::Testnet => &NetworkParameters::TESTNET,
         NetworkType::Custom => {
-            Box::leak(Box::new(load_network_parameters(&spec.network.resources)?))
+            let resources = spec
+                .network
+                .resources
+                .as_ref()
+                .ok_or("network.resources がありません")?;
+            Box::leak(Box::new(load_network_parameters(resources)?))
         }
+    })
+}
+
+/// `resources` があればそこから読み、なければメインネットとテストネットは決め打ちの設定を使う
+fn chain_config(spec: &NodeConfig) -> Result<ChainConfig, NodeError> {
+    Ok(match (&spec.network.resources, spec.network.network_type) {
+        (Some(resources), _) => ChainConfig::load(resources)?,
+        (None, NetworkType::Mainnet) => ChainConfig::mainnet(),
+        (None, NetworkType::Testnet) => ChainConfig::testnet(),
+        (None, NetworkType::Custom) => return Err("network.resources がありません".into()),
     })
 }
 

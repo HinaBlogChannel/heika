@@ -1,0 +1,13 @@
+[package]
+name = "heika-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のチェーンを追う中核（sans-IO）。ブロックと証明の確かめ、枝の取り替え、ハーベスト"
+
+[dependencies]
+heika-block = { path = "../heika-block" }
+heika-core = { path = "../heika-core", default-features = false }
+heika-state-transition = { path = "../heika-state-transition" }
+heika-transaction = { path = "../heika-transaction" }

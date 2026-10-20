@@ -494,6 +494,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-chain"
+version = "0.7.0"
+dependencies = [
+ "heika-block",
+ "heika-core",
+ "heika-state-transition",
+ "heika-transaction",
+]
+
+[[package]]
 name = "heika-cli"
 version = "0.7.0"
 dependencies = [

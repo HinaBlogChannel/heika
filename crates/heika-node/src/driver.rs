@@ -59,7 +59,10 @@ pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<
     let config = ChainConfig::load(&spec.network.resources)?;
     let identity = Arc::new(load_identity(&spec.certificates.directory)?);
     let harvesters = Arc::new(read_harvesters(spec)?);
-    let mut db = Db::open_with_cache(&spec.data_directory, spec.cache.database_megabytes << 20)?;
+    let mut db = Db::open_with_cache(
+        &spec.data_directory,
+        spec.storage.cache.database_megabytes << 20,
+    )?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     let now = Instant::now();
     let mut book = Book::load(known_peers(&db)?, now, unix_now());
@@ -69,13 +72,13 @@ pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<
     if db.meta(EXECUTOR_META)?.is_none() {
         seed_nemesis(&db, &mut book, &identity, &config, parameters, nemesis)?;
     }
-    let store = CachedStore::new(db, spec.cache.state_megabytes << 20);
+    let store = CachedStore::new(db, spec.storage.cache.state_megabytes << 20);
     let mut chain = now_or_never(Chain::new(
         &store,
         &SystemEnv,
         config,
         parameters,
-        spec.partial_state,
+        spec.storage.partial_state(),
     ))?;
     if let Some(keep) = keep(spec)? {
         chain.set_keep(keep);
@@ -242,18 +245,19 @@ fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, N
     })
 }
 
-/// 刈り込みの設定。なければ全部の高さの状態を残す
+/// 残し方（`storage.mode`）を、中核の刈り込みの設定にする。`archive` なら刈り込まない
 fn keep(spec: &NodeConfig) -> Result<Option<Keep>, NodeError> {
-    let Some(epochs) = spec.prune.keep_epochs else {
+    let retention = spec.storage.retention();
+    let (Some(state), Some(trie)) = (retention.state, retention.state_proofs) else {
         return Ok(None);
     };
-    if u64::from(epochs) < CHECKPOINT_EPOCHS {
-        return Err(format!("prune.keepEpochs は {CHECKPOINT_EPOCHS} 以上にしてください").into());
+    if u64::from(state.min(trie)) < CHECKPOINT_EPOCHS {
+        return Err(format!("残すエポックは {CHECKPOINT_EPOCHS} 以上にしてください").into());
     }
     Ok(Some(Keep {
-        state: epochs.into(),
-        trie: epochs.into(),
-        history: spec.prune.history,
+        state: state.into(),
+        trie: trie.into(),
+        history: retention.blocks_and_statements,
     }))
 }
 

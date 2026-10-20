@@ -131,7 +131,7 @@ impl Executor {
             if key.first() == Some(&hash_lock) {
                 executor.load_row(&key, Some(&value))?;
                 let id = <[u8; 32]>::try_from(&key[1..])
-                    .map_err(|_| ExecError::Invalid("ハッシュロックのキー".to_owned()))?;
+                    .map_err(|_| ExecError::Source("ハッシュロックのキー".to_owned()))?;
                 if !executor.hash_lock_pending(&id) {
                     // 期限の過ぎたものは、まだ読んでいないことにする
                     executor.hash_locks.forget(&id);
@@ -191,7 +191,7 @@ impl Executor {
                 TreeNode::decode_all(&bytes)
                     .ok()
                     .and_then(|nodes| nodes.into_iter().next())
-                    .ok_or_else(|| ExecError::Invalid("しまった木のノードが読めません".to_owned()))
+                    .ok_or_else(|| ExecError::Source("しまった木のノードが読めません".to_owned()))
             })
             .transpose()?;
         tree.load(position, node);

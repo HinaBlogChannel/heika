@@ -482,7 +482,7 @@ pub fn row_key(cache: SubCache, key: &[u8]) -> Vec<u8> {
 }
 
 fn corrupt(what: impl Into<String>) -> ExecError {
-    ExecError::Invalid(format!("しまった状態が読めません: {}", what.into()))
+    ExecError::Source(format!("しまった状態が読めません: {}", what.into()))
 }
 
 fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], ExecError> {

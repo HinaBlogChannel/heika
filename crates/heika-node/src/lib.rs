@@ -4,6 +4,7 @@
 pub mod catch_up;
 pub mod config;
 pub mod driver;
+pub mod identity;
 pub mod keys;
 pub mod peer_thread;
 pub mod serve;

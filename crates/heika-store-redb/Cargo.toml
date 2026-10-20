@@ -1,0 +1,17 @@
+[package]
+name = "heika-store-redb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のブロックと状態を redb にしまう。状態の読み口と、昔の高さの状態の問い合わせ"
+
+[dependencies]
+heika-core = { path = "../heika-core", default-features = false }
+heika-state-transition = { path = "../heika-state-transition" }
+libc = "0.2.190"
+rayon = "1.12.0"
+redb = "4.4.0"
+
+[dev-dependencies]
+heika-block = { path = "../heika-block" }

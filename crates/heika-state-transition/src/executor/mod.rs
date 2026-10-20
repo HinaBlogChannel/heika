@@ -60,17 +60,20 @@ use statement::StatementBuilder;
 /// 実行できなかったわけ。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ExecError {
-    /// まだ移していない
+    /// この実装が扱わないもの（知らない種類のトランザクション、扱わない設定）
     Unsupported(String),
-    /// チェーンにあるはずのないこと（残高が足りない、知らない ID など）。移し方が間違っている
+    /// ブロックが規則に合わない（残高が足りない、知らない ID、validator が弾いたなど）
     Invalid(String),
+    /// 状態の読み口（[`source::StateSource`]）から読めなかった。ブロックのせいではない
+    Source(String),
 }
 
 impl fmt::Display for ExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported(what) => write!(f, "まだ移していません: {what}"),
-            Self::Invalid(what) => write!(f, "合いません: {what}"),
+            Self::Unsupported(what) => write!(f, "扱いません: {what}"),
+            Self::Invalid(what) => write!(f, "規則に合いません: {what}"),
+            Self::Source(what) => write!(f, "状態を読めません: {what}"),
         }
     }
 }
@@ -589,12 +592,12 @@ impl Executor {
             let (cache, position) = crate::tree::parse_node_key(&key)
                 .filter(|(cache, _)| usize::from(*cache) < 9)
                 .ok_or_else(|| {
-                    ExecError::Invalid("しまった木のノードのキーが読めません".to_owned())
+                    ExecError::Source("しまった木のノードのキーが読めません".to_owned())
                 })?;
             let node = TreeNode::decode_all(&bytes)
                 .ok()
                 .and_then(|nodes| nodes.into_iter().next())
-                .ok_or_else(|| ExecError::Invalid("しまった木のノードが読めません".to_owned()))?;
+                .ok_or_else(|| ExecError::Source("しまった木のノードが読めません".to_owned()))?;
             grouped[usize::from(cache)].push((position, node));
         }
         for (tree, nodes) in self.trees.iter_mut().zip(grouped) {

@@ -35,6 +35,21 @@ pub fn read_private_key(path: &Path) -> Result<PrivateKey, KeyFileError> {
         .map_err(|what| KeyFileError(format!("鍵のファイル {} は{what}", path.display())))
 }
 
+/// `path` を、持ち主のほか（グループやほかの人）も読めるか。読めるなら、使う側が警告を出す（ssh と違い、止めはしない）。
+/// Unix のほかでは、いつも偽
+pub fn others_can_read(path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(std::fs::metadata(path)?.permissions().mode() & 0o044 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
 /// 鍵のファイルの中身を、形を見分けて読む。読めなければ、わけ（「〜」で始まる述語）を返す
 fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey, &'static str> {
     if bytes.len() == PRIVATE_KEY_DER_LENGTH && bytes.first() == Some(&0x30) {
@@ -71,5 +86,18 @@ mod tests {
         }
         assert!(parse_private_key(b"not a key").is_err());
         assert!(parse_private_key(&[0xFF; 48]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tells_whether_others_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("heika-node-key-{}", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        for (mode, expected) in [(0o600, false), (0o640, true), (0o604, true), (0o400, false)] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(others_can_read(&path).unwrap(), expected, "{mode:o}");
+        }
+        std::fs::remove_file(&path).unwrap();
     }
 }

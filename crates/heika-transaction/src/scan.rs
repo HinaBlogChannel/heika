@@ -162,7 +162,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use heika_core::key::PrivateKey;
-    use heika_core::signature::Signature;
 
     use super::*;
     use crate::{
@@ -175,14 +174,7 @@ mod tests {
     }
 
     fn transaction(body: Body) -> Transaction {
-        Transaction {
-            signature: Signature([0; 64]),
-            signer_public_key: key(1),
-            network: NetworkIdentifier::MAINNET,
-            fee: 0,
-            deadline: 0,
-            body,
-        }
+        Transaction::new(key(1), NetworkIdentifier::MAINNET, 0, 0, body)
     }
 
     fn transfer() -> Body {

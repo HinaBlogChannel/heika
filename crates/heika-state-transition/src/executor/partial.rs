@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 use heika_block::Block;
 use heika_core::address::Address;
+use heika_core::key::PublicKey;
 use heika_core::patricia::SubCache;
 use heika_transaction::{Body, EmbeddedTransaction, MetadataKey, MetadataType, Transaction};
 
@@ -20,6 +21,7 @@ use heika_core::patricia::TreeNode;
 use super::persist::row_key;
 use super::source::StateSource;
 use super::{ExecError, Executor, HashLockInfo};
+use crate::account::AccountType;
 use crate::config::ChainConfig;
 use crate::table::Table;
 use crate::tree::LazyTree;
@@ -226,6 +228,23 @@ impl Executor {
         }
         for (cache, position) in &wanted.nodes {
             self.load_node(source, SubCache::ALL[usize::from(*cache)], *position)?;
+        }
+        // リモートの鍵のアカウントなら、リンクしたメインアカウントも要る（ハーベストの資格、手数料、Importance）
+        let linked: BTreeSet<[u8; 24]> = wanted
+            .accounts
+            .iter()
+            .filter_map(|address| self.accounts.peek(address))
+            .filter(|account| account.account_type == AccountType::Remote)
+            .filter_map(|account| account.linked)
+            .map(|main| self.address_of(&PublicKey(main)))
+            .filter(|address| !self.accounts.is_loaded(address))
+            .collect();
+        if !linked.is_empty() {
+            let linked = Wanted {
+                accounts: linked,
+                ..Wanted::default()
+            };
+            loaded += self.load_wanted(source, &linked)?;
         }
         Ok(loaded)
     }
@@ -452,5 +471,45 @@ impl Executor {
         self.forget_node_changes();
         self.take_missed();
         Ok(())
+    }
+
+    /// 要るものだけを読む形のとき、ブロックをコミットしたあとで、読み込んだ大きい表と木のノードを手放す。次に
+    /// 要れば読み口から読む。ブロックをまたいで持っておくのは、読み口の側（[`super::source::CachedSource`]）。
+    /// 期限の来ていないハッシュロックは、期限を処理するときに読み直さずに表をたどるので持っておく。変えてまだ
+    /// しまっていないものも持っておく。手放した数
+    pub fn release_loaded(&mut self) -> usize {
+        if !self.is_partial() {
+            return 0;
+        }
+        let (dirty, unsaved) = (&self.dirty_accounts, &self.unsaved_accounts);
+        let mut released = self
+            .accounts
+            .release(|address| dirty.contains(address) || unsaved.contains(address));
+        let changed = |cache: SubCache, key: &[u8]| {
+            let row = row_key(cache, key);
+            self.dirty_rows.contains(&row) || self.unsaved_rows.contains(&row)
+        };
+        let height = self.height;
+        let pending: BTreeSet<[u8; 32]> = self
+            .hash_locks
+            .iter()
+            .filter(|(_, history)| history.iter().any(|lock| lock.end_height > height))
+            .map(|(key, _)| *key)
+            .collect();
+        released += self
+            .multisigs
+            .release(|key| changed(SubCache::Multisig, key));
+        released += self
+            .hash_locks
+            .release(|key| pending.contains(key) || changed(SubCache::HashLockInfo, key));
+        released += self
+            .metadata
+            .release(|key| changed(SubCache::Metadata, key));
+        for cache in PARTIAL {
+            if let Some(tree) = self.trees[cache.index()].as_lazy_mut() {
+                released += tree.evict(0);
+            }
+        }
+        released
     }
 }

@@ -91,6 +91,17 @@ impl<K: Ord + Copy, V> Table<K, V> {
         }
     }
 
+    /// 読み込んだものを、`keep` のほかは全部捨てる。全部をメモリに持つ表では何もしない。捨てた数
+    pub fn release(&mut self, keep: impl Fn(&K) -> bool) -> usize {
+        if self.complete {
+            return 0;
+        }
+        let before = self.rows.len() + self.absent.len();
+        self.rows.retain(|key, _| keep(key));
+        self.absent.retain(|key| keep(key));
+        before - self.rows.len() - self.absent.len()
+    }
+
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         if !self.rows.contains_key(key) {
             self.note(key);
@@ -178,5 +189,22 @@ mod tests {
         table.get_or_insert_with(2, || "b");
         assert!(table.take_missed().is_empty());
         assert_eq!(table.get(&2), Some(&"b"));
+    }
+
+    #[test]
+    fn releasing_keeps_only_what_is_asked() {
+        let mut table: Table<u8, u8> = Table::partial();
+        for key in 1..=3 {
+            table.load(key, Some(key));
+        }
+        table.load(4, None);
+        assert_eq!(table.release(|key| *key == 2), 3);
+        assert!(table.is_loaded(&2));
+        assert!(!table.is_loaded(&1));
+        assert!(!table.is_loaded(&4));
+        let mut complete: Table<u8, u8> = Table::complete();
+        complete.insert(1, 1);
+        assert_eq!(complete.release(|_| false), 0);
+        assert_eq!(complete.get(&1), Some(&1));
     }
 }

@@ -9,7 +9,8 @@
 //! ```
 //!
 //! `HEIKA_TEST_REPLAY_TO` を渡すと、その高さで止める。要るものだけを読む形の当て直しは、
-//! `HEIKA_TEST_PARTIAL_FROM`（既定 100000）までを全部メモリに持つ形で当て、そこから切り替える。
+//! `HEIKA_TEST_PARTIAL_FROM`（既定 100000）までを全部メモリに持つ形で当て、そこから切り替える。切り替えたあとは、
+//! 読み口を `HEIKA_TEST_CACHE_MB`（既定 64）のキャッシュで包み、ブロックごとに読み込んだものを手放す。
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -20,7 +21,7 @@ use heika_block::Block;
 use heika_core::network::NetworkParameters;
 use heika_core::patricia::SubCache;
 use heika_state_transition::config::ChainConfig;
-use heika_state_transition::executor::source::StateSource;
+use heika_state_transition::executor::source::{CachedSource, StateSource};
 use heika_state_transition::executor::{ExecError, Executor, is_partial_row};
 
 /// 読み足すのを繰り返す回数の上限
@@ -33,20 +34,35 @@ struct Memory {
     nodes: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
+/// 当てたブロックの、変わった行とノード（`None` は消えた）
+type Changes = (
+    Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    Vec<(Vec<u8>, Option<Vec<u8>>)>,
+);
+
+fn take_changes(executor: &mut Executor) -> Changes {
+    let changes = executor.take_changes();
+    let rows = changes
+        .puts
+        .into_iter()
+        .map(|(key, value)| (key, Some(value)))
+        .chain(changes.deletes.into_iter().map(|key| (key, None)))
+        .collect();
+    (rows, executor.take_node_changes())
+}
+
 impl Memory {
-    /// 当てたブロックの、変わった行とノードを書く
-    fn commit(&mut self, executor: &mut Executor) {
-        let changes = executor.take_changes();
-        for (key, value) in changes.puts {
-            self.rows.insert(key, value);
+    fn commit(&mut self, (rows, nodes): &Changes) {
+        for (key, value) in rows {
+            match value {
+                Some(value) => self.rows.insert(key.clone(), value.clone()),
+                None => self.rows.remove(key),
+            };
         }
-        for key in changes.deletes {
-            self.rows.remove(&key);
-        }
-        for (key, node) in executor.take_node_changes() {
+        for (key, node) in nodes {
             match node {
-                Some(node) => self.nodes.insert(key, node),
-                None => self.nodes.remove(&key),
+                Some(node) => self.nodes.insert(key.clone(), node.clone()),
+                None => self.nodes.remove(key),
             };
         }
     }
@@ -184,7 +200,7 @@ fn replays_mainnet_blocks_reading_only_what_it_needs() {
             .apply(&block)
             .unwrap_or_else(|error| panic!("高さ {} を当てられません: {error}", block.height));
         check(&mut executor, &block);
-        memory.commit(&mut executor);
+        memory.commit(&take_changes(&mut executor));
         if block.height == from {
             break;
         }
@@ -212,14 +228,18 @@ fn replays_mainnet_blocks_reading_only_what_it_needs() {
     )
     .expect("要るものだけを読む形に戻せません");
     executor.restore_trees(nodes).expect("木を戻せません");
+    let cache_mb = height_from_env("HEIKA_TEST_CACHE_MB", 64) as usize;
+    let mut source = CachedSource::new(memory, cache_mb << 20);
     executor
-        .load_tree_roots(&memory)
+        .load_tree_roots(&source)
         .expect("木の根を読めません");
     eprintln!(
         "高さ {from} から要るものだけを読みます（{:.0} 秒）",
         started.elapsed().as_secs_f64()
     );
     let mut retried = 0;
+    // 読み足したもの（アカウント、マルチシグ、ハッシュロック、メタデータ、木のノード）
+    let mut missed_kinds = [0; 5];
     let mut last = from;
     for block in blocks {
         let height = block.height;
@@ -227,7 +247,7 @@ fn replays_mainnet_blocks_reading_only_what_it_needs() {
             break;
         }
         executor
-            .load_wanted(&memory, &executor.wanted_for(&block))
+            .load_wanted(&source, &executor.wanted_for(&block))
             .expect("読めません");
         let mut retries = 0;
         loop {
@@ -238,25 +258,42 @@ fn replays_mainnet_blocks_reading_only_what_it_needs() {
                 applied.unwrap_or_else(|error| panic!("高さ {height} を当てられません: {error}"));
                 break;
             }
+            for (count, kind) in missed_kinds.iter_mut().zip([
+                missed.accounts.len(),
+                missed.multisigs.len(),
+                missed.hash_locks.len(),
+                missed.metadata.len(),
+                missed.nodes.len(),
+            ]) {
+                *count += kind;
+            }
             retries += 1;
             assert!(
                 retries <= MAX_RETRIES,
                 "高さ {height} で読み足しが終わりません"
             );
             executor
-                .undo_attempt(&memory, &meta, &block)
+                .undo_attempt(&source, &meta, &block)
                 .expect("戻せません");
-            executor.load_wanted(&memory, &missed).expect("読めません");
+            executor.load_wanted(&source, &missed).expect("読めません");
         }
         retried += usize::from(retries > 0);
         check(&mut executor, &block);
-        memory.commit(&mut executor);
+        let (rows, nodes) = take_changes(&mut executor);
+        source.inner_mut().commit(&(rows.clone(), nodes.clone()));
+        source.record(rows, nodes);
+        executor.release_loaded();
         meta = executor.encode_meta();
         last = height;
     }
     assert!(last > from, "切り替えたあとのブロックがありません");
+    let stats = source.stats();
     eprintln!(
-        "高さ {last} まで合いました（読み足して当て直したブロック {retried}、{:.0} 秒）",
+        "高さ {last} まで合いました（読み足して当て直したブロック {retried}、読み足したもの {missed_kinds:?}、キャッシュ {} MB で {} 件、当たり {}、外れ {}、{:.0} 秒）",
+        stats.bytes >> 20,
+        stats.entries,
+        stats.hits,
+        stats.misses,
         started.elapsed().as_secs_f64()
     );
 }

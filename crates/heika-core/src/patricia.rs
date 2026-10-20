@@ -184,6 +184,34 @@ impl TreeNode {
         }
         Ok(nodes)
     }
+
+    /// [`TreeNode::decode_all`] の形の1つのノードにする。経路のニブルが奇数なら、最後のバイトの下位は0
+    pub fn encode(&self) -> Vec<u8> {
+        let (marker, path) = match self {
+            Self::Leaf { path, .. } => (0xFF, path),
+            Self::Branch { path, .. } => (0x00, path),
+        };
+        let mut out = vec![marker, path.len() as u8];
+        out.extend(
+            path.chunks(2)
+                .map(|pair| (pair[0] << 4) | pair.get(1).copied().unwrap_or(0)),
+        );
+        match self {
+            Self::Leaf { value, .. } => out.extend_from_slice(&value.0),
+            Self::Branch { links, .. } => {
+                let mask = links
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, link)| link.is_some())
+                    .fold(0u16, |mask, (index, _)| mask | (1 << index));
+                out.extend_from_slice(&mask.to_le_bytes());
+                for link in links.iter().flatten() {
+                    out.extend_from_slice(&link.0);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// ハッシュに使う経路の符号化。catapult の `UpdateEncodedKey`。
@@ -453,6 +481,14 @@ mod tests {
             expected.extend_from_slice(if index == 2 { &[5; 32] } else { &[0; 32] });
         }
         assert_eq!(branch.hash(), sha3(&[&expected]));
+    }
+
+    #[test]
+    fn encoded_nodes_read_back() {
+        let (root, leaf_a, leaf_b) = tree();
+        let nodes = vec![root, leaf_a, leaf_b];
+        let bytes: Vec<u8> = nodes.iter().flat_map(TreeNode::encode).collect();
+        assert_eq!(TreeNode::decode_all(&bytes), Ok(nodes));
     }
 
     #[test]

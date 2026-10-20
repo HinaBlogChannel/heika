@@ -257,6 +257,78 @@ pub fn verify_proof(
     Ok(header)
 }
 
+/// 投票のメッセージ1つ。catapult の `FinalizationMessage`。ノードどうしが確定の前に配り合うもので、証明は
+/// これを段階と高さとハッシュごとにまとめたもの
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizationMessage {
+    pub round: FinalizationRound,
+    pub is_prevote: bool,
+    /// 最初のハッシュのブロックの高さ
+    pub height: u64,
+    /// 高さ `height` から続くブロックのハッシュ
+    pub hashes: Vec<Hash256>,
+    signature: [u8; SIGNATURE_SIZE],
+}
+
+impl FinalizationMessage {
+    /// バイト列から読む。署名は確かめない（[`FinalizationMessage::verify_signature`]）
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProofError> {
+        let malformed = |what: &str| ProofError::Malformed(what.to_owned());
+        if bytes.len() < MESSAGE_HEADER_SIZE + 24 {
+            return Err(malformed("メッセージの長さ"));
+        }
+        let size = u32_at(bytes, 0) as usize;
+        let version = u32_at(bytes, MESSAGE_HEADER_SIZE);
+        let hashes_count = u32_at(bytes, MESSAGE_HEADER_SIZE + 4) as usize;
+        if size != bytes.len() || size != MESSAGE_HEADER_SIZE + 24 + hashes_count * 32 {
+            return Err(malformed("メッセージの大きさ"));
+        }
+        if version != 1 {
+            return Err(malformed("メッセージの版"));
+        }
+        let point_stage = u32_at(bytes, MESSAGE_HEADER_SIZE + 12);
+        let is_prevote = point_stage & 1 == 0;
+        let hashes_at = MESSAGE_HEADER_SIZE + 24;
+        Ok(Self {
+            round: FinalizationRound {
+                epoch: u32_at(bytes, MESSAGE_HEADER_SIZE + 8),
+                point: point_stage >> 1,
+            },
+            is_prevote,
+            height: u64::from_le_bytes(
+                bytes[MESSAGE_HEADER_SIZE + 16..hashes_at]
+                    .try_into()
+                    .expect("8 bytes"),
+            ),
+            hashes: bytes[hashes_at..]
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .map(|hash| Hash256(*hash))
+                .collect(),
+            signature: bytes[8..MESSAGE_HEADER_SIZE].try_into().expect("signature"),
+        })
+    }
+
+    /// 投票の鍵（BM ツリーの根の公開鍵）。[`VotingSet`] の鍵と同じもの
+    pub fn root_key(&self) -> [u8; 32] {
+        self.signature[..32].try_into().expect("32 bytes")
+    }
+
+    /// 根の鍵がこのエポックの下の鍵に、下の鍵がメッセージに署名しているか
+    pub fn verify_signature(&self) -> bool {
+        let hashes: Vec<u8> = self.hashes.iter().flat_map(|hash| hash.0).collect();
+        let message = Message {
+            round: self.round,
+            is_prevote: self.is_prevote,
+            height: self.height,
+            hashes: &hashes,
+            signature: &self.signature,
+        };
+        message.verify_signature(&message.signed_part())
+    }
+}
+
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
 }
@@ -635,6 +707,38 @@ mod tests {
             &voting_set(voters, &[40, 30, 30]),
             &PARAMETERS,
         )
+    }
+
+    #[test]
+    fn reads_and_verifies_a_single_message() {
+        let voter = Voter::new(1);
+        let hashes: Vec<u8> = (10..=12).flat_map(|at| block_hash(at, 0).0).collect();
+        let signed = signed_part(ROUND, false, 10, &hashes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&((MESSAGE_HEADER_SIZE + signed.len()) as u32).to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&voter.sign(ROUND, &signed));
+        bytes.extend_from_slice(&signed);
+        let message = FinalizationMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(message.round, ROUND);
+        assert!(!message.is_prevote);
+        assert_eq!(message.height, 10);
+        assert_eq!(
+            message.hashes,
+            (10..=12).map(|at| block_hash(at, 0)).collect::<Vec<_>>()
+        );
+        assert_eq!(message.root_key(), voter.key());
+        assert!(message.verify_signature());
+
+        // 署名したところを変えると通らない。大きさが合わなければ読まない
+        let mut changed = bytes.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        assert!(
+            !FinalizationMessage::from_bytes(&changed)
+                .unwrap()
+                .verify_signature()
+        );
+        assert!(FinalizationMessage::from_bytes(&bytes[..bytes.len() - 32]).is_err());
     }
 
     #[test]

@@ -5170,6 +5170,7 @@ Apache License 2.0
 - itertools 0.14.0
 - jni 0.21.1
 - js-sys 0.3.106
+- libappindicator 0.9.0
 - lock_api 0.4.14
 - log 0.4.34
 - markup5ever 0.39.0
@@ -5207,6 +5208,7 @@ Apache License 2.0
 - tao-macros 0.1.4
 - tendril 0.5.1
 - toml_datetime 0.6.3
+- tray-icon 0.25.1
 - typed-builder-macro 0.23.2
 - typed-builder 0.23.2
 - unicode-segmentation 1.13.3
@@ -7841,6 +7843,7 @@ Apache License 2.0
 - jni-macros 0.22.4
 - jni-sys-macros 0.4.1
 - jni 0.22.4
+- libappindicator-sys 0.9.0
 - libc 0.2.190
 - manyhow-macros 0.14.1
 - miniz_oxide 0.8.9
@@ -8844,6 +8847,25 @@ SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
 OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+================================================================================
+ISC License
+
+- libloading 0.7.4
+
+Copyright © 2015, Simonas Kazlauskas
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without
+fee is hereby granted, provided that the above copyright notice and this permission notice appear
+in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
 
 
 ================================================================================

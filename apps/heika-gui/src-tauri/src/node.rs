@@ -143,6 +143,14 @@ impl Node {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 子が動いているか（止めている途中も含む）
+    pub fn is_running(&self) -> bool {
+        self.running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
     /// 子に止まってもらい、止まるのを待つ。アプリを閉じるときにも呼ぶ
     pub fn stop_and_wait(&self) {
         let running = self

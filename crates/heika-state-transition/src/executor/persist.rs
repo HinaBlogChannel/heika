@@ -267,7 +267,7 @@ impl Executor {
     }
 
     /// 巻き戻した高さ c に、メモリの状態を戻す。`rows` は c より上で変わった行の c のときの値
-    /// （[`crate::db::Db::changes_above`]。巻き戻す前に読む）、`checkpoint` は c のチェックポイント。
+    /// （保存の `changes_above` で、巻き戻す前に読む）、`checkpoint` は c のチェックポイント。
     /// 木のノードの変化は捨てる（DB の木のノードは巻き戻しで戻っている）。二度入れを弾くハッシュは空になるので、
     /// 呼ぶ側が直前のブロックから [`Executor::remember_transactions`] で覚え直す。
     /// 戻したあとで、根が c のブロックの StateHash と合うかを確かめること

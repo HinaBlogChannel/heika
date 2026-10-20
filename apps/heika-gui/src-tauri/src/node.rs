@@ -1,29 +1,39 @@
-//! ノード（試験的）。デスクトップだけ。
+//! ノード（試験的）。デスクトップと Android。
 //!
-//! ノードはウォレットとは別のプロセスで動かす。鍵を持つウォレットと、外とやりとりするノードを分けるため。
-//! 別の実行ファイルは配らずに、このアプリの実行ファイルを `--node <設定ファイル>` で起動し直す
-//! （[`run_child_if_asked`]）。子は標準入力が閉じたら、今のブロックを書き終えてから止まる。親が落ちても
-//! 標準入力は閉じるので、子だけが残ることはない。
+//! デスクトップでは、ノードはウォレットとは別のプロセスで動かす。鍵を持つウォレットと、外とやりとりする
+//! ノードを分けるため。別の実行ファイルは配らずに、このアプリの実行ファイルを `--node <設定ファイル>` で
+//! 起動し直す（[`run_child_if_asked`]）。子は標準入力が閉じたら、今のブロックを書き終えてから止まる。親が
+//! 落ちても標準入力は閉じるので、子だけが残ることはない。
+//!
+//! Android のアプリは実行ファイルではない（Java から読み込まれるライブラリ）ので、起動し直せない。ノードは
+//! アプリのプロセスの中のスレッドで動かし、そのあいだはフォアグラウンドサービス（tauri-plugin-heika-node-service）
+//! でプロセスが止められないようにして、通知に様子を出す。
 //!
 //! 設定ファイル（YAML）は使う人には見せずに、ここで書く。ネットワークとシードは、設定した REST の
 //! `/node/info`（そのノードを最初のつなぎ先にする）と `/node/peers`（つながらなければ代わりに使う）から決める。
 //! ノードの鍵と証明書は、最初に起動したときに作って使い続ける。待ち受けるのは、この PC の中（127.0.0.1:7900）だけ。
 //!
-//! 子の出力は、管ではなく設定ファイルの隣の `node.log` に書かせ、親はそれを読んで進み具合を出す。管にすると、
-//! 親が落ちたときに子が書けなくなって（EPIPE）、止める合図より先に落ちてしまう。
+//! ノードの出力は、設定ファイルの隣の `node.log` に書かせ、それを読んで進み具合を出す。デスクトップで管に
+//! すると、親が落ちたときに子が書けなくなって（EPIPE）、止める合図より先に落ちてしまう。Android では、
+//! プロセスの標準出力と標準エラー出力を、そのファイルに向け直す。
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+#[cfg(desktop)]
+use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+#[cfg(desktop)]
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::rest;
 
 /// 子として起動するときの引数
+#[cfg(desktop)]
 const NODE_ARGUMENT: &str = "--node";
 /// 待ち受けるアドレス。変えたいときは、書いた設定ファイルを手で直す（起動のたびに書き直さない）
 const LISTEN: &str = "127.0.0.1:7900";
@@ -31,6 +41,7 @@ const LISTEN: &str = "127.0.0.1:7900";
 const NAME: &str = "heika";
 
 /// `--node <設定ファイル>` で起動されたなら、ノードとして動いて真を返す。標準入力が閉じたら止める
+#[cfg(desktop)]
 pub fn run_child_if_asked() -> bool {
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(NODE_ARGUMENT.as_ref()) {
@@ -124,16 +135,35 @@ pub enum State {
 }
 
 /// 動かしている子
+#[cfg(desktop)]
 struct Running {
     child: Child,
     /// 閉じると子が止まる
     stdin: ChildStdin,
 }
 
+/// 動かしているスレッド
+#[cfg(target_os = "android")]
+struct Running {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// 通知（Android のフォアグラウンドサービス）に伝えること
+pub enum Notice {
+    Start(String),
+    Update(String),
+    Stop,
+}
+
+/// 通知を出すもの。デスクトップでは置かない
+type Notifier = Box<dyn Fn(Notice) + Send + Sync>;
+
 #[derive(Default)]
 pub struct Node {
     status: Arc<Mutex<Status>>,
     running: Mutex<Option<Running>>,
+    notifier: Mutex<Option<Notifier>>,
 }
 
 impl Node {
@@ -151,20 +181,49 @@ impl Node {
             .is_some()
     }
 
-    /// 子に止まってもらい、止まるのを待つ。アプリを閉じるときにも呼ぶ
+    /// 様子を通知に出すものを置く（Android）
+    #[cfg_attr(desktop, allow(dead_code))]
+    pub fn set_notifier(&self, notifier: Notifier) {
+        *self
+            .notifier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(notifier);
+    }
+
+    fn notify(&self, notice: Notice) {
+        if let Some(notifier) = &*self
+            .notifier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            notifier(notice);
+        }
+    }
+
+    /// ノードに止まってもらい、止まるのを待つ。アプリを閉じるときにも呼ぶ
     pub fn stop_and_wait(&self) {
         let running = self
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        let Some(Running { mut child, stdin }) = running else {
+        let Some(running) = running else {
             return;
         };
         self.status().state = State::Stopping;
-        drop(stdin);
-        let _ = child.wait();
+        #[cfg(desktop)]
+        {
+            let Running { mut child, stdin } = running;
+            drop(stdin);
+            let _ = child.wait();
+        }
+        #[cfg(target_os = "android")]
+        {
+            running.stop.store(true, Ordering::Relaxed);
+            let _ = running.thread.join();
+        }
         self.status().state = State::Stopped;
+        self.notify(Notice::Stop);
     }
 }
 
@@ -362,6 +421,7 @@ fn manifest(
 }
 
 /// 自分をノードとして起動し、出す行を読んで様子を覚える
+#[cfg(desktop)]
 fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let log_path = manifest.with_file_name("node.log");
@@ -390,47 +450,12 @@ fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
         .running
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Running { child, stdin });
-    // 子の書いた行を、子が止まるまで追って読む
-    let reader = File::open(&log_path).map_err(|error| error.to_string())?;
-    let status = Arc::clone(&node.status);
-    let followed = Arc::clone(node);
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                // 書きかけの行は、続きが来るまで待つ
-                Ok(read) if read > 0 && line.ends_with('\n') => {
-                    let mut status = status
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    read_line(&mut status, line.trim_end());
-                }
-                Ok(read) => {
-                    if read > 0 {
-                        // 読みかけた分は捨てずに、次に読む位置を戻す
-                        let _ = reader.seek_relative(-(read as i64));
-                    }
-                    let stopped = followed
-                        .running
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .is_none();
-                    if stopped {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                Err(_) => return,
-            }
-        }
-    });
+    follow_log(node, &log_path)?;
     // 子が自分で止まった（エラーなど）ら、止まったことにする
     let watched = Arc::clone(node);
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(1));
             let mut running = watched
                 .running
                 .lock()
@@ -450,6 +475,127 @@ fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// ノードをこのプロセスの中のスレッドで動かし、フォアグラウンドサービスを始める
+#[cfg(target_os = "android")]
+fn spawn(node: &Arc<Node>, manifest_path: &Path) -> Result<(), String> {
+    let manifest =
+        heika_node::config::Manifest::load(manifest_path).map_err(|error| error.to_string())?;
+    let log_path = manifest_path.with_file_name("node.log");
+    let log = File::create(&log_path)
+        .map_err(|error| format!("{} を作れません: {error}", log_path.display()))?;
+    redirect_output(&log)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    node.status().state = State::CatchingUp;
+    node.notify(Notice::Start("起動しています".to_owned()));
+    {
+        // スレッドがすぐ終わっても、覚える前に「止まった」を書かれないように、覚え終えるまで握っておく
+        let mut running = node
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let finished = Arc::clone(node);
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let result = heika_node::driver::run(&manifest, &|| stopping.load(Ordering::Relaxed));
+            if let Err(error) = &result {
+                eprintln!("ノードが止まりました: {error}");
+            }
+            // 止める合図で止まったなら、待っている stop_and_wait が後始末をする
+            let ours = finished
+                .running
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .is_some();
+            if ours {
+                let mut status = finished.status();
+                status.state = State::Stopped;
+                status.error = result.err().map(|error| error.to_string());
+                drop(status);
+                finished.notify(Notice::Stop);
+            }
+        });
+        *running = Some(Running { stop, thread });
+    }
+    follow_log(node, &log_path)
+}
+
+/// このプロセスの標準出力と標準エラー出力を `log` に向け直す。ノードは println! で様子を書くので
+#[cfg(target_os = "android")]
+fn redirect_output(log: &File) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let _ = std::io::stdout().flush();
+    for target in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: 開いているファイルの記述子を、標準出力と標準エラー出力の番号に複製するだけ
+        if unsafe { libc::dup2(log.as_raw_fd(), target) } < 0 {
+            return Err(format!(
+                "ノードの出力をファイルに向けられません: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// ノードの書いた行を、ノードが止まるまで追って読み、様子を覚える。通知も、ときどき変える
+fn follow_log(node: &Arc<Node>, log_path: &Path) -> Result<(), String> {
+    /// 通知を変える間隔の下限
+    const NOTIFY_EVERY: Duration = Duration::from_secs(5);
+    let reader = File::open(log_path).map_err(|error| error.to_string())?;
+    let followed = Arc::clone(node);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        let mut notified = Instant::now();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                // 書きかけの行は、続きが来るまで待つ
+                Ok(read) if read > 0 && line.ends_with('\n') => {
+                    let notice = {
+                        let mut status = followed.status();
+                        read_line(&mut status, line.trim_end());
+                        notice_text(&status)
+                    };
+                    if notified.elapsed() >= NOTIFY_EVERY
+                        && let Some(text) = notice
+                    {
+                        notified = Instant::now();
+                        followed.notify(Notice::Update(text));
+                    }
+                }
+                Ok(read) => {
+                    if read > 0 {
+                        // 読みかけた分は捨てずに、次に読む位置を戻す
+                        let _ = reader.seek_relative(-(read as i64));
+                    }
+                    if !followed.is_running() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 通知に出す、今の様子
+fn notice_text(status: &Status) -> Option<String> {
+    match status.state {
+        State::CatchingUp => status.height.zip(status.target).map(|(height, target)| {
+            format!("確定したところまで追いかけています（高さ {height} / {target}）")
+        }),
+        State::Following => Some(match status.height {
+            Some(height) => format!("最新を追っています（高さ {height} まで追いつきました）"),
+            None => "最新を追っています".to_owned(),
+        }),
+        _ => None,
+    }
 }
 
 /// 子の1行から、様子を読み取る

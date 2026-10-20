@@ -1,0 +1,16 @@
+[package]
+name = "tauri-plugin-heika-node-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+# Tauri のプラグインの決まり。build.rs が Android のライブラリをアプリに組み込むのに使う
+links = "tauri-plugin-heika-node-service"
+
+[dependencies]
+tauri = { version = "2.12.4", features = [] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7.2", features = ["build"] }

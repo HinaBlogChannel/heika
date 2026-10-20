@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
 mod clipboard;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 pub mod node;
 mod rest;
 mod send;
@@ -400,6 +400,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
         tray::show(app);
     }));
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_heika_node_service::init());
     builder
         .setup(|app| {
             #[cfg(target_os = "linux")]
@@ -408,13 +410,34 @@ pub fn run() {
             // 設定は、キーストアと同じフォルダーに置く
             app.manage(rest::Config::load(path.with_file_name("settings.json")));
             app.manage(send::Outbox::default());
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             {
-                app.manage(std::sync::Arc::new(node::Node::default()));
+                let node = std::sync::Arc::new(node::Node::default());
+                // Android では、ノードが動いているあいだ、フォアグラウンドサービスの通知に様子を出す
+                #[cfg(target_os = "android")]
+                {
+                    use tauri_plugin_heika_node_service::NodeServiceExt;
+                    let handle = app.handle().clone();
+                    node.set_notifier(Box::new(move |notice| {
+                        let service = handle.node_service();
+                        let result = match notice {
+                            node::Notice::Start(text) => service.start(&text),
+                            node::Notice::Update(text) => service.update(&text),
+                            node::Notice::Stop => service.stop(),
+                        };
+                        if let Err(error) = result {
+                            eprintln!("ノードの通知を出せません: {error}");
+                        }
+                    }));
+                }
+                app.manage(node);
                 // DB は大きくなるので、Windows では同期されうる Roaming でなく Local に置く
                 app.manage(node::Paths {
                     root: app.path().app_local_data_dir()?.join("node"),
                 });
+            }
+            #[cfg(desktop)]
+            {
                 let tray = match tray::build(app) {
                     Ok(()) => true,
                     Err(error) => {
@@ -450,11 +473,11 @@ pub fn run() {
             send::prepare_send,
             send::send,
             send::outbox,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             node::node_status,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             node::node_start,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             node::node_stop,
         ])
         .on_window_event(|_window, _event| {

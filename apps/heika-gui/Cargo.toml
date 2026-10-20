@@ -8,7 +8,7 @@ publish = false
 # heika のワークスペースには入れず、依存と Cargo.lock を分ける。
 # このパッケージは WebView に出す画面（trunk で wasm にする）で、src-tauri がアプリの本体
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "plugins/heika-node-service"]
 
 # 版は heika のワークスペースと同じにする。CI で確かめる
 [workspace.package]

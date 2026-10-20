@@ -306,8 +306,8 @@ struct Ctx {
     accounts: RwSignal<Vec<AccountView>>,
     settings: RwSignal<Settings>,
     form: SendForm,
-    /// デスクトップで動いている（ノードを出す）
-    desktop: RwSignal<bool>,
+    /// ノードを動かせる（デスクトップと Android。iOS は裏で動かし続けられないので出さない）
+    has_node: RwSignal<bool>,
 }
 
 impl Ctx {
@@ -389,7 +389,7 @@ fn App() -> impl IntoView {
         accounts: RwSignal::new(Vec::new()),
         settings: RwSignal::new(Settings::default()),
         form: SendForm::new(),
-        desktop: RwSignal::new(false),
+        has_node: RwSignal::new(false),
     };
     ctx.restart();
 
@@ -397,8 +397,7 @@ fn App() -> impl IntoView {
     spawn_local(async move {
         let result: Result<About, String> = call("about", NoArgs {}).await;
         if let Ok(about) = &result {
-            ctx.desktop
-                .set(!matches!(about.os.as_str(), "android" | "ios"));
+            ctx.has_node.set(about.os != "ios");
         }
         set_about.set(Some(result));
     });
@@ -478,7 +477,7 @@ fn menu(ctx: Ctx) -> impl IntoView {
             {item(Screen::Home, "ホーム", ICON_HOME)}
             {item(Screen::Send, "送る", ICON_SEND)}
             {item(Screen::Accounts, "アカウント", ICON_ACCOUNTS)}
-            {move || ctx.desktop.get().then(|| item(Screen::Node, "ノード", ICON_NODE))}
+            {move || ctx.has_node.get().then(|| item(Screen::Node, "ノード", ICON_NODE))}
             {item(Screen::Settings, "設定", ICON_SETTINGS)}
         </nav>
     }

@@ -69,6 +69,9 @@ pub struct Transaction {
     /// 期限。ネットワークのエポックからのミリ秒。
     pub deadline: u64,
     pub body: Body,
+    /// ヘッダーの2つの予約の部分。catapult は確かめず、署名にもハッシュにも入らないので、0 でなくてもブロックに
+    /// 入りうる。書き戻して同じバイト列になるように、読んだ値を持っておく
+    reserved: [u32; 2],
 }
 
 /// 種類ごとの本体。catbuffer の `schemas/symbol` にある25種類。
@@ -168,6 +171,7 @@ impl Transaction {
             fee,
             deadline,
             body,
+            reserved: [0; 2],
         }
     }
 
@@ -199,10 +203,10 @@ impl Transaction {
         let size = HEADER_SIZE + body.len();
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(&(size as u32).to_le_bytes());
-        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&self.reserved[0].to_le_bytes());
         bytes.extend_from_slice(&self.signature.0);
         bytes.extend_from_slice(&self.signer_public_key.0);
-        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&self.reserved[1].to_le_bytes());
         bytes.push(self.body.version());
         bytes.push(self.network.0);
         bytes.extend_from_slice(&self.body.transaction_type().to_le_bytes());
@@ -213,6 +217,7 @@ impl Transaction {
     }
 
     /// バイト列から読む。書き戻したときに同じバイト列にならないものは弾く。
+    /// catapult が確かめない予約の部分は、0 でなくても読み、その値のまま書き戻す。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() < HEADER_SIZE {
             return Err(DecodeError::TooShort);
@@ -225,14 +230,10 @@ impl Transaction {
                 actual: bytes.len(),
             });
         }
-        if reader.u32() != 0 {
-            return Err(DecodeError::NonZeroReserved);
-        }
+        let reserved_before = reader.u32();
         let signature = Signature(reader.array());
         let signer_public_key = PublicKey(reader.array());
-        if reader.u32() != 0 {
-            return Err(DecodeError::NonZeroReserved);
-        }
+        let reserved = [reserved_before, reader.u32()];
         let version = reader.u8();
         let network = NetworkIdentifier(reader.u8());
         let transaction_type = reader.u16();
@@ -246,6 +247,7 @@ impl Transaction {
             fee,
             deadline,
             body,
+            reserved,
         })
     }
 
@@ -954,13 +956,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_zero_reserved_bytes() {
+    fn keeps_non_zero_reserved_bytes_like_catapult() {
+        let seed = seed();
+        let mut signed = vrf_key_link();
+        signed.sign(&private_key(), &seed).unwrap();
         for offset in [4, 104] {
-            let mut bytes = vrf_key_link().to_bytes();
+            let mut bytes = signed.to_bytes();
             bytes[offset] = 1;
+            let transaction = Transaction::from_bytes(&bytes).unwrap();
+            assert_eq!(transaction.to_bytes(), bytes, "offset {offset}");
+            // 署名にもハッシュにも入らない
+            assert!(transaction.verify(&seed), "offset {offset}");
             assert_eq!(
-                Transaction::from_bytes(&bytes),
-                Err(DecodeError::NonZeroReserved),
+                transaction.hash(&seed),
+                signed.hash(&seed),
                 "offset {offset}"
             );
         }

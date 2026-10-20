@@ -27,6 +27,11 @@ pub struct EmbeddedTransaction {
     pub signer_public_key: PublicKey,
     pub network: NetworkIdentifier,
     pub body: Body,
+    /// ヘッダーの2つの予約の部分と、後ろの8バイト境界までの埋め草（リトルエンディアン）。catapult は確かめないので、
+    /// 0 でなくてもブロックに入りうる。予約の部分は中のトランザクションのハッシュに、埋め草はバージョン 1 の誤った
+    /// 葉の求め方に入るので、読んだ値を持っておく
+    reserved: [u32; 2],
+    padding: u64,
 }
 
 impl EmbeddedTransaction {
@@ -35,6 +40,8 @@ impl EmbeddedTransaction {
             signer_public_key,
             network,
             body,
+            reserved: [0; 2],
+            padding: 0,
         }
     }
 
@@ -45,9 +52,9 @@ impl EmbeddedTransaction {
         let size = EMBEDDED_HEADER_SIZE + body.len();
         let mut bytes = Vec::with_capacity(size);
         bytes.extend_from_slice(&(size as u32).to_le_bytes());
-        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&self.reserved[0].to_le_bytes());
         bytes.extend_from_slice(&self.signer_public_key.0);
-        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&self.reserved[1].to_le_bytes());
         bytes.push(self.body.version());
         bytes.push(self.network.0);
         bytes.extend_from_slice(&self.body.transaction_type().to_le_bytes());
@@ -64,21 +71,24 @@ impl EmbeddedTransaction {
     /// 埋め草まで含めた SHA3-256。バージョン 1 で許されていた、誤った葉の求め方
     /// （`HashEmbeddedTransactionWithPadding`）。
     fn padded_hash(&self) -> Hash256 {
-        let mut bytes = self.to_bytes();
-        bytes.resize(bytes.len().next_multiple_of(8), 0);
-        Hash256(Sha3_256::digest(bytes).into())
+        Hash256(Sha3_256::digest(self.padded_bytes()).into())
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+    /// 8バイト境界までの埋め草を含めたバイト列。アグリゲートの中には、この形で並ぶ。
+    fn padded_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.to_bytes();
+        let padding = bytes.len().next_multiple_of(8) - bytes.len();
+        bytes.extend_from_slice(&self.padding.to_le_bytes()[..padding]);
+        bytes
+    }
+
+    /// `padding` は後ろの埋め草
+    fn decode(bytes: &[u8], padding: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader(bytes);
         reader.u32();
-        if reader.u32() != 0 {
-            return Err(DecodeError::NonZeroReserved);
-        }
+        let reserved_before = reader.u32();
         let signer_public_key = PublicKey(reader.array());
-        if reader.u32() != 0 {
-            return Err(DecodeError::NonZeroReserved);
-        }
+        let reserved = [reserved_before, reader.u32()];
         let version = reader.u8();
         let network = NetworkIdentifier(reader.u8());
         let transaction_type = reader.u16();
@@ -86,10 +96,14 @@ impl EmbeddedTransaction {
             return Err(DecodeError::NestedAggregate);
         }
         let body = Body::decode(transaction_type, version, reader.0)?;
+        let mut padding_bytes = [0; 8];
+        padding_bytes[..padding.len()].copy_from_slice(padding);
         Ok(Self {
             signer_public_key,
             network,
             body,
+            reserved,
+            padding: u64::from_le_bytes(padding_bytes),
         })
     }
 }
@@ -223,6 +237,9 @@ pub struct Aggregate {
     version: AggregateVersion,
     transactions: Vec<EmbeddedTransaction>,
     cosignatures: Vec<Cosignature>,
+    /// 中のトランザクションの長さの後ろの予約の部分。catapult は確かめず、署名にもハッシュにも入らないので、
+    /// 読んだ値を持っておく
+    reserved: u32,
 }
 
 impl Aggregate {
@@ -238,6 +255,7 @@ impl Aggregate {
             version: AggregateVersion::V3,
             transactions,
             cosignatures: Vec::new(),
+            reserved: 0,
         })
     }
 
@@ -308,12 +326,11 @@ impl Aggregate {
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         let mut payload = Vec::new();
         for transaction in &self.transactions {
-            payload.extend_from_slice(&transaction.to_bytes());
-            payload.resize(payload.len().next_multiple_of(8), 0);
+            payload.extend_from_slice(&transaction.padded_bytes());
         }
         out.extend_from_slice(&self.transactions_hash().0);
         out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&self.reserved.to_le_bytes());
         out.extend_from_slice(&payload);
         for cosignature in &self.cosignatures {
             out.extend_from_slice(&[0; 8]);
@@ -333,9 +350,7 @@ impl Aggregate {
         let mut reader = Reader(bytes);
         let transactions_hash = Hash256(reader.array());
         let payload_size = reader.u32() as usize;
-        if reader.u32() != 0 {
-            return Err(DecodeError::NonZeroReserved);
-        }
+        let reserved = reader.u32();
         if !payload_size.is_multiple_of(8)
             || payload_size > reader.0.len()
             || !(reader.0.len() - payload_size).is_multiple_of(COSIGNATURE_SIZE)
@@ -354,10 +369,10 @@ impl Aggregate {
             if size < EMBEDDED_HEADER_SIZE || padded_size > payload.len() {
                 return Err(DecodeError::InvalidBodySize);
             }
-            if payload[size..padded_size].iter().any(|&byte| byte != 0) {
-                return Err(DecodeError::NonZeroReserved);
-            }
-            transactions.push(EmbeddedTransaction::decode(&payload[..size])?);
+            transactions.push(EmbeddedTransaction::decode(
+                &payload[..size],
+                &payload[size..padded_size],
+            )?);
             payload = &payload[padded_size..];
         }
 
@@ -384,6 +399,7 @@ impl Aggregate {
             version,
             transactions,
             cosignatures,
+            reserved,
         };
         if aggregate.transactions_hash() != transactions_hash {
             return Err(DecodeError::TransactionsHashMismatch);
@@ -630,14 +646,57 @@ mod tests {
     }
 
     #[test]
+    fn keeps_reserved_bytes_and_padding_like_catapult() {
+        let seed = seed();
+        let mut signed = aggregate(vec![link(1)]);
+        signed.sign(&signer(), &seed).unwrap();
+        let bytes = signed.to_bytes();
+        // アグリゲートの予約の部分と、中のトランザクションの後ろの埋め草は、署名にもハッシュにも入らない
+        for offset in [BODY + 36, bytes.len() - 1] {
+            let mut changed = bytes.clone();
+            changed[offset] = 1;
+            let transaction = Transaction::from_bytes(&changed).unwrap();
+            assert_eq!(transaction.to_bytes(), changed, "offset {offset}");
+            assert!(transaction.verify(&seed), "offset {offset}");
+            assert_eq!(
+                transaction.hash(&seed),
+                signed.hash(&seed),
+                "offset {offset}"
+            );
+        }
+        // 中のトランザクションの予約の部分は、中のトランザクションのハッシュに入る
+        for (index, offset) in [BODY + 40 + 4, BODY + 40 + 40].into_iter().enumerate() {
+            let mut changed = bytes.clone();
+            changed[offset] = 1;
+            assert_eq!(
+                Transaction::from_bytes(&changed),
+                Err(DecodeError::TransactionsHashMismatch),
+                "offset {offset}"
+            );
+            let mut inner = link(1);
+            inner.reserved[index] = 1;
+            let mut resigned = aggregate(vec![inner]);
+            resigned.sign(&signer(), &seed).unwrap();
+            let resigned_bytes = resigned.to_bytes();
+            assert_eq!(resigned_bytes[offset], 1, "offset {offset}");
+            let transaction = Transaction::from_bytes(&resigned_bytes).unwrap();
+            assert_eq!(transaction.to_bytes(), resigned_bytes, "offset {offset}");
+            assert!(transaction.verify(&seed), "offset {offset}");
+            assert_ne!(
+                body(&mut resigned).transactions_hash(),
+                body(&mut signed.clone()).transactions_hash(),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_malformed_aggregates() {
         let bytes = aggregate(vec![link(1)]).to_bytes();
         let mut nested = bytes.clone();
         nested[BODY + 40 + 46..BODY + 40 + 48].copy_from_slice(&0x4141u16.to_le_bytes());
         let mut wrong_hash = bytes.clone();
         wrong_hash[BODY] ^= 1;
-        let mut padding = bytes.clone();
-        *padding.last_mut().unwrap() = 1;
         let mut unaligned = bytes.clone();
         unaligned[BODY + 32] = 81;
         let mut short_embedded = bytes.clone();
@@ -653,7 +712,6 @@ mod tests {
                 wrong_hash,
                 DecodeError::TransactionsHashMismatch,
             ),
-            ("padding", padding, DecodeError::NonZeroReserved),
             ("unaligned", unaligned, DecodeError::InvalidBodySize),
             (
                 "short embedded",

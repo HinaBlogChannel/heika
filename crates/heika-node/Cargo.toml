@@ -14,6 +14,7 @@ heika-core = { path = "../heika-core" }
 heika-packet = { path = "../heika-packet" }
 heika-peer = { path = "../heika-peer" }
 heika-peer-protocol = { path = "../heika-peer-protocol" }
+heika-state-transition = { path = "../heika-state-transition" }
 heika-store-redb = { path = "../heika-store-redb" }
 heika-tls = { path = "../heika-tls" }
 serde = { version = "1.0.229", features = ["derive"] }

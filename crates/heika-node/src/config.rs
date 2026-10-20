@@ -6,15 +6,21 @@
 //! metadata:
 //!   name: symbol-testnet-1
 //! spec:
-//!   network: testnet
-//!   resources: /path/to/resources
+//!   network:
+//!     type: testnet
+//!     resources: /path/to/resources
 //!   dataDirectory: /path/to/data
 //!   certificates:
 //!     directory: /path/to/certificates
 //!   listen:
 //!     address: 0.0.0.0:7900
 //!     publicHost: symbol-testnet-1.example
+//!   harvesters:
+//!     - signer: /path/to/signer.key
+//!       vrf: /path/to/vrf.key
 //! ```
+//!
+//! `v1alpha1` のあいだは、Kubernetes の alpha の版と同じく、中身が変わってもよい。読むときは、知らない版を弾くだけ。
 //!
 //! 知らないキーは弾く（綴りの間違いが、黙って既定値にならないように）。秘密（鍵）は書かず、置き場所だけを書く。
 
@@ -23,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// 読める設定の版。中身を変えたら上げる
+/// 読める設定の版
 pub const API_VERSION: &str = "heika.hinablogchannel.github.io/v1alpha1";
 
 /// ノードの設定ファイル
@@ -45,10 +51,10 @@ pub struct Metadata {
     pub name: String,
 }
 
-/// ネットワーク
+/// ネットワークの種類
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum Network {
+pub enum NetworkType {
     Mainnet,
     Testnet,
     /// 決め打ちのパラメーターのないネットワーク（プライベートなネットワークなど）。`resources` の
@@ -56,16 +62,24 @@ pub enum Network {
     Custom,
 }
 
+/// どのネットワークに入るか（`spec.network`）
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Network {
+    #[serde(rename = "type")]
+    pub network_type: NetworkType,
+    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）
+    pub resources: PathBuf,
+    /// `type: custom` のときだけ。Nemesis のブロックのハッシュ（16進）
+    #[serde(default)]
+    pub nemesis_hash: Option<String>,
+}
+
 /// ノードの設定（`spec`）
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeConfig {
     pub network: Network,
-    /// `network: custom` のときの、Nemesis のブロックのハッシュ（16進）
-    #[serde(default)]
-    pub nemesis_hash: Option<String>,
-    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）
-    pub resources: PathBuf,
     /// ブロックと状態をしまうフォルダー
     pub data_directory: PathBuf,
     /// TLS の証明書の鎖と鍵のあるフォルダー
@@ -89,9 +103,9 @@ pub struct NodeConfig {
     /// 接続を受ける。なければ、自分からつなぐだけ
     #[serde(default)]
     pub listen: Option<Listen>,
-    /// ハーベストする。なければしない
+    /// ハーベストする鍵の組。空ならしない
     #[serde(default)]
-    pub harvest: Option<Harvest>,
+    pub harvesters: Vec<Harvester>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -147,11 +161,14 @@ pub struct Listen {
     pub friendly_name: Option<String>,
 }
 
+/// ハーベストする鍵の組。鍵そのものは書かず、鍵のファイルの場所を書く。ファイルは他人に読めないこと
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Harvest {
-    /// 1行に「署名の秘密鍵 VRF の秘密鍵」（16進、リモートならリモートの鍵）を書いたファイル。他人に読めないこと
-    pub keys_file: PathBuf,
+pub struct Harvester {
+    /// ブロックに署名する鍵（メインアカウントか、リンクしたリモートの鍵）のファイル
+    pub signer: PathBuf,
+    /// リンクした VRF の鍵のファイル
+    pub vrf: PathBuf,
 }
 
 fn default_peers() -> usize {
@@ -203,10 +220,19 @@ impl Manifest {
                 manifest.kind
             )));
         }
-        if manifest.spec.network == Network::Custom && manifest.spec.nemesis_hash.is_none() {
-            return Err(ConfigError(
-                "network: custom には nemesisHash が要ります".to_owned(),
-            ));
+        let network = &manifest.spec.network;
+        match (network.network_type, &network.nemesis_hash) {
+            (NetworkType::Custom, None) => {
+                return Err(ConfigError(
+                    "network.type: custom には network.nemesisHash が要ります".to_owned(),
+                ));
+            }
+            (NetworkType::Mainnet | NetworkType::Testnet, Some(_)) => {
+                return Err(ConfigError(
+                    "network.nemesisHash は network.type: custom のときだけ書きます".to_owned(),
+                ));
+            }
+            _ => {}
         }
         Ok(manifest)
     }
@@ -225,8 +251,9 @@ mod tests {
     const MINIMAL: &str = "apiVersion: heika.hinablogchannel.github.io/v1alpha1
 kind: Peer
 spec:
-  network: testnet
-  resources: /resources
+  network:
+    type: testnet
+    resources: /resources
   dataDirectory: /data
   certificates:
     directory: /certificates
@@ -236,13 +263,14 @@ spec:
     fn reads_a_minimal_manifest_with_defaults() {
         let manifest = Manifest::parse(MINIMAL).unwrap();
         let spec = manifest.spec;
-        assert_eq!(spec.network, Network::Testnet);
+        assert_eq!(spec.network.network_type, NetworkType::Testnet);
+        assert_eq!(spec.network.resources, PathBuf::from("/resources"));
         assert_eq!(spec.peers, 8);
         assert!(spec.partial_state);
         assert_eq!(spec.prune, Prune::default());
         assert_eq!(spec.cache, Cache::default());
         assert_eq!(spec.listen, None);
-        assert_eq!(spec.harvest, None);
+        assert!(spec.harvesters.is_empty());
         assert_eq!(manifest.metadata.name, "");
     }
 
@@ -252,8 +280,11 @@ spec:
             "{MINIMAL}  listen:
     address: 0.0.0.0:7900
     publicHost: node.example
-  harvest:
-    keysFile: /keys
+  harvesters:
+    - signer: /signer
+      vrf: /vrf
+    - signer: /remote
+      vrf: /vrf2
   prune:
     keepEpochs: 2
     history: true
@@ -265,7 +296,9 @@ spec:
         assert_eq!(listen.address, "0.0.0.0:7900");
         assert_eq!(listen.public_host.as_deref(), Some("node.example"));
         assert_eq!(listen.friendly_name, None);
-        assert_eq!(spec.harvest.unwrap().keys_file, PathBuf::from("/keys"));
+        assert_eq!(spec.harvesters.len(), 2);
+        assert_eq!(spec.harvesters[1].signer, PathBuf::from("/remote"));
+        assert_eq!(spec.harvesters[1].vrf, PathBuf::from("/vrf2"));
         assert_eq!(spec.prune.keep_epochs, Some(2));
         assert!(spec.prune.history);
         assert_eq!(spec.peers, 4);
@@ -277,9 +310,15 @@ spec:
         assert!(Manifest::parse(&format!("{MINIMAL}  peerz: 4\n")).is_err());
         assert!(Manifest::parse(&MINIMAL.replace("v1alpha1", "v1alpha2")).is_err());
         assert!(Manifest::parse(&MINIMAL.replace("kind: Peer", "kind: Node")).is_err());
-        // custom には Nemesis のハッシュが要る
-        let custom = MINIMAL.replace("network: testnet", "network: custom");
+        // custom には Nemesis のハッシュが要り、ほかのネットワークには書かない
+        let custom = MINIMAL.replace("type: testnet", "type: custom");
         assert!(Manifest::parse(&custom).is_err());
-        assert!(Manifest::parse(&format!("{custom}  nemesisHash: AB\n")).is_ok());
+        let with_hash = custom.replace(
+            "resources: /resources",
+            "resources: /resources\n    nemesisHash: AB",
+        );
+        assert!(Manifest::parse(&with_hash).is_ok());
+        let testnet_with_hash = with_hash.replace("type: custom", "type: testnet");
+        assert!(Manifest::parse(&testnet_with_hash).is_err());
     }
 }

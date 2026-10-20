@@ -575,7 +575,9 @@ dependencies = [
 name = "heika-state-transition"
 version = "0.7.0"
 dependencies = [
+ "heika-block",
  "heika-core",
+ "heika-transaction",
  "rayon",
 ]
 

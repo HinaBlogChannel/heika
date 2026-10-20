@@ -1,0 +1,16 @@
+[package]
+name = "heika-state-transition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol の状態遷移。ブロックを当てて、状態の木と StateHash を求める"
+
+[features]
+default = ["parallel"]
+# 大きな木の根を、部分木に分けて並列に求める。ブラウザ（wasm）では外す
+parallel = ["dep:rayon"]
+
+[dependencies]
+heika-core = { path = "../heika-core", default-features = false }
+rayon = { version = "1.12.0", optional = true }

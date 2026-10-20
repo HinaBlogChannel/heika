@@ -49,11 +49,28 @@ pub fn encode(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, usize> {
 
 /// catapult の `ionet::PacketType` のうち使うもの。
 pub mod packet_type {
+    pub const PUSH_BLOCK: u32 = 3;
+    pub const PULL_BLOCK: u32 = 4;
     pub const CHAIN_STATISTICS: u32 = 5;
+    pub const BLOCK_HASHES: u32 = 7;
     pub const PULL_BLOCKS: u32 = 8;
+    pub const PUSH_TRANSACTIONS: u32 = 9;
     pub const PULL_TRANSACTIONS: u32 = 10;
+    pub const PUSH_PARTIAL_TRANSACTIONS: u32 = 0x100;
+    pub const PUSH_DETACHED_COSIGNATURES: u32 = 0x101;
+    pub const PULL_PARTIAL_TRANSACTION_INFOS: u32 = 0x102;
+    pub const NODE_DISCOVERY_PUSH_PING: u32 = 0x110;
     pub const NODE_DISCOVERY_PULL_PING: u32 = 0x111;
+    pub const NODE_DISCOVERY_PUSH_PEERS: u32 = 0x112;
     pub const NODE_DISCOVERY_PULL_PEERS: u32 = 0x113;
+    pub const TIME_SYNC_NETWORK_TIME: u32 = 0x120;
+    pub const PUSH_FINALIZATION_MESSAGES: u32 = 0x130;
+    pub const PULL_FINALIZATION_MESSAGES: u32 = 0x131;
+    pub const FINALIZATION_STATISTICS: u32 = 0x132;
+    pub const FINALIZATION_PROOF_AT_EPOCH: u32 = 0x133;
+    pub const FINALIZATION_PROOF_AT_HEIGHT: u32 = 0x134;
+    /// 証明の要求（`FINALIZATION_PROOF_AT_EPOCH`、`FINALIZATION_PROOF_AT_HEIGHT`）への応答は、この種類で来る
+    pub const PULL_FINALIZATION_PROOF: u32 = 0x135;
 }
 
 /// `Pull_Blocks` の要求の本体。`height` から最大 `num_blocks` 件、合計 `num_response_bytes` バイトまで
@@ -63,6 +80,50 @@ pub fn pull_blocks_request(height: u64, num_blocks: u32, num_response_bytes: u32
     request[8..12].copy_from_slice(&num_blocks.to_le_bytes());
     request[12..].copy_from_slice(&num_response_bytes.to_le_bytes());
     request
+}
+
+/// `Pull_Blocks` の要求。catapult の `PullBlocksRequest`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PullBlocksRequest {
+    pub height: u64,
+    pub num_blocks: u32,
+    pub num_response_bytes: u32,
+}
+
+impl PullBlocksRequest {
+    pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
+        let body: &[u8; 16] = fixed(body)?;
+        Ok(Self {
+            height: u64::from_le_bytes(body[..8].try_into().expect("8 bytes")),
+            num_blocks: u32::from_le_bytes(body[8..12].try_into().expect("4 bytes")),
+            num_response_bytes: u32::from_le_bytes(body[12..].try_into().expect("4 bytes")),
+        })
+    }
+}
+
+/// `Block_Hashes` の要求。catapult の `BlockHashesRequest`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHashesRequest {
+    pub height: u64,
+    pub num_hashes: u32,
+}
+
+impl BlockHashesRequest {
+    pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
+        let body: &[u8; 12] = fixed(body)?;
+        Ok(Self {
+            height: u64::from_le_bytes(body[..8].try_into().expect("8 bytes")),
+            num_hashes: u32::from_le_bytes(body[8..].try_into().expect("4 bytes")),
+        })
+    }
+}
+
+/// 長さの決まった本体として読む
+fn fixed<const N: usize>(body: &[u8]) -> Result<&[u8; N], DecodeError> {
+    body.try_into().map_err(|_| DecodeError::BodySize {
+        expected: N,
+        actual: body.len(),
+    })
 }
 
 /// `Pull_Transactions` の要求の本体。catapult の `TransactionsFilter`（Deadline、FeeMultiplier）に、短いハッシュが続く。
@@ -112,6 +173,59 @@ impl ChainStatistics {
             score: (u128::from(u64_at(16)) << 64) | u128::from(u64_at(24)),
         })
     }
+
+    pub fn encode(&self) -> [u8; Self::BODY_SIZE] {
+        let mut body = [0; Self::BODY_SIZE];
+        body[..8].copy_from_slice(&self.height.to_le_bytes());
+        body[8..16].copy_from_slice(&self.finalized_height.to_le_bytes());
+        body[16..24].copy_from_slice(&((self.score >> 64) as u64).to_le_bytes());
+        body[24..].copy_from_slice(&(self.score as u64).to_le_bytes());
+        body
+    }
+}
+
+/// `Time_Sync_Network_Time` の応答。相手のネットワーク時刻（Nemesis からのミリ秒）で、要求を受け取った時刻と
+/// 応答を送った時刻。catapult の `CommunicationTimestamps`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkTime {
+    pub receive: u64,
+    pub send: u64,
+}
+
+impl NetworkTime {
+    const BODY_SIZE: usize = 16;
+
+    pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
+        let body: &[u8; Self::BODY_SIZE] = body.try_into().map_err(|_| DecodeError::BodySize {
+            expected: Self::BODY_SIZE,
+            actual: body.len(),
+        })?;
+        let u64_at = |offset: usize| {
+            u64::from_le_bytes(body[offset..offset + 8].try_into().expect("8 bytes"))
+        };
+        // catapult では SendTimestamp、ReceiveTimestamp の順
+        Ok(Self {
+            send: u64_at(0),
+            receive: u64_at(8),
+        })
+    }
+
+    pub fn encode(&self) -> [u8; Self::BODY_SIZE] {
+        let mut body = [0; Self::BODY_SIZE];
+        body[..8].copy_from_slice(&self.send.to_le_bytes());
+        body[8..].copy_from_slice(&self.receive.to_le_bytes());
+        body
+    }
+
+    /// 相手の時計が、自分の時計よりどれだけ進んでいるか（ミリ秒）。`local_send` と `local_receive` は、自分の時計で
+    /// 要求を送った時刻と応答を受け取った時刻。往復にかかった時間の半分を行きの時間とみなす。catapult の
+    /// `TimeSynchronizationSample::timeOffsetToRemote`
+    pub fn offset(&self, local_send: u64, local_receive: u64) -> i64 {
+        let signed = |timestamp: u64| i64::try_from(timestamp).unwrap_or(i64::MAX);
+        let local = signed(local_receive) - signed(local_send);
+        let remote = signed(self.send) - signed(self.receive);
+        signed(self.receive) - signed(local_send) - (local - remote) / 2
+    }
 }
 
 /// catapult の `NodeVersion`。1バイトずつ上位から major.minor.revision.build。
@@ -131,6 +245,7 @@ pub struct NodeRoles(pub u32);
 
 impl NodeRoles {
     pub const PEER: Self = Self(0x01);
+    pub const VOTING: Self = Self(0x04);
 
     const NAMES: [(u32, &str); 5] = [
         (0x01, "Peer"),
@@ -252,6 +367,26 @@ impl NetworkNode {
         })
     }
 
+    /// エンティティ1件にする。host か friendly name が 255 バイトを超えるなら `None`
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        let host_size = u8::try_from(self.host.len()).ok()?;
+        let friendly_name_size = u8::try_from(self.friendly_name.len()).ok()?;
+        let size = Self::FIXED_SIZE + self.host.len() + self.friendly_name.len();
+        let mut entity = Vec::with_capacity(size);
+        entity.extend_from_slice(&(size as u32).to_le_bytes());
+        entity.extend_from_slice(&self.version.0.to_le_bytes());
+        entity.extend_from_slice(&self.identity_key.0);
+        entity.extend_from_slice(&self.network_generation_hash_seed.0);
+        entity.extend_from_slice(&self.roles.0.to_le_bytes());
+        entity.extend_from_slice(&self.port.to_le_bytes());
+        entity.push(self.network_identifier.0);
+        entity.push(host_size);
+        entity.push(friendly_name_size);
+        entity.extend_from_slice(self.host.as_bytes());
+        entity.extend_from_slice(self.friendly_name.as_bytes());
+        Some(entity)
+    }
+
     /// `Node_Discovery_Pull_Peers` の応答の本体（`NetworkNode` の並び）をデコードする。
     pub fn decode_list(body: &[u8]) -> Result<Vec<Self>, DecodeError> {
         split_size_prefixed(body)?
@@ -361,6 +496,60 @@ mod tests {
     }
 
     #[test]
+    fn encodes_a_network_node_as_catapult_does() {
+        let bytes = network_node(b"node.example", b"example");
+        assert_eq!(
+            NetworkNode::decode(&bytes).unwrap().encode().unwrap(),
+            bytes
+        );
+        let mut node = NetworkNode::decode(&bytes).unwrap();
+        node.host = "h".repeat(256);
+        assert_eq!(node.encode(), None);
+    }
+
+    #[test]
+    fn encodes_and_decodes_fixed_bodies() {
+        let statistics = ChainStatistics {
+            height: 1,
+            finalized_height: 2,
+            score: (3 << 64) | 4,
+        };
+        let body = statistics.encode();
+        assert_eq!(&body[16..24], &3u64.to_le_bytes());
+        assert_eq!(&body[24..], &4u64.to_le_bytes());
+        assert_eq!(ChainStatistics::decode(&body).unwrap(), statistics);
+        let time = NetworkTime {
+            receive: 5,
+            send: 6,
+        };
+        assert_eq!(&time.encode()[..8], &6u64.to_le_bytes());
+        assert_eq!(NetworkTime::decode(&time.encode()).unwrap(), time);
+        assert_eq!(
+            PullBlocksRequest::decode(&pull_blocks_request(7, 8, 9)).unwrap(),
+            PullBlocksRequest {
+                height: 7,
+                num_blocks: 8,
+                num_response_bytes: 9
+            }
+        );
+        let hashes = [&10u64.to_le_bytes()[..], &11u32.to_le_bytes()].concat();
+        assert_eq!(
+            BlockHashesRequest::decode(&hashes).unwrap(),
+            BlockHashesRequest {
+                height: 10,
+                num_hashes: 11
+            }
+        );
+        assert_eq!(
+            BlockHashesRequest::decode(&hashes[1..]),
+            Err(DecodeError::BodySize {
+                expected: 12,
+                actual: 11
+            })
+        );
+    }
+
+    #[test]
     fn decodes_a_list_of_network_nodes() {
         let body = [network_node(b"a", b""), network_node(b"", b"b")].concat();
         let nodes = NetworkNode::decode_list(&body).unwrap();
@@ -410,6 +599,31 @@ mod tests {
             })
         );
         assert!(ChainStatistics::decode(&body[..31]).is_err());
+    }
+
+    #[test]
+    fn decodes_network_time_and_computes_the_offset() {
+        let mut body = Vec::new();
+        for value in [5_020_u64, 5_000] {
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+        let time = NetworkTime::decode(&body).unwrap();
+        assert_eq!(
+            time,
+            NetworkTime {
+                receive: 5_000,
+                send: 5_020
+            }
+        );
+        assert!(NetworkTime::decode(&body[..15]).is_err());
+        // 往復 120 ミリ秒のうち、相手の中で 20 ミリ秒かかったので、行きは 50 ミリ秒。相手は 3 秒進んでいる
+        assert_eq!(time.offset(1_950, 2_070), 3_000);
+        // 遅れているときは負になる
+        let behind = NetworkTime {
+            receive: 1_000,
+            send: 1_000,
+        };
+        assert_eq!(behind.offset(1_950, 2_050), -1_000);
     }
 
     #[test]

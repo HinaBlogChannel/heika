@@ -8,25 +8,26 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use heika_block::Block;
 use heika_cert::certificate::Certificate;
 use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
-use heika_chain::store::{BlockWrite, ChainStore, EXECUTOR_META, now_or_never};
+use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::nemesis_hash;
 use heika_core::hash::Hash256;
 use heika_core::key::PrivateKey;
 use heika_core::network::NetworkParameters;
 use heika_packet::{NetworkNode, NodeRoles, NodeVersion};
-use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers};
+use heika_peer::book::{FIRST_TRIES, best};
+use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers, endpoint};
 use heika_peer_protocol::ClientConnection;
 use heika_state_transition::config::{ChainConfig, load_network_parameters};
-use heika_state_transition::executor::Executor;
+use heika_state_transition::executor::persist::height_of_meta;
 use heika_store_redb::Db;
 use heika_tls::{ConnectError, Identity};
 
+use crate::catch_up;
 use crate::config::{Manifest, NetworkType, NodeConfig};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
@@ -48,47 +49,201 @@ pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
 /// 設定 `manifest` のノードを、`stopping` が真になるまで先端の段階で動かす。DB が空なら、ピアから Nemesis を
 /// 取って始める
 pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<(), NodeError> {
-    let spec = &manifest.spec;
-    let parameters = network_parameters(spec)?;
-    let nemesis = match &spec.network.nemesis_hash {
-        Some(hash) => hash
-            .parse()
-            .map_err(|_| "network.nemesisHash が読めません")?,
-        None => nemesis_hash(parameters.identifier).ok_or("知らないネットワークです")?,
+    let setup = Setup::new(&manifest.spec)?;
+    loop {
+        catch_up_if_behind(&setup, stopping)?;
+        if stopping() {
+            return Ok(());
+        }
+        match follow(&setup, stopping)? {
+            Outcome::Stopped => return Ok(()),
+            Outcome::Behind { finalized } => {
+                println!("確定（高さ {finalized}）まで遅れているので、追いつく段階に戻ります");
+            }
+        }
+    }
+}
+
+/// 始めに一度だけ用意するもの
+struct Setup<'a> {
+    spec: &'a NodeConfig,
+    parameters: &'static NetworkParameters,
+    nemesis: Hash256,
+    config: ChainConfig,
+    identity: Arc<Identity>,
+    harvesters: Arc<Vec<(PrivateKey, PrivateKey)>>,
+}
+
+impl<'a> Setup<'a> {
+    fn new(spec: &'a NodeConfig) -> Result<Self, NodeError> {
+        let parameters = network_parameters(spec)?;
+        let nemesis = match &spec.network.nemesis_hash {
+            Some(hash) => hash
+                .parse()
+                .map_err(|_| "network.nemesisHash が読めません")?,
+            None => nemesis_hash(parameters.identifier).ok_or("知らないネットワークです")?,
+        };
+        Ok(Self {
+            spec,
+            parameters,
+            nemesis,
+            config: ChainConfig::load(&spec.network.resources)?,
+            identity: Arc::new(load_identity(&spec.certificates.directory)?),
+            harvesters: Arc::new(read_harvesters(spec)?),
+        })
+    }
+
+    /// 住所録（しまったものと seed）
+    fn book(&self, db: &Db) -> Result<Book, NodeError> {
+        let now = Instant::now();
+        let mut book = Book::load(known_peers(db)?, now, unix_now());
+        if let Some(seed) = &self.spec.seed {
+            book.insert(seed.clone(), now);
+        }
+        Ok(book)
+    }
+}
+
+/// どこにもつながらないときに、試し直すまで待つ
+const RETRY_UNREACHABLE: Duration = Duration::from_secs(60);
+/// 追いつく段階で、ブロックを取るピアとは別に、確定の証明を取るピアの数
+const PROOF_PEERS: usize = 4;
+
+/// 住所録のノードにつなぎ、実行した高さがピアの言う確定より低ければ（空の DB も）、追いつく段階で確定まで
+/// まとめて実行する。どこにもつながらなければ、落とさずに間を空けて試し直す
+fn catch_up_if_behind(
+    setup: &Setup<'_>,
+    stopping: &(dyn Fn() -> bool + Sync),
+) -> Result<(), NodeError> {
+    let spec = setup.spec;
+    let mut db = Db::open(&spec.data_directory)?;
+    db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
+    let executed = match db.meta(EXECUTOR_META)? {
+        Some(meta) => height_of_meta(&meta)?,
+        None => 0,
     };
-    let config = ChainConfig::load(&spec.network.resources)?;
-    let identity = Arc::new(load_identity(&spec.certificates.directory)?);
-    let harvesters = Arc::new(read_harvesters(spec)?);
+    let book = setup.book(&db)?;
+    let known: BTreeMap<String, KnownPeer> = book.records().into_iter().collect();
+    let mut addresses = best(&known, usize::MAX);
+    if let Some(seed) = &spec.seed
+        && !addresses.contains(seed)
+    {
+        addresses.push(seed.clone());
+    }
+    let mut peers = loop {
+        let peers = catch_up::connect_any(
+            &addresses[..addresses.len().min(FIRST_TRIES)],
+            &setup.identity,
+            spec.peers + PROOF_PEERS,
+            CONNECT_TIMEOUT,
+        );
+        if !peers.is_empty() {
+            break peers;
+        }
+        eprintln!(
+            "住所録のノードにつながりません。{} 秒おいて試し直します",
+            RETRY_UNREACHABLE.as_secs()
+        );
+        let until = Instant::now() + RETRY_UNREACHABLE;
+        while Instant::now() < until {
+            if stopping() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    };
+    let finalized = peers[0].connection.chain_statistics()?.finalized_height;
+    if executed > 0 && executed >= finalized {
+        println!(
+            "実行した高さ {executed} が確定（高さ {finalized}）に届いているので、追いつく段階は飛ばします"
+        );
+        return Ok(());
+    }
+    // 1つに一覧を聞いて、外したピアの代わりの候補にする
+    let own = *setup.identity.key();
+    if let Ok(nodes) = peers[0].connection.peers() {
+        for node in nodes {
+            let address = endpoint(&node.host, node.port);
+            if node.roles.contains(NodeRoles::PEER)
+                && !node.host.is_empty()
+                && node.identity_key != own
+                && !addresses.contains(&address)
+            {
+                addresses.push(address);
+            }
+        }
+    }
+    println!("追いつく段階に入ります（実行した高さ {executed}、確定 {finalized}）");
+    // 証明を取るピアは、ブロックを取るピアを1つは残して、後ろから分ける
+    let keep_for_blocks = peers.len().saturating_sub(PROOF_PEERS).max(1);
+    let proof_peers = peers
+        .split_off(keep_for_blocks)
+        .into_iter()
+        .map(|peer| peer.connection)
+        .collect();
+    let candidates = addresses
+        .iter()
+        .filter(|address| peers.iter().all(|peer| &peer.address != *address))
+        .cloned()
+        .collect();
+    let connect = || -> Result<ClientConnection, NodeError> {
+        addresses
+            .iter()
+            .find_map(|address| {
+                ClientConnection::connect(address, &setup.identity, CONNECT_TIMEOUT).ok()
+            })
+            .ok_or_else(|| "証明を取るノードにつながりません".into())
+    };
+    let context = catch_up::Context {
+        parameters: setup.parameters,
+        identity: &setup.identity,
+        nemesis: setup.nemesis,
+        stopping,
+        connect: &connect,
+    };
+    catch_up::execute(
+        &mut db,
+        setup.config.clone(),
+        &context,
+        catch_up::Source::Peers {
+            discovered: catch_up::Discovered { peers, candidates },
+            proof_peers,
+            finalized,
+        },
+        keep(spec)?,
+        catch_up::DEFAULT_SAVE_EVERY,
+        None,
+    )?;
+    Ok(())
+}
+
+/// 先端の段階。止める合図か、確定まで遅れて追いつく段階が要るまで続ける
+fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Outcome, NodeError> {
+    let spec = setup.spec;
+    let (parameters, identity) = (setup.parameters, &setup.identity);
     let mut db = Db::open_with_cache(
         &spec.data_directory,
         spec.storage.cache.database_megabytes << 20,
     )?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
-    let now = Instant::now();
-    let mut book = Book::load(known_peers(&db)?, now, unix_now());
-    if let Some(seed) = &spec.seed {
-        book.insert(seed.clone(), now);
-    }
-    if db.meta(EXECUTOR_META)?.is_none() {
-        seed_nemesis(&db, &mut book, &identity, &config, parameters, nemesis)?;
-    }
+    let book = setup.book(&db)?;
     let store = CachedStore::new(db, spec.storage.cache.state_megabytes << 20);
     let mut chain = now_or_never(Chain::new(
         &store,
         &SystemEnv,
-        config,
+        setup.config.clone(),
         parameters,
         spec.storage.partial_state(),
     ))?;
     if let Some(keep) = keep(spec)? {
         chain.set_keep(keep);
     }
-    chain.set_harvesters(harvesters);
+    chain.set_harvesters(Arc::clone(&setup.harvesters));
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
         .as_ref()
-        .map(|listen| local_node(&identity, listen, parameters))
+        .map(|listen| local_node(identity, listen, parameters))
         .transpose()?
         .map(Arc::new);
     let status = RwLock::new(chain.status());
@@ -102,7 +257,7 @@ pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
             let (status, reply, gate, done) = (&status, &reply, &gate, &done);
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
-            let server_config = Arc::new(heika_tls::server_config(&identity));
+            let server_config = Arc::new(heika_tls::server_config(identity));
             scope.spawn(move || {
                 let source = DbSource {
                     db,
@@ -196,7 +351,7 @@ pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<
                             PeerAction::Connect { id, address } => connect_in_background(
                                 id,
                                 address,
-                                Arc::clone(&identity),
+                                Arc::clone(identity),
                                 parameters,
                                 events.clone(),
                                 registrations.clone(),
@@ -226,13 +381,7 @@ pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<
         result
     })?;
     save_known(store.db(), &peers.book().records())?;
-    match outcome {
-        Outcome::Stopped => Ok(()),
-        Outcome::Behind { finalized } => Err(format!(
-            "確定（高さ {finalized}）まで遅れています。追いつく段階は、まだありません"
-        )
-        .into()),
-    }
+    Ok(outcome)
 }
 
 fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, NodeError> {
@@ -319,72 +468,6 @@ fn local_node(
     Ok(node.encode().ok_or(
         "listen.publicHost と listen.friendlyName は、それぞれ 255 バイトまでにしてください",
     )?)
-}
-
-/// 空の DB に、ピアから取った Nemesis を当てて書く。ハッシュが `nemesis` でなければ使わない
-fn seed_nemesis(
-    db: &Db,
-    book: &mut Book,
-    identity: &Identity,
-    config: &ChainConfig,
-    parameters: &NetworkParameters,
-    nemesis: Hash256,
-) -> Result<(), NodeError> {
-    let now = Instant::now();
-    let bytes = loop {
-        let address = book
-            .take(now)
-            .ok_or("Nemesis を取れるノードがありません（seed を書いてください）")?;
-        let pulled = ClientConnection::connect(&address, identity, CONNECT_TIMEOUT)
-            .map_err(|error| error.to_string())
-            .and_then(|mut connection| {
-                connection
-                    .pull_blocks(1, 1, 16 << 20)
-                    .map_err(|error| error.to_string())
-            });
-        match pulled.map(|mut blocks| blocks.pop()) {
-            Ok(Some(bytes)) => {
-                // 取り終えたら住所録に戻し、先端の段階でまたつなげるようにする
-                book.connected(&address, unix_now());
-                book.release(&address);
-                break bytes;
-            }
-            _ => book.failed(&address, now),
-        }
-    };
-    let block = Block::from_bytes(&bytes)?;
-    if block.hash() != nemesis {
-        return Err("ピアの Nemesis のハッシュが、このネットワークのものと違います".into());
-    }
-    let mut executor = Executor::new(
-        config.clone(),
-        parameters.identifier,
-        parameters.generation_hash_seed,
-    );
-    executor.apply(&block)?;
-    if executor.state_hash() != block.state_hash {
-        return Err("Nemesis の StateHash が合いません".into());
-    }
-    let statement = executor.take_statement();
-    let changes = executor.take_changes();
-    let state = changes
-        .puts
-        .into_iter()
-        .map(|(key, value)| (key, Some(value)))
-        .chain(changes.deletes.into_iter().map(|key| (key, None)))
-        .collect();
-    now_or_never(db.commit_block(BlockWrite {
-        height: 1,
-        hash: block.hash().0,
-        bytes: &bytes,
-        state,
-        nodes: executor.take_node_changes(),
-        statement: statement.to_bytes(),
-        voters: Some((2, executor.voting_set(2).encode())),
-        meta: executor.encode_meta(),
-    }))?;
-    println!("Nemesis から始めます");
-    Ok(())
 }
 
 /// 別のスレッドでつなぎに行く。つながったら命令の口を `registrations` に入れてから、`Connected` を入れる

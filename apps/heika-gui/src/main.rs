@@ -249,6 +249,8 @@ enum Screen {
     Home,
     Send,
     Accounts,
+    /// ノード（試験的）。デスクトップだけ
+    Node,
     Settings,
     /// 設定の下から開く
     Licenses,
@@ -261,7 +263,7 @@ impl Screen {
     fn inside(&self) -> bool {
         matches!(
             self,
-            Self::Home | Self::Send | Self::Accounts | Self::Settings | Self::Licenses
+            Self::Home | Self::Send | Self::Accounts | Self::Node | Self::Settings | Self::Licenses
         )
     }
 }
@@ -304,6 +306,8 @@ struct Ctx {
     accounts: RwSignal<Vec<AccountView>>,
     settings: RwSignal<Settings>,
     form: SendForm,
+    /// デスクトップで動いている（ノードを出す）
+    desktop: RwSignal<bool>,
 }
 
 impl Ctx {
@@ -385,12 +389,18 @@ fn App() -> impl IntoView {
         accounts: RwSignal::new(Vec::new()),
         settings: RwSignal::new(Settings::default()),
         form: SendForm::new(),
+        desktop: RwSignal::new(false),
     };
     ctx.restart();
 
     let (about, set_about) = signal(None::<Result<About, String>>);
     spawn_local(async move {
-        set_about.set(Some(call("about", NoArgs {}).await));
+        let result: Result<About, String> = call("about", NoArgs {}).await;
+        if let Ok(about) = &result {
+            ctx.desktop
+                .set(!matches!(about.os.as_str(), "android" | "ios"));
+        }
+        set_about.set(Some(result));
     });
 
     let footer = move || match about.get() {
@@ -424,6 +434,7 @@ fn App() -> impl IntoView {
                     Screen::Send => send_view(ctx).into_any(),
                     Screen::Approve(draft) => approve(ctx, draft).into_any(),
                     Screen::Accounts => accounts_view(ctx).into_any(),
+                    Screen::Node => node_view(ctx).into_any(),
                     Screen::Settings => settings_view(ctx).into_any(),
                     Screen::Licenses => licenses_view(ctx).into_any(),
                 }}</section> }}
@@ -467,6 +478,7 @@ fn menu(ctx: Ctx) -> impl IntoView {
             {item(Screen::Home, "ホーム", ICON_HOME)}
             {item(Screen::Send, "送る", ICON_SEND)}
             {item(Screen::Accounts, "アカウント", ICON_ACCOUNTS)}
+            {move || ctx.desktop.get().then(|| item(Screen::Node, "ノード", ICON_NODE))}
             {item(Screen::Settings, "設定", ICON_SETTINGS)}
         </nav>
     }
@@ -476,6 +488,9 @@ fn menu(ctx: Ctx) -> impl IntoView {
 const ICON_HOME: &str = "M4 11 12 4l8 7M6 9.5V20h12V9.5M10 20v-5h4v5";
 const ICON_SEND: &str = "M4 12 20 4l-4 16-4-7-8-1zM12 13l8-9";
 const ICON_ACCOUNTS: &str = "M5 6h14v12H5zM5 10h14M8 14h4";
+/// 線でつながった3つの点
+const ICON_NODE: &str =
+    "M6 6a2 2 0 1 0 0 .1M18 12a2 2 0 1 0 0 .1M6 18a2 2 0 1 0 0 .1M7.8 7 16.2 11M7.8 17l8.4-4";
 const ICON_SETTINGS: &str = "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4";
 const ICON_EYE: &str =
     "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z";
@@ -1284,6 +1299,146 @@ fn settings_view(ctx: Ctx) -> impl IntoView {
             <button on:click=move |_| ctx.go(Screen::Licenses)>"ライセンスを見る"</button>
         </div>
     }
+}
+
+/// 本体の `node_status` の答え
+#[derive(Clone, Default, Deserialize)]
+struct NodeStatus {
+    /// `stopped`、`preparing`、`catching_up`、`following`、`stopping`
+    state: String,
+    mode: Option<String>,
+    network: Option<String>,
+    height: Option<u64>,
+    target: Option<u64>,
+    last_line: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NodeStartArgs {
+    mode: &'static str,
+}
+
+/// 残し方。軽い順に並べる（値、名前、説明）
+const NODE_MODES: [(&str, &str, &str); 3] = [
+    (
+        "light",
+        "ライト",
+        "軽い。普段使いにおすすめ。今の状態だけを持ち、残高を自分で確かめられます。",
+    ),
+    (
+        "full",
+        "フル",
+        "ネットワークを支える。昔からのブロックを全部持ち、新しく来たノードに渡せます。",
+    ),
+    (
+        "archive",
+        "アーカイブ",
+        "何でも残す。どの時点の残高も証明付きで調べられます。監査や調べものに。データをたくさん保存します。",
+    ),
+];
+
+/// ノード（試験的）。設定した REST のネットワークに、選んだ残し方で入る。様子は1秒ごとに聞き直す
+fn node_view(ctx: Ctx) -> impl IntoView {
+    let status = RwSignal::new(None::<NodeStatus>);
+    let refresh = move || {
+        spawn_local(async move {
+            if let Ok(current) = call::<NodeStatus>("node_status", NoArgs {}).await {
+                status.set(Some(current));
+            }
+        });
+    };
+    refresh();
+    if let Ok(handle) = set_interval_with_handle(refresh, Duration::from_secs(1)) {
+        on_cleanup(move || handle.clear());
+    }
+    let start = move |mode: &'static str| {
+        ctx.run("node_start", NodeStartArgs { mode }, move |()| refresh());
+    };
+    let stop = move |_| ctx.run("node_stop", NoArgs {}, move |()| refresh());
+    let mode_name = |mode: &str| {
+        NODE_MODES
+            .iter()
+            .find(|(value, _, _)| *value == mode)
+            .map_or("", |(_, name, _)| name)
+    };
+    view! {
+        <p class="lead">"ノード"</p>
+        <p class="hint">"※一応建前上は試験的な機能です。中身も見た目も、断りなく変わることがあります。"</p>
+        {move || {
+            let current = status.get().unwrap_or_default();
+            match current.state.as_str() {
+                "stopped" | "" => view! {
+                    {current.error.map(|error| view! { <p class="error">{format!("止まりました: {error}")}</p> })}
+                    {ctx.settings.get().rest.is_none().then(|| view! {
+                        <p class="hint">"つなぐネットワークは、設定の REST から決めます。先に REST を決めてください。"</p>
+                    })}
+                    <div class="choices">
+                        {NODE_MODES
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (value, name, desc))| {
+                                let value: &'static str = value;
+                                view! {
+                                    <button class="choice glass" on:click=move |_| start(value) disabled=move || ctx.busy.get() || ctx.settings.get().rest.is_none()>
+                                        <span class="index">{format!("{:02}", index + 1)}</span>
+                                        <span class="title">{*name}</span>
+                                        <span class="desc">{*desc}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                }
+                .into_any(),
+                state => {
+                    let what = match state {
+                        "preparing" => "準備しています…".to_owned(),
+                        "catching_up" => "確定したところまで追いついています".to_owned(),
+                        "following" => match current.height {
+                            Some(height) => format!("最新を追っています（高さ {height} まで追いつきました）"),
+                            None => "最新を追っています".to_owned(),
+                        },
+                        _ => "止めています…（今のブロックを書き終えるまで待ちます）".to_owned(),
+                    };
+                    let detail = format!(
+                        "{}{}",
+                        current.network.unwrap_or_default(),
+                        current
+                            .mode
+                            .as_deref()
+                            .map(|mode| format!(" ・ {}", mode_name(mode)))
+                            .unwrap_or_default()
+                    );
+                    let bar = (state == "catching_up")
+                        .then_some(())
+                        .and(current.height.zip(current.target))
+                        .map(|(height, target)| view! {
+                            <progress max=target.to_string() value=height.to_string()></progress>
+                            <p class="hint">{format!("高さ {height} / {target}")}</p>
+                        });
+                    view! {
+                        <p>{what}</p>
+                        <p class="hint">{detail}</p>
+                        {bar}
+                        {current.last_line.map(|line| view! { <p class="hint address">{line}</p> })}
+                        <div class="row">
+                            <button on:click=stop disabled=move || ctx.busy.get() || state_is_stopping(status)>"止める"</button>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }
+        }}
+    }
+}
+
+fn state_is_stopping(status: RwSignal<Option<NodeStatus>>) -> bool {
+    status.with(|status| {
+        status
+            .as_ref()
+            .is_some_and(|status| status.state == "stopping")
+    })
 }
 
 /// heika のリポジトリ。ライセンスの画面から案内する

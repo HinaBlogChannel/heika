@@ -20,6 +20,8 @@ use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(desktop)]
+pub mod node;
 mod rest;
 mod send;
 
@@ -398,6 +400,13 @@ pub fn run() {
             // 設定は、キーストアと同じフォルダーに置く
             app.manage(rest::Config::load(path.with_file_name("settings.json")));
             app.manage(send::Outbox::default());
+            #[cfg(desktop)]
+            {
+                app.manage(std::sync::Arc::new(node::Node::default()));
+                app.manage(node::Paths {
+                    root: app.path().app_data_dir()?.join("node"),
+                });
+            }
             app.manage(Wallet(Arc::new(Mutex::new(Session {
                 path,
                 pending: None,
@@ -422,7 +431,20 @@ pub fn run() {
             send::prepare_send,
             send::send,
             send::outbox,
+            #[cfg(desktop)]
+            node::node_status,
+            #[cfg(desktop)]
+            node::node_start,
+            #[cfg(desktop)]
+            node::node_stop,
         ])
-        .run(tauri::generate_context!())
-        .expect("Tauri のアプリを起動できませんでした");
+        .build(tauri::generate_context!())
+        .expect("Tauri のアプリを起動できませんでした")
+        .run(|_app, _event| {
+            // 閉じるときは、ノードに今のブロックを書き終えてもらってから終わる
+            #[cfg(desktop)]
+            if let tauri::RunEvent::Exit = _event {
+                _app.state::<std::sync::Arc<node::Node>>().stop_and_wait();
+            }
+        });
 }

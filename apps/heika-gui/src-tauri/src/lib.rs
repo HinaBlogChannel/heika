@@ -394,7 +394,13 @@ fn keystore_path(app: &tauri::App) -> Result<PathBuf, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 2つ目を起動したら、それは終わり、1つ目の窓を出す。ほかのプラグインより先に置く
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        tray::show(app);
+    }));
+    builder
         .setup(|app| {
             #[cfg(target_os = "linux")]
             clipboard::keep_owned();

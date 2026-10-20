@@ -15,6 +15,8 @@
 //!   listen:
 //!     address: 0.0.0.0:7900
 //!     publicHost: symbol-testnet-1.example
+//!   storage:
+//!     mode: light        # archive / full / light
 //!   harvesters:
 //!     - signer: /path/to/signer.key
 //!       vrf: /path/to/vrf.key
@@ -90,13 +92,9 @@ pub struct NodeConfig {
     /// 住所録が空か全滅したときに、最初につなぐノード（`ホスト:ポート`）
     #[serde(default)]
     pub seed: Option<String>,
-    /// アカウントの表を全部はメモリに持たず、要るものだけを読む
-    #[serde(default = "default_true")]
-    pub partial_state: bool,
+    /// 何を残すか、どれだけメモリに持つか
     #[serde(default)]
-    pub prune: Prune,
-    #[serde(default)]
-    pub cache: Cache,
+    pub storage: Storage,
     /// ディスクの空きがこれより少なければ、書く前に止める（GB）
     #[serde(default = "default_min_free_gigabytes")]
     pub min_free_gigabytes: u64,
@@ -115,16 +113,69 @@ pub struct Certificates {
     pub directory: PathBuf,
 }
 
-/// 刈り込み。なければ、全部の高さの状態を残す（アーカイブ）
+/// 何を残すか。種類ごとの残し方は [`Storage::retention`]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Mode {
+    /// 全部の高さの状態、木のノード、ブロック、ステートメント、確定の証明を残す。昔の高さの状態とその証明を
+    /// 問い合わせられる
+    Archive,
+    /// 状態と木のノードの差分は確定より 2 エポック下まで。ブロック、ステートメント、確定の証明は全部残す
+    #[default]
+    Full,
+    /// `full` から、古いブロックとステートメントも消す（再開に要る分は残す）。要るものだけを読む
+    Light,
+}
+
+/// 種類ごとの残し方。エポックの数で、`None` なら全部残す
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    pub state: Option<u32>,
+    pub state_proofs: Option<u32>,
+    /// ブロックとステートメント（いっしょに消す）。`Some` なら、状態の差分の境から再開に要る分を残して消す
+    pub blocks_and_statements: bool,
+}
+
+/// `spec.storage`
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Prune {
-    /// 確定より何エポック下までの、状態の差分を残すか
+pub struct Storage {
     #[serde(default)]
-    pub keep_epochs: Option<u32>,
-    /// 古いブロックとステートメントも消す
+    pub mode: Mode,
+    /// アカウントの表を全部はメモリに持たず、要るものだけを読む。`light` では必ず真。書かなければ真
     #[serde(default)]
-    pub history: bool,
+    pub partial_state: Option<bool>,
+    #[serde(default)]
+    pub cache: Cache,
+}
+
+/// `full` と `light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
+const PRUNED_EPOCHS: u32 = 2;
+
+impl Storage {
+    pub fn retention(&self) -> Retention {
+        match self.mode {
+            Mode::Archive => Retention {
+                state: None,
+                state_proofs: None,
+                blocks_and_statements: false,
+            },
+            Mode::Full => Retention {
+                state: Some(PRUNED_EPOCHS),
+                state_proofs: Some(PRUNED_EPOCHS),
+                blocks_and_statements: false,
+            },
+            Mode::Light => Retention {
+                state: Some(PRUNED_EPOCHS),
+                state_proofs: Some(PRUNED_EPOCHS),
+                blocks_and_statements: true,
+            },
+        }
+    }
+
+    pub fn partial_state(&self) -> bool {
+        self.partial_state.unwrap_or(true)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -175,10 +226,6 @@ fn default_peers() -> usize {
     8
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_min_free_gigabytes() -> u64 {
     10
 }
@@ -219,6 +266,12 @@ impl Manifest {
                 "kind が {} で、Peer ではありません",
                 manifest.kind
             )));
+        }
+        let storage = &manifest.spec.storage;
+        if storage.mode == Mode::Light && storage.partial_state == Some(false) {
+            return Err(ConfigError(
+                "storage.mode: light では、storage.partialState を false にできません".to_owned(),
+            ));
         }
         let network = &manifest.spec.network;
         match (network.network_type, &network.nemesis_hash) {
@@ -266,9 +319,9 @@ spec:
         assert_eq!(spec.network.network_type, NetworkType::Testnet);
         assert_eq!(spec.network.resources, PathBuf::from("/resources"));
         assert_eq!(spec.peers, 8);
-        assert!(spec.partial_state);
-        assert_eq!(spec.prune, Prune::default());
-        assert_eq!(spec.cache, Cache::default());
+        assert_eq!(spec.storage.mode, Mode::Full);
+        assert!(spec.storage.partial_state());
+        assert_eq!(spec.storage.cache, Cache::default());
         assert_eq!(spec.listen, None);
         assert!(spec.harvesters.is_empty());
         assert_eq!(manifest.metadata.name, "");
@@ -285,9 +338,8 @@ spec:
       vrf: /vrf
     - signer: /remote
       vrf: /vrf2
-  prune:
-    keepEpochs: 2
-    history: true
+  storage:
+    mode: light
   peers: 4
 "
         );
@@ -299,8 +351,14 @@ spec:
         assert_eq!(spec.harvesters.len(), 2);
         assert_eq!(spec.harvesters[1].signer, PathBuf::from("/remote"));
         assert_eq!(spec.harvesters[1].vrf, PathBuf::from("/vrf2"));
-        assert_eq!(spec.prune.keep_epochs, Some(2));
-        assert!(spec.prune.history);
+        assert_eq!(
+            spec.storage.retention(),
+            Retention {
+                state: Some(2),
+                state_proofs: Some(2),
+                blocks_and_statements: true
+            }
+        );
         assert_eq!(spec.peers, 4);
     }
 
@@ -320,5 +378,12 @@ spec:
         assert!(Manifest::parse(&with_hash).is_ok());
         let testnet_with_hash = with_hash.replace("type: custom", "type: testnet");
         assert!(Manifest::parse(&testnet_with_hash).is_err());
+        // light は要るものだけを読む形でしか動かない
+        let light = format!("{MINIMAL}  storage:\n    mode: light\n    partialState: false\n");
+        assert!(Manifest::parse(&light).is_err());
+        let archive = format!("{MINIMAL}  storage:\n    mode: archive\n    partialState: false\n");
+        let storage = Manifest::parse(&archive).unwrap().spec.storage;
+        assert_eq!(storage.retention().state, None);
+        assert!(!storage.partial_state());
     }
 }

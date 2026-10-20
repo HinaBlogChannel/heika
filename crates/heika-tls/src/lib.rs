@@ -19,15 +19,21 @@ use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer,
     UnixTime,
 };
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::version::TLS13;
 use rustls::{
-    CertificateError, ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme,
+    CertificateError, ClientConfig, ClientConnection, CommonState, DigitallySignedStruct,
+    DistinguishedName, Error, ServerConnection, SignatureScheme,
 };
+
+pub use rustls::ServerConfig;
 
 /// TLS で名乗るための、証明書のチェーンと秘密鍵。
 pub struct Identity {
     certified_key: Arc<CertifiedKey>,
+    /// CA の公開鍵。catapult はこれでノードを見分ける
+    key: PublicKey,
 }
 
 impl Identity {
@@ -40,6 +46,7 @@ impl Identity {
         if PublicKey::from_private_key(key) != *chain[0].public_key() {
             return Err(IdentityError::KeyMismatch);
         }
+        let chain_key = chain[1].public_key();
         let der = key::private_key_to_der(key);
         let signing_key = provider()
             .key_provider
@@ -51,7 +58,13 @@ impl Identity {
             .collect();
         Ok(Self {
             certified_key: Arc::new(CertifiedKey::new(chain, signing_key)),
+            key: *chain_key,
         })
+    }
+
+    /// ノードの鍵（CA の公開鍵）。catapult はこれでノードを見分ける
+    pub fn key(&self) -> &PublicKey {
+        &self.key
     }
 }
 
@@ -110,6 +123,23 @@ pub fn client_config(identity: &Identity, verification: ServerVerification) -> C
         )))
 }
 
+/// `identity` で名乗る、TLS 1.3 と X25519 だけのサーバーの設定。
+///
+/// catapult が接続を受けるときと同じく、相手にも証明書を求め、チェーンの条件と有効期間を確かめる。
+/// セッションの再開は使わないので、チケットは送らない。
+pub fn server_config(identity: &Identity) -> ServerConfig {
+    let provider = provider();
+    let mut config = ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&TLS13])
+        .expect("ring supports TLS 1.3")
+        .with_client_cert_verifier(Arc::new(ClientVerifier { provider }))
+        .with_cert_resolver(Arc::new(SingleCertAndKey::from(
+            identity.certified_key.clone(),
+        )));
+    config.send_tls13_tickets = 0;
+    config
+}
+
 fn provider() -> Arc<CryptoProvider> {
     let mut provider = rustls::crypto::ring::default_provider();
     // catapult は鍵交換に X25519 しか使わない
@@ -135,20 +165,7 @@ impl ServerCertVerifier for Verifier {
         if self.verification == ServerVerification::Inspect {
             return Ok(ServerCertVerified::assertion());
         }
-        let chain = iter::once(end_entity)
-            .chain(intermediates)
-            .map(parse)
-            .collect::<Result<Vec<_>, _>>()?;
-        certificate::check_catapult_chain(&chain).map_err(|error| match error {
-            ChainError::NotTwoCertificates | ChainError::RootNotSelfSigned => {
-                CertificateError::UnknownIssuer
-            }
-            ChainError::NotSignedByRoot => CertificateError::BadSignature,
-        })?;
-        let now = UNIX_EPOCH + Duration::from_secs(now.as_secs());
-        for certificate in &chain {
-            check_validity(certificate, now)?;
-        }
+        check_chain(end_entity, intermediates, now)?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -173,6 +190,73 @@ impl ServerCertVerifier for Verifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![SignatureScheme::ED25519]
     }
+}
+
+/// 接続してきた相手の証明書を、catapult と同じ条件で確かめる。
+#[derive(Debug)]
+struct ClientVerifier {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ClientCertVerifier for ClientVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, Error> {
+        check_chain(end_entity, intermediates, now)?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        Err(Error::General("TLS 1.2 is not supported".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        verify_tls13_signature(&self.provider, message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// ノード、CA の順のチェーンが catapult の条件を満たし、どちらも `now` に有効かを確かめる。
+fn check_chain(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    now: UnixTime,
+) -> Result<(), Error> {
+    let chain = iter::once(end_entity)
+        .chain(intermediates)
+        .map(parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    certificate::check_catapult_chain(&chain).map_err(|error| match error {
+        ChainError::NotTwoCertificates | ChainError::RootNotSelfSigned => {
+            CertificateError::UnknownIssuer
+        }
+        ChainError::NotSignedByRoot => CertificateError::BadSignature,
+    })?;
+    let now = UNIX_EPOCH + Duration::from_secs(now.as_secs());
+    for certificate in &chain {
+        check_validity(certificate, now)?;
+    }
+    Ok(())
 }
 
 /// rustls の `verify_tls13_signature` は webpki に証明書を読ませるので、公開鍵だけを渡す版を使う。
@@ -274,9 +358,10 @@ pub fn send(
 
 /// ノードとの TLS の接続。Symbol のパケットで要求を送り、応答を受け取る。
 ///
-/// 相手のチェーンは catapult と同じ条件で確かめる。drop すると TLS の close_notify を送って閉じる。
+/// こちらからつないだ接続も、相手から受けた接続もある。どちらでも相手のチェーンは catapult と同じ条件で
+/// 確かめる。drop すると TLS の close_notify を送って閉じる。
 pub struct Connection {
-    connection: ClientConnection,
+    connection: rustls::Connection,
     socket: TcpStream,
 }
 
@@ -287,16 +372,73 @@ impl Connection {
         identity: &Identity,
         timeout: Duration,
     ) -> Result<Self, ConnectError> {
-        let mut socket = tcp_connect(address, timeout)?;
+        let socket = tcp_connect(address, timeout)?;
         let config = client_config(identity, ServerVerification::Catapult);
-        let mut connection = ClientConnection::new(Arc::new(config), server_name(address))
+        let connection = ClientConnection::new(Arc::new(config), server_name(address))
             .expect("the config is valid");
+        let connection = Self::handshake(connection.into(), socket)?;
+        // 住所録に自分のアドレスが入っていても、自分にはつながない
+        if connection.peer_key().as_ref() == Some(identity.key()) {
+            return Err(ConnectError::Myself);
+        }
+        Ok(connection)
+    }
+
+    /// 相手のノードの鍵（相手のチェーンの CA の公開鍵）。チェーンはハンドシェイクで確かめてある
+    pub fn peer_key(&self) -> Option<PublicKey> {
+        let certificates = self.connection.peer_certificates()?;
+        Certificate::from_der(certificates.get(1)?)
+            .ok()
+            .map(|ca| *ca.public_key())
+    }
+
+    /// 受け付けた `socket` で、[`server_config`] で作った `config` のハンドシェイクを済ませる。
+    /// 読み書きは `timeout` で打ち切る。
+    pub fn accept(
+        socket: TcpStream,
+        config: Arc<ServerConfig>,
+        timeout: Duration,
+    ) -> Result<Self, ConnectError> {
+        socket
+            .set_read_timeout(Some(timeout))
+            .and_then(|()| socket.set_write_timeout(Some(timeout)))
+            .map_err(ConnectError::Io)?;
+        let connection = ServerConnection::new(config).expect("the config is valid");
+        Self::handshake(connection.into(), socket)
+    }
+
+    fn handshake(
+        mut connection: rustls::Connection,
+        mut socket: TcpStream,
+    ) -> Result<Self, ConnectError> {
         while connection.is_handshaking() {
             connection
                 .complete_io(&mut socket)
                 .map_err(ConnectError::Handshake)?;
         }
         Ok(Self { connection, socket })
+    }
+
+    /// 読むときのタイムアウト。`None` なら、届くまで待つ
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    /// 書くときのタイムアウト。`None` なら、書けるまで待つ
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_write_timeout(timeout)
+    }
+
+    /// 平文を読み書きする口。
+    fn stream(&mut self) -> Box<dyn ReadWrite + '_> {
+        match &mut self.connection {
+            rustls::Connection::Client(connection) => {
+                Box::new(rustls::Stream::new(connection, &mut self.socket))
+            }
+            rustls::Connection::Server(connection) => {
+                Box::new(rustls::Stream::new(connection, &mut self.socket))
+            }
+        }
     }
 
     /// 相手が出した証明書の DER。ノード、CA の順のはず。
@@ -323,7 +465,7 @@ impl Connection {
     /// 種類が `packet_type` で本体が `body` のパケットを1つ送る。
     pub fn send_packet(&mut self, packet_type: u32, body: &[u8]) -> Result<(), RequestError> {
         let packet = heika_packet::encode(packet_type, body).map_err(RequestError::TooLarge)?;
-        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
+        let mut stream = self.stream();
         stream
             .write_all(&packet)
             .and_then(|()| stream.flush())
@@ -332,7 +474,7 @@ impl Connection {
 
     /// パケットを1つ受け取って、種類と本体を返す。本体が `max_body_size` を超えるなら、読まずに失敗する。
     pub fn receive_packet(&mut self, max_body_size: usize) -> Result<(u32, Vec<u8>), RequestError> {
-        let mut stream = rustls::Stream::new(&mut self.connection, &mut self.socket);
+        let mut stream = self.stream();
         let mut header = [0; heika_packet::HEADER_SIZE];
         stream.read_exact(&mut header).map_err(request_error)?;
         let header = heika_packet::Header::parse(&header);
@@ -347,6 +489,10 @@ impl Connection {
         Ok((header.packet_type, body))
     }
 }
+
+trait ReadWrite: Read + Write {}
+
+impl<T: Read + Write> ReadWrite for T {}
 
 /// 送るか、見出しを読むときのエラー。TLS のアラートなら、こちらの証明書が弾かれた
 fn request_error(error: io::Error) -> RequestError {
@@ -508,7 +654,7 @@ fn alert(error: &io::Error) -> Option<String> {
     }
 }
 
-fn peer_certificates(connection: &ClientConnection) -> Option<Vec<Vec<u8>>> {
+fn peer_certificates(connection: &CommonState) -> Option<Vec<Vec<u8>>> {
     connection
         .peer_certificates()
         .map(|certificates| certificates.iter().map(|der| der.to_vec()).collect())
@@ -524,6 +670,8 @@ pub enum ConnectError {
     /// TLS のハンドシェイクが終わらない
     Handshake(io::Error),
     Io(io::Error),
+    /// 相手が自分と同じ鍵のノード（自分自身）だった
+    Myself,
 }
 
 impl fmt::Display for ConnectError {
@@ -535,6 +683,7 @@ impl fmt::Display for ConnectError {
                 write!(f, "TLS のハンドシェイクが終わりませんでした: {error}")
             }
             Self::Io(error) => write!(f, "通信できませんでした: {error}"),
+            Self::Myself => f.write_str("相手は自分自身でした"),
         }
     }
 }
@@ -825,6 +974,7 @@ mod tests {
                     )))
                     .unwrap(),
             )),
+            key: *other[1].public_key(),
         });
         let error = send(
             &address,
@@ -910,6 +1060,101 @@ mod tests {
             Err(RequestError::TooLarge(5))
         ));
     }
+    /// 1回だけ接続を [`server_config`] で受けて、ハンドシェイクの結果を返すサーバー
+    fn accept_once(
+        identity: &Identity,
+    ) -> (String, mpsc::Receiver<Result<Connection, ConnectError>>) {
+        let config = Arc::new(server_config(identity));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            sender
+                .send(Connection::accept(socket, config, Duration::from_secs(5)))
+                .unwrap();
+        });
+        (address, receiver)
+    }
+
+    #[test]
+    fn accepts_a_catapult_chain_and_answers_a_request() {
+        let (chain, key) = chain(1);
+        let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        let mut client =
+            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+        let mut server = accepted.recv().unwrap().unwrap();
+        let (client_chain, _) = self::chain(3);
+        let expected: Vec<_> = client_chain
+            .iter()
+            .map(|certificate| certificate.to_der().to_vec())
+            .collect();
+        assert_eq!(server.peer_certificates(), expected);
+        client.send_packet(5, b"ask").unwrap();
+        assert_eq!(server.receive_packet(1024).unwrap(), (5, b"ask".to_vec()));
+        server.send_packet(5, b"reply").unwrap();
+        assert_eq!(client.receive_packet(1024).unwrap(), (5, b"reply".to_vec()));
+    }
+
+    #[test]
+    fn refuses_a_client_with_an_invalid_chain() {
+        let (chain, key) = chain(1);
+        let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        let (client_chain, client_key) = self::chain(3);
+        let other = chain_with_other_ca(&client_chain);
+        let identity = Identity {
+            certified_key: Arc::new(CertifiedKey::new(
+                ders(&other),
+                provider()
+                    .key_provider
+                    .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        key::private_key_to_der(&client_key).to_vec(),
+                    )))
+                    .unwrap(),
+            )),
+            key: *other[1].public_key(),
+        };
+        // TLS 1.3 では、クライアントのハンドシェイクはサーバーが確かめる前に終わる
+        let mut client = Connection::open(&address, &identity, Duration::from_secs(5)).unwrap();
+        let error = accepted.recv().unwrap().unwrap_err();
+        assert!(matches!(error, ConnectError::Handshake(_)), "{error:?}");
+        let error = client.receive_packet(1024).unwrap_err();
+        assert!(matches!(error, RequestError::Rejected(_)), "{error:?}");
+    }
+
+    #[test]
+    fn refuses_a_client_without_a_certificate() {
+        let (chain, key) = chain(1);
+        let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        let provider = provider();
+        let config = ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(Verifier {
+                provider,
+                verification: ServerVerification::Catapult,
+            }))
+            .with_no_client_auth();
+        let mut socket = TcpStream::connect(&address).unwrap();
+        let mut connection =
+            ClientConnection::new(Arc::new(config), server_name(&address)).unwrap();
+        while connection.is_handshaking() {
+            connection.complete_io(&mut socket).unwrap();
+        }
+        let error = accepted.recv().unwrap().unwrap_err();
+        assert!(matches!(error, ConnectError::Handshake(_)), "{error:?}");
+    }
+
+    #[test]
+    fn does_not_connect_to_itself() {
+        let (chain, key) = chain(1);
+        let identity = || Identity::new(&chain, &key).unwrap();
+        let (address, _accepted) = accept_once(&identity());
+        let error = Connection::open(&address, &identity(), Duration::from_secs(5)).unwrap_err();
+        assert!(matches!(error, ConnectError::Myself), "{error:?}");
+    }
+
     #[test]
     fn fails_to_connect_to_a_closed_port() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

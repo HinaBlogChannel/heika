@@ -5,24 +5,12 @@
 use std::fmt;
 use std::time::Duration;
 
-use heika_block::finalization::FinalizedBlockHeader;
+use heika_block::finalization::{FinalizationRound, FinalizedBlockHeader};
 use heika_packet::{
-    ChainStatistics, DecodeError, NetworkNode, packet_type, pull_blocks_request,
+    ChainStatistics, DecodeError, NetworkNode, NetworkTime, packet_type, pull_blocks_request,
     pull_transactions_request, split_size_prefixed,
 };
 use heika_tls::{ConnectError, Connection, Identity, RequestError};
-
-/// ファイナライズの問い合わせのパケットの種類。catapult の
-/// `extensions/finalization/src/handlers/ProofHandlers.cpp` と `FinalizationPackets.h`
-mod finalization_packet_type {
-    pub const FINALIZATION_STATISTICS: u32 = 0x132;
-    pub const FINALIZATION_PROOF_AT_EPOCH: u32 = 0x133;
-    /// 証明の要求への応答は、この種類で来る
-    pub const PULL_FINALIZATION_PROOF: u32 = 0x135;
-}
-
-/// catapult の `ionet::PacketType::Block_Hashes`
-const BLOCK_HASHES: u32 = 7;
 
 /// 応答の本体として受け付ける大きさの上限。ブロックはバイト数の上限を超えても1件は返ってくるので、
 /// メインネットのネメシスのブロック（4.7 MB）が収まるだけの余裕をとる。
@@ -59,6 +47,13 @@ impl ClientConnection {
     pub fn info(&mut self) -> Result<NetworkNode, QueryError> {
         let body = self.request(packet_type::NODE_DISCOVERY_PULL_PING, &[])?;
         Ok(NetworkNode::decode(&body)?)
+    }
+
+    /// ノードのネットワーク時刻。catapult は自分の時計をピアに合わせてずらしているので、OS の時計とは違うことがある。
+    /// 自分の時計との差は、要求を送った時刻と応答を受け取った時刻を測って `NetworkTime::offset` で出す
+    pub fn network_time(&mut self) -> Result<NetworkTime, QueryError> {
+        let body = self.request(packet_type::TIME_SYNC_NETWORK_TIME, &[])?;
+        Ok(NetworkTime::decode(&body)?)
     }
 
     /// ノードが知っているほかのノード。
@@ -99,7 +94,7 @@ impl ClientConnection {
         let mut request = Vec::with_capacity(12);
         request.extend_from_slice(&height.to_le_bytes());
         request.extend_from_slice(&num_hashes.to_le_bytes());
-        let body = self.request(BLOCK_HASHES, &request)?;
+        let body = self.request(packet_type::BLOCK_HASHES, &request)?;
         if body.len() % 32 != 0 || body.len() / 32 > num_hashes as usize {
             return Err(QueryError::Decode(DecodeError::BodySize {
                 expected: num_hashes as usize * 32,
@@ -132,13 +127,34 @@ impl ClientConnection {
 
     /// ノードが最後にファイナライズしたラウンド、高さ、ハッシュ。
     pub fn finalization_statistics(&mut self) -> Result<FinalizedBlockHeader, QueryError> {
-        let body = self.request(finalization_packet_type::FINALIZATION_STATISTICS, &[])?;
+        let body = self.request(packet_type::FINALIZATION_STATISTICS, &[])?;
         FinalizedBlockHeader::from_bytes(&body).map_err(|error| {
             QueryError::Decode(DecodeError::BodySize {
                 expected: FinalizedBlockHeader::SIZE,
                 actual: error.0,
             })
         })
+    }
+
+    /// ラウンド `min` から `max` までの、ノードが集めている投票のメッセージのバイト列（catapult の
+    /// `FinalizationMessage`）。中身は確かめない。確定の前に配り合うもので、確定が止まっているときに、誰がどこまで
+    /// 投票しているかが分かる
+    pub fn pull_finalization_messages(
+        &mut self,
+        min: FinalizationRound,
+        max: FinalizationRound,
+    ) -> Result<Vec<Vec<u8>>, QueryError> {
+        // catapult の `FinalizationRoundRange` に、知っているメッセージの短いハッシュ（なし）が続く
+        let mut request = Vec::with_capacity(16);
+        for round in [min, max] {
+            request.extend_from_slice(&round.epoch.to_le_bytes());
+            request.extend_from_slice(&round.point.to_le_bytes());
+        }
+        let body = self.request(packet_type::PULL_FINALIZATION_MESSAGES, &request)?;
+        Ok(split_size_prefixed(&body)?
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect())
     }
 
     /// エポック `epoch` のファイナライズの証明のバイト列（catapult の `FinalizationProof`）。
@@ -149,17 +165,22 @@ impl ClientConnection {
     ) -> Result<Option<Vec<u8>>, QueryError> {
         // catapult は、この要求に違う種類で応答する
         self.connection.send_packet(
-            finalization_packet_type::FINALIZATION_PROOF_AT_EPOCH,
+            packet_type::FINALIZATION_PROOF_AT_EPOCH,
             &epoch.to_le_bytes(),
         )?;
         let (response_type, body) = self.connection.receive_packet(MAX_BODY_SIZE)?;
-        if response_type != finalization_packet_type::PULL_FINALIZATION_PROOF {
+        if response_type != packet_type::PULL_FINALIZATION_PROOF {
             return Err(QueryError::Request(RequestError::UnexpectedType(
                 response_type,
             )));
         }
         // 持っていないときは、本体のない応答が返る
         Ok((!body.is_empty()).then_some(body))
+    }
+
+    /// 種類 `packet_type` で本体が `body` のパケットを押し付ける。catapult は押し付けに答えないので、待たない
+    pub fn push(&mut self, packet_type: u32, body: &[u8]) -> Result<(), QueryError> {
+        Ok(self.connection.send_packet(packet_type, body)?)
     }
 
     fn request(&mut self, packet_type: u32, body: &[u8]) -> Result<Vec<u8>, QueryError> {

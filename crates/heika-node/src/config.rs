@@ -8,7 +8,6 @@
 //! spec:
 //!   network:
 //!     type: testnet
-//!     resources: /path/to/resources
 //!   dataDirectory: /path/to/data
 //!   certificates:
 //!     directory: /path/to/certificates
@@ -60,7 +59,7 @@ pub enum NetworkType {
     Mainnet,
     Testnet,
     /// 決め打ちのパラメーターのないネットワーク（プライベートなネットワークなど）。`resources` の
-    /// `config-network.properties` と `nemesisHash` で決める
+    /// 設定ファイルと `nemesisHash` で決める
     Custom,
 }
 
@@ -70,8 +69,11 @@ pub enum NetworkType {
 pub struct Network {
     #[serde(rename = "type")]
     pub network_type: NetworkType,
-    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）
-    pub resources: PathBuf,
+    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）。`type: custom` では要る。
+    /// メインネットとテストネットでは書かなくてよく、書けば決め打ちの設定の代わりにそこから読む
+    /// （ネットワークの設定が変わって、heika がまだ追いついていないときなど）
+    #[serde(default)]
+    pub resources: Option<PathBuf>,
     /// `type: custom` のときだけ。Nemesis のブロックのハッシュ（16進）
     #[serde(default)]
     pub nemesis_hash: Option<String>,
@@ -274,6 +276,11 @@ impl Manifest {
             ));
         }
         let network = &manifest.spec.network;
+        if network.network_type == NetworkType::Custom && network.resources.is_none() {
+            return Err(ConfigError(
+                "network.type: custom には network.resources が要ります".to_owned(),
+            ));
+        }
         match (network.network_type, &network.nemesis_hash) {
             (NetworkType::Custom, None) => {
                 return Err(ConfigError(
@@ -317,7 +324,7 @@ spec:
         let manifest = Manifest::parse(MINIMAL).unwrap();
         let spec = manifest.spec;
         assert_eq!(spec.network.network_type, NetworkType::Testnet);
-        assert_eq!(spec.network.resources, PathBuf::from("/resources"));
+        assert_eq!(spec.network.resources, Some(PathBuf::from("/resources")));
         assert_eq!(spec.peers, 8);
         assert_eq!(spec.storage.mode, Mode::Full);
         assert!(spec.storage.partial_state());
@@ -378,6 +385,18 @@ spec:
         assert!(Manifest::parse(&with_hash).is_ok());
         let testnet_with_hash = with_hash.replace("type: custom", "type: testnet");
         assert!(Manifest::parse(&testnet_with_hash).is_err());
+        // resources は custom にだけ要る。メインネットとテストネットは決め打ちの設定を使う
+        let without_resources = MINIMAL.replace("    resources: /resources\n", "");
+        assert_eq!(
+            Manifest::parse(&without_resources)
+                .unwrap()
+                .spec
+                .network
+                .resources,
+            None
+        );
+        let custom_without_resources = with_hash.replace("    resources: /resources\n", "");
+        assert!(Manifest::parse(&custom_without_resources).is_err());
         // light は要るものだけを読む形でしか動かない
         let light = format!("{MINIMAL}  storage:\n    mode: light\n    partialState: false\n");
         assert!(Manifest::parse(&light).is_err());

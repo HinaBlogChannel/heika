@@ -18,7 +18,7 @@ heika-block = { version = "0.7.0", path = "../heika-block" }
 heika-cert = { version = "0.7.0", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
 heika-core = { version = "0.7.0", path = "../heika-core" }
 heika-harvesting = { version = "0.7.0", path = "../heika-harvesting" }
-heika-p2p = { version = "0.7.0", path = "../heika-p2p" }
+heika-peer-protocol = { version = "0.7.0", path = "../heika-peer-protocol" }
 heika-packet = { version = "0.7.0", path = "../heika-packet" }
 heika-rest = { version = "0.7.0", path = "../heika-rest" }
 heika-tls = { version = "0.7.0", path = "../heika-tls" }

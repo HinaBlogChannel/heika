@@ -42,7 +42,7 @@ use heika_core::key::PublicKey;
 use heika_core::merkle::{self, MerklePathNode};
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
 use heika_core::patricia::SubCache;
-use heika_p2p::ClientConnection;
+use heika_peer_protocol::ClientConnection;
 use heika_rest::balance::verify_balance;
 use heika_rest::block::{BlockHeader, BlockInfo};
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};

@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Symbol のブロックと状態を redb にしまう。状態の読み口と、昔の高さの状態の問い合わせ"
 
 [dependencies]
+heika-chain = { path = "../heika-chain" }
 heika-core = { path = "../heika-core", default-features = false }
 heika-state-transition = { path = "../heika-state-transition" }
 libc = "0.2.190"

@@ -107,6 +107,15 @@ pub fn prove(private_key: &PrivateKey, alpha: &[u8]) -> Option<VrfProof> {
     })
 }
 
+/// `alpha` の証明の gamma だけを求める。生成ハッシュは gamma だけで決まるので（[`proof_hash`]）、当たりかどうかを
+/// 見るだけなら、証明の残り（c と s）を作らなくてよい。[`prove`] の gamma と同じになる
+pub fn gamma(private_key: &PrivateKey, alpha: &[u8]) -> Option<[u8; 32]> {
+    let key = ExpandedKey::new(private_key.as_bytes());
+    let h = map_to_point(&key.public_key().to_bytes(), alpha)?;
+    let gamma = scalar_mult(&key.scalar, &h);
+    (gamma != EdwardsPoint::default().compress().to_bytes()).then_some(gamma)
+}
+
 /// 証明を検証して、通れば証明のハッシュを返す。catapult の `crypto::VerifyVrfProof`。
 pub fn verify(public_key: &PublicKey, alpha: &[u8], proof: &VrfProof) -> Option<ProofHash> {
     // gamma は正規形で、曲線上になければならない。部分群に入っているかはここでは見ない
@@ -329,6 +338,17 @@ mod tests {
         proof.gamma = gamma.compress().to_bytes();
         assert!(ed25519::decode(&proof.gamma).is_none());
         assert_eq!(verify(&public_key, &alpha, &proof), None);
+    }
+
+    #[test]
+    fn gamma_is_the_gamma_of_the_proof() {
+        let key = PrivateKey::from_bytes(&[7; 32]);
+        for alpha in [&b""[..], &[1; 32], &[0xFF; 64]] {
+            assert_eq!(
+                gamma(&key, alpha),
+                prove(&key, alpha).map(|proof| proof.gamma)
+            );
+        }
     }
 
     #[test]

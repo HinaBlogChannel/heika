@@ -1,0 +1,12 @@
+[package]
+name = "heika-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のピアについての意思決定（sans-IO）。住所録、つなぐ相手、罰、一覧の聞き直し"
+
+[dependencies]
+heika-chain = { path = "../heika-chain" }
+heika-core = { path = "../heika-core", default-features = false }
+heika-packet = { path = "../heika-packet" }

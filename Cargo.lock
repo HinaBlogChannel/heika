@@ -562,6 +562,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-peer"
+version = "0.7.0"
+dependencies = [
+ "heika-chain",
+ "heika-core",
+ "heika-packet",
+]
+
+[[package]]
 name = "heika-peer-protocol"
 version = "0.7.0"
 dependencies = [

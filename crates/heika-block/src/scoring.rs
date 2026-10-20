@@ -140,6 +140,33 @@ pub fn target(
     target.div_u64(difficulty)
 }
 
+/// hit が `hit` のアカウントが、難易度 `difficulty`、Importance `importance` で当たりになる一番早い経過秒。
+/// `max_seconds` までに当たりにならなければ `None`。的は経過秒について増える一方なので、二分探索で探す
+pub fn earliest_hit_seconds(
+    hit: u64,
+    difficulty: u64,
+    importance: u64,
+    max_seconds: u64,
+    parameters: &NetworkParameters,
+) -> Option<u64> {
+    let passes =
+        |seconds| target(seconds, difficulty, importance, parameters).greater_than_u64(hit);
+    if max_seconds == 0 || !passes(max_seconds) {
+        return None;
+    }
+    // passes(high) は真、passes(low) は偽か low = 0
+    let (mut low, mut high) = (0, max_seconds);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if passes(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    Some(high)
+}
+
 /// `block` を、前のブロック `parent` のあとに、Importance が `importance` のアカウントが出してよいか。
 /// catapult の `BlockHitPredicate`。generation hash はブロックの VRF の証明から求める（証明そのものは確かめない）。
 pub fn is_hit(
@@ -298,6 +325,32 @@ mod tests {
                 difficulty,
             })
             .collect()
+    }
+
+    #[test]
+    fn earliest_hit_is_where_the_target_first_passes_the_hit() {
+        let (difficulty, importance) = (DEFAULT_DIFFICULTY, MAINNET.total_chain_importance / 1000);
+        let passes =
+            |seconds| target(seconds, difficulty, importance, &MAINNET).greater_than_u64(1 << 50);
+        let seconds = earliest_hit_seconds(1 << 50, difficulty, importance, 3600, &MAINNET)
+            .expect("1時間のうちには当たる");
+        assert!(passes(seconds));
+        assert!(seconds == 1 || !passes(seconds - 1));
+        // 1秒ずつ試したものと同じになる
+        for shift in [40, 45, 50, 55, 60] {
+            let linear = (1..=3600_u64).find(|&s| {
+                target(s, difficulty, importance, &MAINNET).greater_than_u64(1 << shift)
+            });
+            assert_eq!(
+                earliest_hit_seconds(1 << shift, difficulty, importance, 3600, &MAINNET),
+                linear
+            );
+        }
+        // 上限より先なら None
+        assert_eq!(
+            earliest_hit_seconds(1 << 50, difficulty, importance, seconds - 1, &MAINNET),
+            None
+        );
     }
 
     #[test]

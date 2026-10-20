@@ -570,8 +570,14 @@ dependencies = [
 name = "heika-node"
 version = "0.7.0"
 dependencies = [
+ "heika-block",
  "heika-cert",
+ "heika-chain",
  "heika-core",
+ "heika-packet",
+ "heika-peer",
+ "heika-peer-protocol",
+ "rayon",
  "serde",
  "serde_norway",
  "zeroize",

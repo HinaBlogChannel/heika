@@ -7,8 +7,14 @@ rust-version.workspace = true
 description = "Symbol のノードを組み立てて動かす。設定、ピアのスレッド、待ち受け、追いつく段階と先端の段階"
 
 [dependencies]
+heika-block = { path = "../heika-block" }
+heika-chain = { path = "../heika-chain" }
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core" }
+heika-packet = { path = "../heika-packet" }
+heika-peer = { path = "../heika-peer" }
+heika-peer-protocol = { path = "../heika-peer-protocol" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_norway = "0.9.42"
+rayon = "1.12.0"
 zeroize = "1.9.1"

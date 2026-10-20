@@ -115,8 +115,8 @@ pub struct Certificates {
     pub directory: PathBuf,
 }
 
-/// 何を残すか。種類ごとの残し方は [`Storage::retention`]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+/// 何を残すか。種類ごとの残し方は [`Storage::retention`]。重い（たくさん残す）順に並べる
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
     /// 全部の高さの状態、木のノード、ブロック、ステートメント、確定の証明を残す。昔の高さの状態とその証明を
@@ -127,6 +127,23 @@ pub enum Mode {
     Full,
     /// `full` から、古いブロックとステートメントも消す（再開に要る分は残す）。要るものだけを読む
     Light,
+}
+
+impl Mode {
+    /// 設定ファイルに書く名前
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Full => "full",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Archive, Self::Full, Self::Light]
+            .into_iter()
+            .find(|mode| mode.as_str() == name)
+    }
 }
 
 /// 種類ごとの残し方。エポックの数で、`None` なら全部残す

@@ -28,7 +28,7 @@ use heika_store_redb::Db;
 use heika_tls::{ConnectError, Identity};
 
 use crate::catch_up;
-use crate::config::{Manifest, NetworkType, NodeConfig};
+use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
 use crate::serve::{DbSource, Gate, Responder, serve};
@@ -104,6 +104,42 @@ impl<'a> Setup<'a> {
     }
 }
 
+/// これまでに動かした残し方（`storage.mode`）を覚えておく、DB の meta の名前
+const STORAGE_MODE_META: &str = "storage_mode";
+
+/// これまでより重い残し方（たくさん残す）にはできない。消したものは戻らないので、黙って進むと名ばかりの
+/// アーカイブなどになる。軽くするのは刈り込めばよいので通し、それからは軽いほうを覚える
+fn check_storage_mode(db: &Db, mode: Mode) -> Result<(), NodeError> {
+    let stored = db
+        .meta(STORAGE_MODE_META)?
+        .map(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(Mode::parse)
+                .ok_or("DB に覚えた storage.mode が読めません")
+        })
+        .transpose()?;
+    if let Some(stored) = stored {
+        if mode < stored {
+            return Err(format!(
+                "このデータは storage.mode: {} で動かしてきたので、{} にはできません（消したものは戻りません）。\
+                 {} にするなら、dataDirectory を空にして最初から追いつき直してください",
+                stored.as_str(),
+                mode.as_str(),
+                mode.as_str()
+            )
+            .into());
+        }
+        if mode == stored {
+            return Ok(());
+        }
+    }
+    let mut batch = db.batch()?;
+    batch.put_meta(STORAGE_MODE_META, mode.as_str().as_bytes())?;
+    batch.commit()?;
+    Ok(())
+}
+
 /// どこにもつながらないときに、試し直すまで待つ
 const RETRY_UNREACHABLE: Duration = Duration::from_secs(60);
 /// 追いつく段階で、ブロックを取るピアとは別に、確定の証明を取るピアの数
@@ -118,6 +154,7 @@ fn catch_up_if_behind(
     let spec = setup.spec;
     let mut db = Db::open(&spec.data_directory)?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
+    check_storage_mode(&db, spec.storage.mode)?;
     let executed = match db.meta(EXECUTOR_META)? {
         Some(meta) => height_of_meta(&meta)?,
         None => 0,
@@ -554,4 +591,26 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_a_heavier_storage_mode_than_before() {
+        let directory = std::env::temp_dir().join(format!("heika-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let db = Db::open(&directory).unwrap();
+        // 初めては何でも通し、覚える
+        check_storage_mode(&db, Mode::Full).unwrap();
+        check_storage_mode(&db, Mode::Full).unwrap();
+        // 重くはできない
+        assert!(check_storage_mode(&db, Mode::Archive).is_err());
+        // 軽くはでき、それからは軽いほうを覚える
+        check_storage_mode(&db, Mode::Light).unwrap();
+        assert!(check_storage_mode(&db, Mode::Full).is_err());
+        drop(db);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

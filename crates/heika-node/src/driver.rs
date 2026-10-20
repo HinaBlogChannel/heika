@@ -173,6 +173,22 @@ fn catch_up_if_behind(
             }
         }
     }
+    // 住所録がまだ薄い（初めて動かしたときはシードだけ）なら、一覧から足りない分をつなぎ足す
+    let want = spec.peers + PROOF_PEERS;
+    if peers.len() < want {
+        let more: Vec<String> = addresses
+            .iter()
+            .filter(|address| peers.iter().all(|peer| &peer.address != *address))
+            .take(FIRST_TRIES)
+            .cloned()
+            .collect();
+        peers.extend(catch_up::connect_any(
+            &more,
+            &setup.identity,
+            want - peers.len(),
+            CONNECT_TIMEOUT,
+        ));
+    }
     println!("追いつく段階に入ります（実行した高さ {executed}、確定 {finalized}）");
     // 証明を取るピアは、ブロックを取るピアを1つは残して、後ろから分ける
     let keep_for_blocks = peers.len().saturating_sub(PROOF_PEERS).max(1);

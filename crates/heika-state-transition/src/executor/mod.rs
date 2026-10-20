@@ -700,21 +700,34 @@ impl Executor {
         block: &Block,
         parameters: &heika_core::network::NetworkParameters,
     ) -> Result<GenerationHash, ExecError> {
-        let forwarded = self.harvester(&block.signer_public_key)?;
-        // VRF の鍵がなければ、catapult は0の鍵で確かめるので通らない
-        let vrf_key = PublicKey(forwarded.vrf.unwrap_or([0; 32]));
+        let vrf_key = self.check_hit(parent, block, parameters)?;
         let proof_hash = heika_core::vrf::verify(
             &vrf_key,
             &parent_generation_hash.0,
             &block.generation_hash_proof,
         )
         .ok_or_else(|| harvester_error("VRF の証明が通りません"))?;
-        let generation_hash = proof_hash.generation_hash();
+        Ok(proof_hash.generation_hash())
+    }
+
+    /// [`Executor::check_harvester`] のうち、状態を見るところ（1 と 3）。VRF の証明はまだ確かめずに、証明の gamma から
+    /// 出る generation hash で当たりかを見る。通れば、証明を確かめるのに使う VRF の鍵を返す。
+    ///
+    /// 証明は状態に依らないので、呼んだ側が別に（別のスレッドなどで）[`heika_core::vrf::verify`] で確かめる。
+    /// 確かめ終えるまで、このブロックは確かめたことにならない
+    pub fn check_hit(
+        &self,
+        parent: &Block,
+        block: &Block,
+        parameters: &heika_core::network::NetworkParameters,
+    ) -> Result<PublicKey, ExecError> {
+        let forwarded = self.harvester(&block.signer_public_key)?;
         let importance = self.importance_of(forwarded, block.height);
         if !heika_block::scoring::is_hit(parent, block, importance, parameters) {
             return Err(harvester_error("当たりではありません"));
         }
-        Ok(generation_hash)
+        // VRF の鍵がなければ、catapult は0の鍵で確かめるので通らない
+        Ok(PublicKey(forwarded.vrf.unwrap_or([0; 32])))
     }
 
     /// `block` を出したアカウント（リモートならメインアカウント）の、そのブロックの高さで使う Importance

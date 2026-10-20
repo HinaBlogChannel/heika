@@ -12,6 +12,7 @@ use std::str::FromStr;
 
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::VartimeMultiscalarMul;
 use zeroize::Zeroizing;
 
 use crate::ed25519::{self, ExpandedKey};
@@ -134,9 +135,14 @@ pub fn verify(public_key: &PublicKey, alpha: &[u8], proof: &VrfProof) -> Option<
         None => [0; 32],
     };
     // v = s * h - c * gamma。catapult は一度圧縮したものを戻して足すので、それに合わせる。
-    // gamma が部分群に入っていなければ、c * gamma は全部 0 になる
-    let s_times_h = decompress(&scalar_mult(&s, &h)).expect("a compressed point");
-    let c_times_gamma = decompress(&scalar_mult(&c, &proof.gamma)).expect("a compressed point");
+    // gamma が部分群に入っていなければ、c * gamma は全部 0 を戻したものになる。
+    // 確かめるだけで秘密は扱わないので、時間の一定でないかけ算でよい。h は余因子倍してあるので、いつも部分群に入る
+    let h_point = decompress(&h).expect("a compressed point");
+    let s_times_h = EdwardsPoint::vartime_multiscalar_mul([s], [h_point]);
+    let c_times_gamma = match ed25519::decode(&proof.gamma) {
+        Some(gamma) => EdwardsPoint::vartime_multiscalar_mul([c], [gamma]),
+        None => decompress(&[0; 32]).expect("a compressed point"),
+    };
     let v = (s_times_h - c_times_gamma).compress().to_bytes();
     (challenge(&h, &proof.gamma, &u, &v) == proof.verification_hash)
         .then(|| proof_hash(&proof.gamma))

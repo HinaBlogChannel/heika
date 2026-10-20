@@ -6,7 +6,7 @@ mod proofs;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use heika_block::Block;
@@ -16,13 +16,13 @@ use heika_chain::chain::Keep;
 use heika_chain::store::EXECUTOR_META;
 use heika_chain::verify::Tip;
 use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
 use heika_core::network::NetworkParameters;
-use heika_core::vrf::GenerationHash;
+use heika_core::vrf::{self, GenerationHash, VrfProof};
 use heika_peer_protocol::ClientConnection;
 use heika_state_transition::config::ChainConfig;
 use heika_state_transition::executor::Executor;
 use heika_store_redb::{Db, DbError};
-use heika_tls::Identity;
 
 use fetch::Fetched;
 pub(crate) use fetch::connect_any;
@@ -42,7 +42,6 @@ pub const DEFAULT_SAVE_EVERY: u64 = 50_000;
 /// 追いつく段階に渡すもの
 pub struct Context<'a> {
     pub parameters: &'static NetworkParameters,
-    pub identity: &'a Identity,
     /// このネットワークの Nemesis のブロックのハッシュ
     pub nemesis: Hash256,
     /// 止める合図。真になったら、まだコミットしていない分を捨てて終わる
@@ -245,12 +244,16 @@ pub fn execute(
     // その前後の読むことと書くことを重ねる
     // 目標まで実行できずに終わるときは、証明を取り終えるのを待たない（取るのに何分もかかる）
     let abandoned = AtomicBool::new(false);
+    // 別のスレッドで確かめて通らなかった VRF の証明
+    let vrf_failure = Mutex::new(None);
     let stop_proofs = || (context.stopping)() || abandoned.load(Ordering::Relaxed);
     let (failure, interrupted, peer, prefetched, committed) = std::thread::scope(
         |scope| -> Result<_, NodeError> {
             let (block_sender, blocks) = mpsc::sync_channel::<Fetched>(256);
             let (write_sender, writes) = mpsc::sync_channel::<Write>(256);
+            let (vrf_sender, vrf_jobs) = mpsc::sync_channel::<VrfJob>(256);
             let db = &db;
+            let vrf_failure = &vrf_failure;
             let fetching = peer.is_some();
             let reader = scope.spawn(move || match peer {
                 None => read_stored(db, start, target, &block_sender),
@@ -261,6 +264,44 @@ pub fn execute(
             let proof_fetcher = proof_job.map(|(peers, epochs)| {
                 scope.spawn(move || proofs::fetch(peers, epochs, &stop_proofs))
             });
+            // VRF の証明は状態に依らないので、実行するスレッドから外して確かめる。コミットする前に、そこまでを
+            // 確かめ終えるのを待つ
+            let verifier =
+                scope.spawn(move || {
+                    for job in vrf_jobs {
+                        match job {
+                            VrfJob::Verify {
+                                height,
+                                key,
+                                alpha,
+                                proof,
+                            } => {
+                                if vrf::verify(&key, &alpha.0, &proof).is_none() {
+                                    vrf_failure.lock().expect("not poisoned").get_or_insert(format!(
+                                    "高さ {height}: ブロックを出した人: VRF の証明が通りません"
+                                ));
+                                }
+                            }
+                            VrfJob::Flush(done) => {
+                                let _ = done.send(());
+                            }
+                        }
+                    }
+                });
+            // ここまでに頼んだ VRF の証明を確かめ終えるのを待ち、通らなかったものがあれば返す
+            let verified = || -> Result<(), String> {
+                let stopped = || "VRF の証明を確かめるスレッドが止まりました".to_owned();
+                let (done, wait) = mpsc::sync_channel(1);
+                vrf_sender
+                    .send(VrfJob::Flush(done))
+                    .map_err(|_| stopped())?;
+                wait.recv().map_err(|_| stopped())?;
+                vrf_failure
+                    .lock()
+                    .expect("not poisoned")
+                    .take()
+                    .map_or(Ok(()), Err)
+            };
             let writer = scope.spawn(move || -> Result<([Duration; 2], u64), DbError> {
                 // 書くのと、コミットにかかった時間。全体と、区間（PROFILE_EVERY ごと）
                 let mut spent = [Duration::ZERO; 2];
@@ -353,6 +394,10 @@ pub fn execute(
             let mut segment_start = start + 1;
             while executor.height() < target && !(context.stopping)() {
                 let height = executor.height() + 1;
+                if let Some(error) = vrf_failure.lock().expect("not poisoned").take() {
+                    failure = Some(error);
+                    break;
+                }
                 let mut lap = Instant::now();
                 let (block, bytes) = match blocks.recv() {
                     Ok(Ok(fetched)) => fetched,
@@ -368,7 +413,8 @@ pub fn execute(
                     }
                 };
                 phases.add(Phase::WaitBlocks, &mut lap);
-                // 実行する前に、1つ前のブロックのあとの状態で、難易度とブロックを出した人を確かめる。Nemesis は信じる
+                // 実行する前に、1つ前のブロックのあとの状態で、難易度とブロックを出した人を確かめる。Nemesis は信じる。
+                // VRF の証明は別のスレッドで確かめる
                 let generation_hash = match &parent {
                     None => block.generation_hash(),
                     Some(parent) => {
@@ -380,13 +426,22 @@ pub fn execute(
                             ));
                             break;
                         }
-                        match executor.check_harvester(
-                            parent,
-                            &parent_generation_hash,
-                            &block,
-                            context.parameters,
-                        ) {
-                            Ok(generation_hash) => generation_hash,
+                        match executor.check_hit(parent, &block, context.parameters) {
+                            Ok(key) => {
+                                let job = VrfJob::Verify {
+                                    height,
+                                    key,
+                                    alpha: parent_generation_hash,
+                                    proof: block.generation_hash_proof.clone(),
+                                };
+                                if vrf_sender.send(job).is_err() {
+                                    failure = Some(
+                                        "VRF の証明を確かめるスレッドが止まりました".to_owned(),
+                                    );
+                                    break;
+                                }
+                                block.generation_hash()
+                            }
                             Err(error) => {
                                 failure = Some(format!("高さ {height}: {error}"));
                                 break;
@@ -452,6 +507,10 @@ pub fn execute(
                 phases.add(Phase::Voters, &mut lap);
                 let mut sent = write_sender.send(write);
                 if sent.is_ok() && height % save_every == 0 {
+                    if let Err(error) = verified() {
+                        failure = Some(error);
+                        break;
+                    }
                     sent = write_sender.send(Write::Commit {
                         height,
                         meta: executor.encode_meta(),
@@ -481,19 +540,26 @@ pub fn execute(
                     segment_start = height + 1;
                 }
             }
-            if executor.height() < target {
-                abandoned.store(true, Ordering::Relaxed);
-            }
             if failure.is_none() && uncommitted && !(context.stopping)() {
                 // 取れなくなって止まったときも、そこまでに実行したものはしまう。止める合図のときは、しまわずに
                 // 捨てる（次に始めたときに、最後のコミットから実行し直す）
-                let _ = write_sender.send(Write::Commit {
-                    height: executor.height(),
-                    meta: executor.encode_meta(),
-                    durable: true,
-                    drop_blocks_through: None,
-                });
+                match verified() {
+                    Ok(()) => {
+                        let _ = write_sender.send(Write::Commit {
+                            height: executor.height(),
+                            meta: executor.encode_meta(),
+                            durable: true,
+                            drop_blocks_through: None,
+                        });
+                    }
+                    Err(error) => failure = Some(error),
+                }
             }
+            if executor.height() < target || failure.is_some() {
+                abandoned.store(true, Ordering::Relaxed);
+            }
+            drop(vrf_sender);
+            verifier.join().expect("verifier does not panic");
             drop(write_sender);
             drop(blocks);
             let (written, committed) = writer.join().expect("writer does not panic")?;
@@ -555,12 +621,25 @@ pub fn execute(
     Ok(executor.height())
 }
 
+/// 別のスレッドで確かめる、ブロックの VRF の証明
+enum VrfJob {
+    /// 高さ `height` のブロックの証明を、ブロックを出した人の VRF の鍵 `key` で、1つ前の generation hash `alpha` について
+    Verify {
+        height: u64,
+        key: PublicKey,
+        alpha: GenerationHash,
+        proof: VrfProof,
+    },
+    /// ここまでに頼んだものを確かめ終えたら返す
+    Flush(mpsc::SyncSender<()>),
+}
+
 /// 実行するスレッドの、1ブロックの中の段階
 #[derive(Clone, Copy)]
 enum Phase {
     /// 読むスレッドからブロックが来るのを待つ
     WaitBlocks,
-    /// 難易度と、ブロックを出した人（VRF の証明と当たり）を確かめる
+    /// 難易度と、ブロックを出した人（当たり。VRF の証明は別のスレッドで確かめる）を確かめる
     Harvester,
     /// ブロックを当てる
     Apply,

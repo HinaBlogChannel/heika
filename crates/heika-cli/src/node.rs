@@ -10,8 +10,8 @@ use clap::Subcommand;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
-use heika_p2p::ClientConnection;
 use heika_packet::{NetworkNode, NodeRoles};
+use heika_peer_protocol::ClientConnection;
 use heika_tls::Identity;
 
 use crate::cert::{AnyPrivateKey, read_chain};

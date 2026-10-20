@@ -23,7 +23,7 @@ use heika_block::{Block, BlockType};
 use heika_cert::certificate::Certificate;
 use heika_cert::key;
 use heika_core::network::NetworkParameters;
-use heika_p2p::ClientConnection;
+use heika_peer_protocol::ClientConnection;
 use heika_tls::Identity;
 use heika_transaction::{Body, LinkAction, Transaction, TransactionsHashCalculation, scan};
 

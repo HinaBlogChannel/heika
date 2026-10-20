@@ -14,7 +14,7 @@ use heika_core::hash::Hash256;
 use heika_core::network::NetworkParameters;
 use heika_harvesting::delegation::{DelegationTracker, LinkKind, Status};
 use heika_harvesting::harvesters_dat;
-use heika_p2p::ClientConnection;
+use heika_peer_protocol::ClientConnection;
 use heika_tls::Identity;
 use heika_transaction::scan;
 

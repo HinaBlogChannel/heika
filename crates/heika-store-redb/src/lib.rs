@@ -7,7 +7,7 @@
 //! - `blocks`: 高さ → ブロックのバイト列
 //! - `state`: 木の番号 + 状態のキー → 状態（`execute::persist`）
 //! - `meta`: 名前 → 値。`executor` に、木に入らない実行の状態
-//! - `changesets`: （高さ、状態のキー）→ その高さのブロックで変わる前の状態。[`ABSENT`] ならなかった
+//! - `changesets`: （高さ、状態のキー）→ その高さのブロックで変わる前の状態。`ABSENT`（0 の 1 バイト）ならなかった
 //! - `history`: （状態のキー、高さ）→ なし。キーが変わった高さの索引
 //! - `proofs`: エポック → ファイナライズの証明のバイト列（catapult の `FinalizationProof`）
 //! - `voters`: エポック → 投票者（`heika_block::finalization::proof::VotingSet::encode`）。実行のついでに、前のエポックの最後の高さで書く
@@ -897,7 +897,7 @@ impl Db {
         Ok(removed)
     }
 
-    /// 状態の差分と索引を、`through` 以下の高さの分だけ消す（刈り込み）。[`Db::prune`] を見る
+    /// 状態の差分と索引を、`through` 以下の高さの分だけ消す（刈り込み）
     pub fn prune_state_history(
         &self,
         through: u64,

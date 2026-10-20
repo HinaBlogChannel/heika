@@ -196,7 +196,6 @@ fn catch_up_if_behind(
     };
     let context = catch_up::Context {
         parameters: setup.parameters,
-        identity: &setup.identity,
         nemesis: setup.nemesis,
         stopping,
         connect: &connect,
@@ -206,7 +205,11 @@ fn catch_up_if_behind(
         setup.config.clone(),
         &context,
         catch_up::Source::Peers {
-            discovered: catch_up::Discovered { peers, candidates },
+            discovered: catch_up::Discovered {
+                peers,
+                candidates,
+                identity: Arc::clone(&setup.identity),
+            },
             proof_peers,
             finalized,
         },

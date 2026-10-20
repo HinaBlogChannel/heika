@@ -24,10 +24,11 @@ pub struct Peer {
     pub connection: ClientConnection,
 }
 
-/// 追いつく段階で使うピア。つないだものと、外したら代わりにつなぐ候補のアドレス
+/// 追いつく段階で使うピア。つないだものと、外したら代わりにつなぐ候補のアドレスと、つなぎ直すのに使う身元
 pub struct Discovered {
     pub peers: Vec<Peer>,
     pub candidates: Vec<String>,
+    pub identity: std::sync::Arc<Identity>,
 }
 
 const PULL_BLOCKS: u32 = 360;
@@ -132,15 +133,17 @@ pub fn fetch(
     sender: &mpsc::SyncSender<Fetched>,
 ) {
     let super::Context {
-        identity,
         parameters,
         nemesis,
         stopping,
         ..
     } = *context;
     let Discovered {
-        peers, candidates, ..
+        peers,
+        candidates,
+        identity,
     } = discovered;
+    let identity = &*identity;
     // 渡し待ちの範囲の数と、渡すのを待った時間（ナノ秒）
     let queued = AtomicUsize::new(0);
     let sending = AtomicU64::new(0);

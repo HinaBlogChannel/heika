@@ -22,7 +22,6 @@ use heika_peer_protocol::ClientConnection;
 use heika_state_transition::config::ChainConfig;
 use heika_state_transition::executor::Executor;
 use heika_store_redb::{Db, DbError};
-use heika_tls::Identity;
 
 use fetch::Fetched;
 pub(crate) use fetch::connect_any;
@@ -42,7 +41,6 @@ pub const DEFAULT_SAVE_EVERY: u64 = 50_000;
 /// 追いつく段階に渡すもの
 pub struct Context<'a> {
     pub parameters: &'static NetworkParameters,
-    pub identity: &'a Identity,
     /// このネットワークの Nemesis のブロックのハッシュ
     pub nemesis: Hash256,
     /// 止める合図。真になったら、まだコミットしていない分を捨てて終わる

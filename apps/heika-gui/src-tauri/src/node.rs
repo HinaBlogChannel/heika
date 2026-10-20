@@ -9,8 +9,10 @@
 //! `/node/info`（そのノードを最初のつなぎ先にする）と `/node/peers`（つながらなければ代わりに使う）から決める。
 //! ノードの鍵と証明書は、最初に起動したときに作って使い続ける。待ち受けるのは、この PC の中（127.0.0.1:7900）だけ。
 //!
-//! 進み具合は、子が出す行から読む。
+//! 子の出力は、管ではなく設定ファイルの隣の `node.log` に書かせ、親はそれを読んで進み具合を出す。管にすると、
+//! 親が落ちたときに子が書けなくなって（EPIPE）、止める合図より先に落ちてしまう。
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -67,6 +69,21 @@ pub enum Mode {
 }
 
 impl Mode {
+    fn parse(name: &str) -> Option<Self> {
+        [Self::Light, Self::Full, Self::Archive]
+            .into_iter()
+            .find(|mode| mode.as_str() == name)
+    }
+
+    /// 画面の名前
+    fn label(self) -> &'static str {
+        match self {
+            Self::Light => "ライト",
+            Self::Full => "フル",
+            Self::Archive => "アーカイブ",
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -89,6 +106,8 @@ pub struct Status {
     pub last_line: Option<String>,
     /// 起動できなかったか、止まったわけ
     pub error: Option<String>,
+    /// これまでに動かした残し方。あれば選ばせずに、これで起動する
+    pub saved: Option<Mode>,
 }
 
 #[derive(Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -147,8 +166,40 @@ pub struct Paths {
 }
 
 #[tauri::command]
-pub fn node_status(node: tauri::State<'_, Arc<Node>>) -> Status {
-    node.status().clone()
+pub fn node_status(node: tauri::State<'_, Arc<Node>>, paths: tauri::State<'_, Paths>) -> Status {
+    let mut status = node.status().clone();
+    status.saved = last_saved(&paths.root);
+    status
+}
+
+/// これまでに書いた設定ファイルの、ネットワークごとの残し方。新しく書いたものから
+fn saved_modes(root: &Path) -> Vec<(String, Mode)> {
+    let mut saved: Vec<(std::time::SystemTime, String, Mode)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path().join("node.yaml");
+            let modified = path.metadata().ok()?.modified().ok()?;
+            let manifest = heika_node::config::Manifest::load(&path).ok()?;
+            let mode = Mode::parse(manifest.spec.storage.mode.as_str())?;
+            Some((
+                modified,
+                entry.file_name().to_string_lossy().into_owned(),
+                mode,
+            ))
+        })
+        .collect();
+    saved.sort_by_key(|(modified, _, _)| std::cmp::Reverse(*modified));
+    saved
+        .into_iter()
+        .map(|(_, network, mode)| (network, mode))
+        .collect()
+}
+
+/// 最後に動かした残し方
+fn last_saved(root: &Path) -> Option<Mode> {
+    saved_modes(root).first().map(|(_, mode)| *mode)
 }
 
 #[tauri::command]
@@ -247,6 +298,18 @@ async fn prepare(
     };
     let root = root.to_owned();
     tauri::async_runtime::spawn_blocking(move || {
+        // 一度動かしたネットワークは、同じ残し方でしか起動しない。変えるのは、需要が出てから
+        if let Some((_, saved)) = saved_modes(&root)
+            .into_iter()
+            .find(|(saved, _)| saved == network)
+            && saved != mode
+        {
+            return Err(format!(
+                "{network} は{}で動かしてきたので、{}では起動しません",
+                saved.label(),
+                mode.label()
+            ));
+        }
         let directory = root.join(network);
         let certificates = root.join("identity");
         heika_node::identity::ensure(&certificates, NAME).map_err(|error| error.to_string())?;
@@ -293,13 +356,17 @@ fn manifest(
 /// 自分をノードとして起動し、出す行を読んで様子を覚える
 fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let log_path = manifest.with_file_name("node.log");
+    let log = File::create(&log_path)
+        .map_err(|error| format!("{} を作れません: {error}", log_path.display()))?;
+    let log_for_errors = log.try_clone().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
     command
         .arg(NODE_ARGUMENT)
         .arg(manifest)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(log)
+        .stderr(log_for_errors);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -310,34 +377,47 @@ fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("ノードを起動できません: {error}"))?;
     let stdin = child.stdin.take().expect("piped");
-    for output in [
-        child
-            .stdout
-            .take()
-            .map(|out| Box::new(out) as Box<dyn Read + Send>),
-        child
-            .stderr
-            .take()
-            .map(|err| Box::new(err) as Box<dyn Read + Send>),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let status = Arc::clone(&node.status);
-        std::thread::spawn(move || {
-            for line in BufReader::new(output).lines().map_while(Result::ok) {
-                let mut status = status
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                read_line(&mut status, &line);
-            }
-        });
-    }
     node.status().state = State::CatchingUp;
     *node
         .running
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Running { child, stdin });
+    // 子の書いた行を、子が止まるまで追って読む
+    let reader = File::open(&log_path).map_err(|error| error.to_string())?;
+    let status = Arc::clone(&node.status);
+    let followed = Arc::clone(node);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                // 書きかけの行は、続きが来るまで待つ
+                Ok(read) if read > 0 && line.ends_with('\n') => {
+                    let mut status = status
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    read_line(&mut status, line.trim_end());
+                }
+                Ok(read) => {
+                    if read > 0 {
+                        // 読みかけた分は捨てずに、次に読む位置を戻す
+                        let _ = reader.seek_relative(-(read as i64));
+                    }
+                    let stopped = followed
+                        .running
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_none();
+                    if stopped {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(_) => return,
+            }
+        }
+    });
     // 子が自分で止まった（エラーなど）ら、止まったことにする
     let watched = Arc::clone(node);
     std::thread::spawn(move || {

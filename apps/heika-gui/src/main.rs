@@ -1312,6 +1312,8 @@ struct NodeStatus {
     target: Option<u64>,
     last_line: Option<String>,
     error: Option<String>,
+    /// これまでに動かした残し方（`light` など）。あれば選ばせない
+    saved: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1373,6 +1375,18 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                     {ctx.settings.get().rest.is_none().then(|| view! {
                         <p class="hint">"つなぐネットワークは、設定の REST から決めます。先に REST を決めてください。"</p>
                     })}
+                    {match current.saved.as_deref().and_then(|saved| NODE_MODES.iter().find(|(value, _, _)| *value == saved)) {
+                        Some((value, name, _)) => {
+                            let value: &'static str = value;
+                            view! {
+                                <p class="hint">{format!("{name}で動かしてきたデータの続きから起動します。")}</p>
+                                <div class="row">
+                                    <button class="primary" on:click=move |_| start(value) disabled=move || ctx.busy.get() || ctx.settings.get().rest.is_none()>"起動する"</button>
+                                </div>
+                            }
+                            .into_any()
+                        }
+                        None => view! {
                     <div class="choices">
                         {NODE_MODES
                             .iter()
@@ -1389,12 +1403,15 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                             })
                             .collect_view()}
                     </div>
+                        }
+                        .into_any(),
+                    }}
                 }
                 .into_any(),
                 state => {
                     let what = match state {
                         "preparing" => "準備しています…".to_owned(),
-                        "catching_up" => "確定したところまで追いついています".to_owned(),
+                        "catching_up" => "確定したところまで追いかけています".to_owned(),
                         "following" => match current.height {
                             Some(height) => format!("最新を追っています（高さ {height} まで追いつきました）"),
                             None => "最新を追っています".to_owned(),

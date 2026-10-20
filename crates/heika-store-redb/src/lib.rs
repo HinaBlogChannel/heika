@@ -26,6 +26,8 @@
 //! `history` は高さの順に書くと、キーがばらばらなので B 木のあちこちを書き換えることになり、重いため。
 //! まだ作っていない高さがあるあいだは、昔の値は引けない。
 
+mod chain_store;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;

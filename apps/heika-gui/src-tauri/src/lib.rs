@@ -24,6 +24,8 @@ mod clipboard;
 pub mod node;
 mod rest;
 mod send;
+#[cfg(desktop)]
+mod tray;
 
 /// 画面の下に出す、どこで動いているか
 #[derive(Serialize)]
@@ -392,7 +394,13 @@ fn keystore_path(app: &tauri::App) -> Result<PathBuf, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 2つ目を起動したら、それは終わり、1つ目の窓を出す。ほかのプラグインより先に置く
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        tray::show(app);
+    }));
+    builder
         .setup(|app| {
             #[cfg(target_os = "linux")]
             clipboard::keep_owned();
@@ -403,9 +411,20 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 app.manage(std::sync::Arc::new(node::Node::default()));
+                // DB は大きくなるので、Windows では同期されうる Roaming でなく Local に置く
                 app.manage(node::Paths {
-                    root: app.path().app_data_dir()?.join("node"),
+                    root: app.path().app_local_data_dir()?.join("node"),
                 });
+                let tray = match tray::build(app) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!(
+                            "通知領域にアイコンを置けません（窓を閉じたら終わります）: {error}"
+                        );
+                        false
+                    }
+                };
+                app.manage(tray::Available(tray));
             }
             app.manage(Wallet(Arc::new(Mutex::new(Session {
                 path,
@@ -438,6 +457,19 @@ pub fn run() {
             #[cfg(desktop)]
             node::node_stop,
         ])
+        .on_window_event(|_window, _event| {
+            // ノードが動いているあいだに窓を閉じたら、隠すだけにしてノードを動かし続ける。止まっていれば終わる
+            #[cfg(desktop)]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                let app = _window.app_handle();
+                if app.state::<tray::Available>().0
+                    && app.state::<std::sync::Arc<node::Node>>().is_running()
+                {
+                    api.prevent_close();
+                    let _ = _window.hide();
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("Tauri のアプリを起動できませんでした")
         .run(|_app, _event| {

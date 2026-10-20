@@ -500,10 +500,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Apache License 2.0
 
 - windows-link 0.2.1
-- windows-sys 0.52.0
 - windows-sys 0.61.2
-- windows-targets 0.52.6
-- windows_x86_64_msvc 0.52.6
 
                                  Apache License
                            Version 2.0, January 2004
@@ -711,6 +708,7 @@ Apache License 2.0
 ================================================================================
 Apache License 2.0
 
+- redb 4.4.0
 - rustls-platform-verifier 0.7.1
 - ureq 3.4.2
 
@@ -1976,13 +1974,22 @@ Apache License 2.0
 - cfg-if 1.0.5
 - core-foundation-sys 0.8.7
 - core-foundation 0.10.1
+- crossbeam-deque 0.8.8
+- crossbeam-epoch 0.9.21
+- crossbeam-utils 0.8.23
 - curve25519-dalek-derive 0.1.1
+- either 1.19.0
+- equivalent 1.0.3
+- hashbrown 0.17.1
 - heck 0.5.0
 - httparse 1.10.1
+- indexmap 2.14.2
 - log 0.4.34
 - once_cell 1.21.4
 - openssl-probe 0.2.1
 - percent-encoding 2.3.2
+- rayon-core 1.13.0
+- rayon 1.12.0
 - ring 0.17.14
 - rustls-native-certs 0.8.5
 - rustls 0.23.45
@@ -3053,10 +3060,12 @@ Apache License 2.0
 - libc 0.2.190
 - proc-macro2 1.0.107
 - quote 1.0.47
+- ryu 1.0.23
 - serde 1.0.229
 - serde_core 1.0.229
 - serde_derive 1.0.229
 - serde_json 1.0.151
+- serde_norway 0.9.42
 - syn 2.0.119
 - syn 3.0.7
 - unicode-ident 1.0.26
@@ -3809,6 +3818,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License
 
+- unsafe-libyaml-norway 0.2.15
 - zmij 1.0.23
 
 Permission is hereby granted, free of charge, to any

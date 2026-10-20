@@ -2,3 +2,4 @@
 //! ソケット、保存（heika-store-redb）をつなぐ。
 
 pub mod config;
+pub mod keys;

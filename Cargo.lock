@@ -570,8 +570,11 @@ dependencies = [
 name = "heika-node"
 version = "0.7.0"
 dependencies = [
+ "heika-cert",
+ "heika-core",
  "serde",
  "serde_norway",
+ "zeroize",
 ]
 
 [[package]]

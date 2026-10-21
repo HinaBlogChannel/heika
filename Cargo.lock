@@ -486,7 +486,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heika-block"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "heika-cert"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64ct",
  "der",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "heika-chain"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "heika-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "clap",
  "der",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "heika-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base16ct",
  "curve25519-dalek",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "heika-harvesting"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "heika-node"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-cert",
@@ -589,14 +589,14 @@ dependencies = [
 
 [[package]]
 name = "heika-packet"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-core",
 ]
 
 [[package]]
 name = "heika-peer"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-chain",
  "heika-core",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "heika-peer-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-packet",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "heika-rest"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "heika-state-transition"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "heika-store-redb"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-chain",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "heika-tls"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-cert",
  "heika-core",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "heika-transaction"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-core",
  "ripemd",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "heika-vectors"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "heika-block",
  "heika-cert",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "heika-wallet"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "base64ct",

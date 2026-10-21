@@ -655,8 +655,10 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
     }
 
     /// 先端の段階で、`keys`（署名の鍵、VRF の鍵。リモートならリモートの鍵）でハーベストする
+    /// 動かしたまま入れ替えてよく、次に先端が変わるのを待たずに、当たりの時刻を求め直す
     pub fn set_harvesters(&mut self, keys: Arc<Vec<(PrivateKey, PrivateKey)>>) {
         self.harvesters = keys;
+        self.planned = None;
     }
 
     /// 確定を上げるたびに、残す分より下の差分を消す

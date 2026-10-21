@@ -7,12 +7,14 @@
 //! Heika-Keystore-Version: 1
 //! Secret-Type: Mnemonic
 //! Secret: <単語> <単語> … <単語>
+//! Harvest-Secret: <単語> <単語> … <単語>
 //! Account: mainnet 0 main
 //! Account: testnet 0 test
 //!
 //! Heika-Keystore-Version: 1
 //! Secret-Type: Private-Key
 //! Secret: <秘密鍵の16進>
+//! Harvest-Secret: <単語> <単語> … <単語>
 //! Account: mainnet cold
 //! ```
 //!
@@ -21,6 +23,13 @@
 //! - 知らないキーは読み飛ばすので、あとからキーを足せる
 //! - ニーモニックは単語のまま入れる。パスフレーズを空にしたシードを入れると、あとから BIP39 のパスフレーズで
 //!   別のウォレットを導出できなくなるため
+//! - `Harvest-Secret` は、ハーベストに使うリモートと VRF の鍵を導出するための 24 語のニーモニック。
+//!   使うかどうかに関わらず、書くときにすべての秘密に入れる（[`Keystore::fill_harvest_secrets`]）。
+//!   どのキーストアにも同じようにあるので、あることからはハーベストしているかどうかがわからない。
+//!   アカウントと同じ BIP39 のパスフレーズをかけて導出するので、パスフレーズ（25 番目の単語）ごとに別の鍵になり、
+//!   キーストアを開けても、隠しウォレットのリンクはたどれない。一度入れたら書き換えない。
+//!   書き換えた時刻が、チェーンでリンクした時刻と並んで、どのアカウントかの手がかりになるため。
+//!   鍵を作り直すときは、導出の番号を上げる（[`slip10::harvest_path`]）
 //!
 //! 秘密は、復号したバッファから参照で切り出して、消える型に直接読む。書くときは先に長さを数えて確保し、
 //! バッファが引っ越して古い領域が消えずに残ることがないようにする。
@@ -33,8 +42,9 @@ use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use crate::age::{self, AgeError};
-use crate::bip39::{InvalidPassphrase, Mnemonic};
-use crate::slip10::{self, ExtendedKey};
+use crate::bip39::{InvalidPassphrase, Mnemonic, WordCount};
+use crate::harvest_request::HarvesterKeys;
+use crate::slip10::{self, ExtendedKey, HarvestRole};
 
 const VERSION: &str = "1";
 
@@ -66,6 +76,8 @@ pub struct Account {
 #[derive(Debug)]
 pub struct Entry {
     pub secret: Secret,
+    /// ハーベストの鍵を導出するニーモニック。足すときは `None` にしておけば、書くときに作る
+    pub harvest_secret: Option<Mnemonic>,
     pub accounts: Vec<Account>,
 }
 
@@ -184,6 +196,56 @@ impl Keystore {
         Ok((account, private_key))
     }
 
+    /// ハーベストの秘密がない秘密に、新しく作って入れる。すでにあるものは変えない。
+    pub fn fill_harvest_secrets<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) {
+        for entry in &mut self.entries {
+            entry
+                .harvest_secret
+                .get_or_insert_with(|| Mnemonic::generate_with_rng(rng, WordCount::Words24));
+        }
+    }
+
+    /// ラベルでアカウントを探し、そのハーベストの鍵を求める。
+    ///
+    /// `bip39_passphrase` は [`Self::private_key`] と同じで、ニーモニックのアカウントでだけ使う。
+    /// `rotation` は作り直しの番号で、ふだんは 0。ハーベストの秘密がまだなければ `None`
+    pub fn harvester_keys(
+        &self,
+        label: &str,
+        bip39_passphrase: &str,
+        rotation: u32,
+    ) -> Result<Option<HarvesterKeys>, KeystoreError> {
+        let (entry, account) = self
+            .accounts()
+            .find(|(_, account)| account.label == label)
+            .ok_or_else(|| KeystoreError::UnknownLabel(label.to_owned()))?;
+        let entry = &self.entries[entry];
+        let Some(harvest_secret) = &entry.harvest_secret else {
+            return Ok(None);
+        };
+        let passphrase = match entry.secret {
+            Secret::Mnemonic(_) => bip39_passphrase,
+            Secret::PrivateKey(_) => "",
+        };
+        let seed = harvest_secret
+            .to_seed(passphrase)
+            .map_err(KeystoreError::Bip39Passphrase)?;
+        let root = ExtendedKey::from_seed(seed.as_bytes());
+        let derive = |role| {
+            root.derive_path(&slip10::harvest_path(
+                account.network,
+                account.index.unwrap_or(0),
+                role,
+                rotation,
+            ))
+            .private_key()
+        };
+        Ok(Some(HarvesterKeys {
+            signing: derive(HarvestRole::Remote),
+            vrf: derive(HarvestRole::Vrf),
+        }))
+    }
+
     /// 開いた中身のテキスト。秘密が入るので、消えるようにして返す。
     pub fn to_text(&self) -> Zeroizing<Vec<u8>> {
         let mut parts: Vec<Zeroizing<String>> = Vec::new();
@@ -202,6 +264,11 @@ impl Keystore {
             parts.push(Zeroizing::new("Secret: ".to_owned()));
             parts.push(secret);
             parts.push(Zeroizing::new("\n".to_owned()));
+            if let Some(harvest_secret) = &entry.harvest_secret {
+                parts.push(Zeroizing::new("Harvest-Secret: ".to_owned()));
+                parts.push(harvest_secret.to_phrase());
+                parts.push(Zeroizing::new("\n".to_owned()));
+            }
             for account in &entry.accounts {
                 let network = network_name(account.network);
                 parts.push(Zeroizing::new(match account.index {
@@ -233,6 +300,7 @@ impl Keystore {
             let mut version = None;
             let mut secret_type = None;
             let mut secret = None;
+            let mut harvest_secret = None;
             let mut accounts = Vec::new();
             for line in block.split('\n') {
                 let (key, value) = line.split_once(": ").ok_or(KeystoreError::Format)?;
@@ -240,6 +308,7 @@ impl Keystore {
                     "Heika-Keystore-Version" => &mut version,
                     "Secret-Type" => &mut secret_type,
                     "Secret" => &mut secret,
+                    "Harvest-Secret" => &mut harvest_secret,
                     "Account" => {
                         accounts.push(value);
                         continue;
@@ -268,11 +337,18 @@ impl Keystore {
                 ),
                 _ => return Err(KeystoreError::Format),
             };
+            let harvest_secret = harvest_secret
+                .map(|value| value.parse().map_err(|_| KeystoreError::InvalidSecret))
+                .transpose()?;
             let accounts = accounts
                 .into_iter()
                 .map(|value| parse_account(value, mnemonic))
                 .collect::<Result<_, _>>()?;
-            keystore.add(Entry { secret, accounts })?;
+            keystore.add(Entry {
+                secret,
+                harvest_secret,
+                accounts,
+            })?;
         }
         Ok(keystore)
     }
@@ -426,6 +502,7 @@ mod tests {
         keystore
             .add(Entry {
                 secret: Secret::Mnemonic(MNEMONIC.parse().unwrap()),
+                harvest_secret: None,
                 accounts: vec![
                     Account {
                         network: NetworkIdentifier::MAINNET,
@@ -443,6 +520,7 @@ mod tests {
         keystore
             .add(Entry {
                 secret: Secret::PrivateKey(PRIVATE_KEY.parse().unwrap()),
+                harvest_secret: None,
                 accounts: vec![Account {
                     network: NetworkIdentifier::MAINNET,
                     index: None,
@@ -638,6 +716,91 @@ mod tests {
             assert!(check_label(label).is_err(), "{label:?}");
         }
         assert!(check_label("メイン 1").is_ok());
+    }
+
+    /// ハーベストの秘密を、どちらの秘密にもテスト用のニーモニックで入れたもの
+    fn keystore_with_harvest_secrets() -> Keystore {
+        let mut keystore = keystore();
+        for entry in &mut keystore.entries {
+            entry.harvest_secret = Some(MNEMONIC.parse().unwrap());
+        }
+        keystore
+    }
+
+    #[test]
+    fn fills_harvest_secrets_only_where_missing() {
+        let mut keystore = keystore();
+        keystore.entries[1].harvest_secret = Some(MNEMONIC.parse().unwrap());
+        keystore.fill_harvest_secrets(&mut Replay(&[5; 32]));
+        let filled = keystore.entries[0].harvest_secret.as_ref().unwrap();
+        assert_eq!(filled.word_count(), 24);
+        assert_eq!(filled.entropy(), &[5; 32]);
+        // すでにあったものは変えない
+        assert_eq!(
+            *keystore.entries[1]
+                .harvest_secret
+                .as_ref()
+                .unwrap()
+                .to_phrase(),
+            MNEMONIC
+        );
+    }
+
+    #[test]
+    fn writes_and_reads_harvest_secrets() {
+        let keystore = keystore_with_harvest_secrets();
+        let text = keystore.to_text();
+        let text = std::str::from_utf8(&text).unwrap();
+        assert!(text.contains(&format!(
+            "Secret: {MNEMONIC}\nHarvest-Secret: {MNEMONIC}\nAccount: mainnet 0 main\n"
+        )));
+        assert!(text.contains(&format!(
+            "Secret: {PRIVATE_KEY}\nHarvest-Secret: {MNEMONIC}\nAccount: mainnet cold\n"
+        )));
+        let read = Keystore::from_text(text.as_bytes()).unwrap();
+        assert_eq!(*read.to_text(), *keystore.to_text());
+    }
+
+    #[test]
+    fn derives_harvester_keys() {
+        let hex = |keys: &HarvesterKeys| (keys.signing.to_hex(), keys.vrf.to_hex());
+        // 値は、ニーモニックから BIP39 と SLIP-10 を Python で別に計算したもの
+        const REMOTE: &str = "FFD1CB7DC92FE03ED9BDF3709FA66E06B39A9E793C0DF0B14A5AD97FA57F4B1C";
+        const VRF: &str = "36B7DE817C0FCF97BA88941F03A9D2208F64159AFCCA0D57047B8AF54C66CBA0";
+
+        assert!(keystore().harvester_keys("main", "", 0).unwrap().is_none());
+        let keystore = keystore_with_harvest_secrets();
+        let (remote, vrf) = hex(&keystore.harvester_keys("main", "", 0).unwrap().unwrap());
+        assert_eq!((remote.as_str(), vrf.as_str()), (REMOTE, VRF));
+        // アカウントの鍵とは別
+        let (_, main) = keystore.private_key("main", "").unwrap();
+        assert_ne!(*main.to_hex(), *remote);
+
+        // テストネットの3番、作り直しの番号 1 の、リモートの鍵
+        let keys = keystore
+            .harvester_keys("テスト用 3", "", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            &*keys.signing.to_hex(),
+            "9115B2B24728D41247C50F2372EAA06197E5158415166BD459A4DDF60461B47D"
+        );
+        // 25 番目の単語が違えば、別の鍵
+        let keys = keystore
+            .harvester_keys("テスト用 3", "hidden", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            &*keys.signing.to_hex(),
+            "69D097D192C832194E6210E0E5260CD2E476FEF576B2CEA7F20844AD26C50C31"
+        );
+
+        // 秘密鍵のアカウントは、25 番目の単語を使わず、番号 0 として導出する
+        let (remote, vrf) = hex(&keystore
+            .harvester_keys("cold", "hidden", 0)
+            .unwrap()
+            .unwrap());
+        assert_eq!((remote.as_str(), vrf.as_str()), (REMOTE, VRF));
     }
 
     #[test]

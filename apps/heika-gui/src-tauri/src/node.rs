@@ -18,17 +18,20 @@
 //! プロセスの標準出力と標準エラー出力を、そのファイルに向け直す。
 
 use std::fs::File;
-#[cfg(desktop)]
-use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 #[cfg(desktop)]
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(desktop)]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use heika_node::harvesters::{KeyPair, MemoryHarvesters};
 use serde::{Deserialize, Serialize};
+#[cfg(desktop)]
+use zeroize::Zeroizing;
 
 use crate::rest;
 
@@ -40,7 +43,8 @@ const LISTEN: &str = "127.0.0.1:7900";
 /// 証明書の CN
 const NAME: &str = "heika";
 
-/// `--node <設定ファイル>` で起動されたなら、ノードとして動いて真を返す。標準入力が閉じたら止める
+/// `--node <設定ファイル>` で起動されたなら、ノードとして動いて真を返す。標準入力の `harvesters` の行
+/// （[`heika_node::harvesters`]）でハーベストの鍵を入れ替え、標準入力が閉じたら止める
 #[cfg(desktop)]
 pub fn run_child_if_asked() -> bool {
     let mut args = std::env::args_os().skip(1);
@@ -52,15 +56,16 @@ pub fn run_child_if_asked() -> bool {
         std::process::exit(2);
     };
     static STOP: AtomicBool = AtomicBool::new(false);
+    static HARVESTERS: LazyLock<MemoryHarvesters> = LazyLock::new(MemoryHarvesters::new);
     std::thread::spawn(|| {
-        // 親は何も書かない。閉じる（EOF）か、読めなくなったら止める合図
-        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        // 閉じる（EOF）か、読めなくなったら止める合図
+        heika_node::harvesters::read_input(std::io::stdin().lock(), &HARVESTERS);
         STOP.store(true, Ordering::Relaxed);
     });
     let result = heika_node::config::Manifest::load(Path::new(&config))
         .map_err(|error| error.to_string())
         .and_then(|manifest| {
-            heika_node::driver::run(&manifest, &|| STOP.load(Ordering::Relaxed))
+            heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &HARVESTERS)
                 .map_err(|error| error.to_string())
         });
     if let Err(error) = result {
@@ -119,6 +124,8 @@ pub struct Status {
     pub error: Option<String>,
     /// これまでに動かした残し方。あれば選ばせずに、これで起動する
     pub saved: Option<Mode>,
+    /// 鍵を渡して、ハーベストしているアカウントのアドレス
+    pub harvesting: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -147,6 +154,7 @@ struct Running {
 struct Running {
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
+    harvesters: Arc<MemoryHarvesters>,
 }
 
 /// 通知（Android のフォアグラウンドサービス）に伝えること
@@ -200,6 +208,51 @@ impl Node {
         }
     }
 
+    /// 動いているノードのネットワーク（`mainnet` か `testnet`）。止まっていれば `None`
+    pub fn network(&self) -> Option<&'static str> {
+        let status = self.status();
+        matches!(status.state, State::CatchingUp | State::Following)
+            .then_some(status.network)
+            .flatten()
+    }
+
+    /// 動いているノードに、ハーベストの鍵をメモリだけで渡す（前のものと入れ替える）。`account` は画面に出す
+    /// アドレス。空にすると、ハーベストをやめる
+    pub fn set_harvesters(
+        &self,
+        keys: Vec<KeyPair>,
+        account: Option<String>,
+    ) -> Result<(), String> {
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let running = running.as_mut().ok_or("ノードが動いていません")?;
+        #[cfg(desktop)]
+        {
+            use std::io::Write;
+            // 鍵が入るので、引っ越さないように先に確保する
+            let mut line = Zeroizing::new(String::with_capacity(16 + keys.len() * 130));
+            line.push_str("harvesters");
+            for (signing, vrf) in &keys {
+                line.push(' ');
+                line.push_str(&signing.to_hex());
+                line.push(' ');
+                line.push_str(&vrf.to_hex());
+            }
+            line.push('\n');
+            running
+                .stdin
+                .write_all(line.as_bytes())
+                .and_then(|()| running.stdin.flush())
+                .map_err(|error| format!("ノードに鍵を渡せません: {error}"))?;
+        }
+        #[cfg(target_os = "android")]
+        running.harvesters.replace(keys);
+        self.status().harvesting = account;
+        Ok(())
+    }
+
     /// ノードに止まってもらい、止まるのを待つ。アプリを閉じるときにも呼ぶ
     pub fn stop_and_wait(&self) {
         let running = self
@@ -222,7 +275,10 @@ impl Node {
             running.stop.store(true, Ordering::Relaxed);
             let _ = running.thread.join();
         }
-        self.status().state = State::Stopped;
+        let mut status = self.status();
+        status.state = State::Stopped;
+        status.harvesting = None;
+        drop(status);
         self.notify(Notice::Stop);
     }
 }
@@ -467,6 +523,7 @@ fn spawn(node: &Arc<Node>, manifest: &Path) -> Result<(), String> {
                 running.take();
                 let mut status = watched.status();
                 status.state = State::Stopped;
+                status.harvesting = None;
                 if !exit.success() {
                     status.error = status.last_line.clone();
                 }
@@ -487,6 +544,7 @@ fn spawn(node: &Arc<Node>, manifest_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("{} を作れません: {error}", log_path.display()))?;
     redirect_output(&log)?;
     let stop = Arc::new(AtomicBool::new(false));
+    let harvesters = Arc::new(MemoryHarvesters::new());
     node.status().state = State::CatchingUp;
     node.notify(Notice::Start("起動しています".to_owned()));
     {
@@ -497,8 +555,13 @@ fn spawn(node: &Arc<Node>, manifest_path: &Path) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let finished = Arc::clone(node);
         let stopping = Arc::clone(&stop);
+        let memory = Arc::clone(&harvesters);
         let thread = std::thread::spawn(move || {
-            let result = heika_node::driver::run(&manifest, &|| stopping.load(Ordering::Relaxed));
+            let result = heika_node::driver::run_with(
+                &manifest,
+                &|| stopping.load(Ordering::Relaxed),
+                &memory,
+            );
             if let Err(error) = &result {
                 eprintln!("ノードが止まりました: {error}");
             }
@@ -512,12 +575,17 @@ fn spawn(node: &Arc<Node>, manifest_path: &Path) -> Result<(), String> {
             if ours {
                 let mut status = finished.status();
                 status.state = State::Stopped;
+                status.harvesting = None;
                 status.error = result.err().map(|error| error.to_string());
                 drop(status);
                 finished.notify(Notice::Stop);
             }
         });
-        *running = Some(Running { stop, thread });
+        *running = Some(Running {
+            stop,
+            thread,
+            harvesters,
+        });
     }
     follow_log(node, &log_path)
 }

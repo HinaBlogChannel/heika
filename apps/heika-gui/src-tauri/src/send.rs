@@ -21,7 +21,7 @@ use crate::Wallet;
 use crate::rest::{Client, Config, Failure};
 
 /// 期限。今から2時間後
-const LIFETIME: Duration = Duration::from_secs(2 * 60 * 60);
+pub(crate) const LIFETIME: Duration = Duration::from_secs(2 * 60 * 60);
 /// XYM の可分性。メインネットもテストネットも 6
 const XYM_DIVISIBILITY: u8 = 6;
 
@@ -35,13 +35,46 @@ pub enum Speed {
 }
 
 impl Speed {
-    fn multiplier(self) -> u32 {
+    /// 安い順
+    const ALL: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
+
+    /// REST のノードが受け付けるもののうち、いちばん安いもの。安すぎると、受け取った時点で捨てられる
+    pub(crate) async fn cheapest_accepted(client: &Client) -> Result<Self, String> {
+        let body = client
+            .get("/network/fees/transaction".to_owned())
+            .await?
+            .ok_or("REST の /network/fees/transaction がありません")?;
+        let fees: FeeMultipliers = serde_json::from_slice(&body)
+            .map_err(|error| format!("REST の手数料の倍率が読めません: {error}"))?;
+        Self::cheapest_above(fees.min_fee_multiplier).ok_or_else(|| {
+            format!(
+                "REST のノードは、手数料の倍率が {} より安いと受け付けません",
+                fees.min_fee_multiplier
+            )
+        })
+    }
+
+    fn cheapest_above(min: u32) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|speed| speed.multiplier() >= min)
+    }
+
+    pub(crate) fn multiplier(self) -> u32 {
         match self {
             Self::Slow => 10,
             Self::Normal => 25,
             Self::Fast => 100,
         }
     }
+}
+
+/// REST の `/network/fees/transaction` の、使うところ
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeMultipliers {
+    /// REST のノードが受け付ける最低の倍率
+    min_fee_multiplier: u32,
 }
 
 /// 下書きと、送ったものの控え
@@ -379,19 +412,19 @@ fn describe_status(status: &TransactionStatus) -> String {
     }
 }
 
-fn network_now(network: &NetworkParameters) -> Result<u64, String> {
+pub(crate) fn network_now(network: &NetworkParameters) -> Result<u64, String> {
     network
         .timestamp_at(SystemTime::now())
         .map(|timestamp| timestamp.0)
         .ok_or_else(|| "時計がネットワークのエポックより前になっています".to_owned())
 }
 
-fn unix_millis(network: &NetworkParameters, timestamp: u64) -> Option<u64> {
+pub(crate) fn unix_millis(network: &NetworkParameters, timestamp: u64) -> Option<u64> {
     let time = network.time_of(NetworkTimestamp(timestamp))?;
     u64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
-fn network_name(network: &NetworkParameters) -> &'static str {
+pub(crate) fn network_name(network: &NetworkParameters) -> &'static str {
     if network.identifier == NetworkParameters::MAINNET.identifier {
         "mainnet"
     } else {
@@ -400,7 +433,7 @@ fn network_name(network: &NetworkParameters) -> &'static str {
 }
 
 /// いちばん小さい単位の量を、XYM の桁で区切る
-fn xym(amount: u64) -> String {
+pub(crate) fn xym(amount: u64) -> String {
     let digits = format!("{amount:07}");
     let (whole, fraction) = digits.split_at(digits.len() - usize::from(XYM_DIVISIBILITY));
     format!("{whole}.{fraction}")
@@ -409,6 +442,16 @@ fn xym(amount: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_cheapest_speed_the_node_accepts() {
+        let pick = |min| Speed::cheapest_above(min).map(Speed::multiplier);
+        assert_eq!(pick(0), Some(10));
+        assert_eq!(pick(10), Some(10));
+        assert_eq!(pick(11), Some(25));
+        assert_eq!(pick(100), Some(100));
+        assert_eq!(pick(101), None);
+    }
 
     #[test]
     fn writes_xym_with_six_decimals() {

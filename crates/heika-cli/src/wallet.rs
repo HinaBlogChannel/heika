@@ -234,7 +234,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 return Err(format!("{} はすでにあります", path.display()).into());
             }
             let passphrase = new_passphrase(keystore.passphrase_file.as_deref())?;
-            save(&path, &Keystore::new(), &passphrase)?;
+            save(&path, &mut Keystore::new(), &passphrase)?;
             outln!("キーストアを作りました: {}", path.display());
         }
         WalletCommand::Add {
@@ -295,7 +295,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             store
                 .add_account(entry, account.clone())
                 .map_err(|error| error.to_string())?;
-            save(&path, &store, &passphrase)?;
+            save(&path, &mut store, &passphrase)?;
             describe(&store, &account.label, "")?;
         }
         WalletCommand::List { keystore, expert } => {
@@ -349,7 +349,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             keep_backup,
             keystore,
         } => {
-            let (path, passphrase, store) = keystore.open()?;
+            let (path, passphrase, mut store) = keystore.open()?;
             let next = new_passphrase(new_passphrase_file.as_deref())?;
             if *next == *passphrase {
                 return Err("前と同じパスフレーズです".to_owned().into());
@@ -365,7 +365,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                 );
                 terminal::confirm("消しますか？ [y/N]: ")?
             };
-            save(&path, &store, &next)?;
+            save(&path, &mut store, &next)?;
             outln!("パスフレーズを変えました: {}", path.display());
             if !remove_backup {
                 outln!(
@@ -391,7 +391,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
             store
                 .rename_account(&label, &new_label)
                 .map_err(|error| error.to_string())?;
-            save(&path, &store, &passphrase)?;
+            save(&path, &mut store, &passphrase)?;
             outln!("{label} を {new_label} に変えました");
         }
         WalletCommand::Remove {
@@ -425,7 +425,7 @@ pub fn run(command: WalletCommand) -> Result<(), Failure> {
                     .remove_entry(entry)
                     .map_err(|error| error.to_string())?;
             }
-            save(&path, &store, &passphrase)?;
+            save(&path, &mut store, &passphrase)?;
             if with_secret {
                 outln!("{label} を、その{kind}ごと消しました");
             } else {
@@ -452,10 +452,11 @@ fn add_entry(
     store
         .add(Entry {
             secret,
+            harvest_secret: None,
             accounts: vec![account.clone()],
         })
         .map_err(|error| error.to_string())?;
-    save(path, &store, passphrase)?;
+    save(path, &mut store, passphrase)?;
     describe(&store, &account.label, "")?;
     if is_mnemonic {
         outln!(
@@ -620,7 +621,7 @@ fn default_path() -> Result<PathBuf, String> {
 }
 
 /// キーストアを、どこで落ちても壊れないように書く
-fn save(path: &Path, keystore: &Keystore, passphrase: &str) -> Result<(), String> {
+fn save(path: &Path, keystore: &mut Keystore, passphrase: &str) -> Result<(), String> {
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     keystore_file::save(&mut rng, path, keystore, passphrase).map_err(|error| error.to_string())
 }

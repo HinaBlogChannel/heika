@@ -29,6 +29,7 @@ use heika_tls::{ConnectError, Identity};
 
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
+use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
 use crate::serve::{DbSource, Gate, Responder, serve};
@@ -49,7 +50,16 @@ pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
 /// 設定 `manifest` のノードを、`stopping` が真になるまで先端の段階で動かす。DB が空なら、ピアから Nemesis を
 /// 取って始める
 pub fn run(manifest: &Manifest, stopping: &(dyn Fn() -> bool + Sync)) -> Result<(), NodeError> {
-    let setup = Setup::new(&manifest.spec)?;
+    run_with(manifest, stopping, &MemoryHarvesters::new())
+}
+
+/// [`run`] と同じで、設定ファイルの鍵に、`memory` の鍵も足してハーベストする。`memory` は動かしたまま入れ替えられる
+pub fn run_with(
+    manifest: &Manifest,
+    stopping: &(dyn Fn() -> bool + Sync),
+    memory: &MemoryHarvesters,
+) -> Result<(), NodeError> {
+    let setup = Setup::new(&manifest.spec, memory)?;
     loop {
         catch_up_if_behind(&setup, stopping)?;
         if stopping() {
@@ -71,11 +81,14 @@ struct Setup<'a> {
     nemesis: Hash256,
     config: ChainConfig,
     identity: Arc<Identity>,
-    harvesters: Arc<Vec<(PrivateKey, PrivateKey)>>,
+    /// 設定ファイルの鍵
+    harvesters: Vec<KeyPair>,
+    /// メモリだけで渡された鍵
+    memory: &'a MemoryHarvesters,
 }
 
 impl<'a> Setup<'a> {
-    fn new(spec: &'a NodeConfig) -> Result<Self, NodeError> {
+    fn new(spec: &'a NodeConfig, memory: &'a MemoryHarvesters) -> Result<Self, NodeError> {
         let parameters = network_parameters(spec)?;
         let nemesis = match &spec.network.nemesis_hash {
             Some(hash) => hash
@@ -89,8 +102,28 @@ impl<'a> Setup<'a> {
             nemesis,
             config: chain_config(spec)?,
             identity: Arc::new(load_identity(&spec.certificates.directory)?),
-            harvesters: Arc::new(read_harvesters(spec)?),
+            harvesters: read_harvesters(spec)?,
+            memory,
         })
+    }
+
+    /// メモリの鍵が入れ替わっていれば（`applied` は前に使った回数）、設定ファイルの鍵と合わせたものを返す
+    fn harvesters_if_changed(&self, applied: Option<u64>) -> Option<(u64, Arc<Vec<KeyPair>>)> {
+        let (version, memory) = self.memory.current();
+        if applied == Some(version) {
+            return None;
+        }
+        let copy = |key: &PrivateKey| PrivateKey::from_bytes(key.as_bytes());
+        let keys: Vec<KeyPair> = self
+            .harvesters
+            .iter()
+            .chain(memory.iter())
+            .map(|(signing, vrf)| (copy(signing), copy(vrf)))
+            .collect();
+        if !keys.is_empty() || applied.is_some() {
+            println!("{} 組の鍵でハーベストします", keys.len());
+        }
+        Some((version, Arc::new(keys)))
     }
 
     /// 住所録（しまったものと seed）
@@ -294,7 +327,10 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     if let Some(keep) = keep(spec)? {
         chain.set_keep(keep);
     }
-    chain.set_harvesters(Arc::clone(&setup.harvesters));
+    let (mut applied, keys) = setup
+        .harvesters_if_changed(None)
+        .expect("always returned the first time");
+    chain.set_harvesters(keys);
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
@@ -352,6 +388,17 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                         NodeEvent::Chain(ChainEvent::Tick) if stopping() => {
                             println!("高さ {} で止めました", chain.height());
                             return Ok(Outcome::Stopped);
+                        }
+                        NodeEvent::Chain(ChainEvent::Tick) => {
+                            if let Some((version, keys)) =
+                                setup.harvesters_if_changed(Some(applied))
+                            {
+                                applied = version;
+                                chain.set_harvesters(keys);
+                            }
+                            if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
+                                return Ok(outcome);
+                            }
                         }
                         NodeEvent::Chain(event) => {
                             if let Some(outcome) = now_or_never(chain.handle(event))? {
@@ -493,7 +540,7 @@ fn load_identity(directory: &Path) -> Result<Identity, NodeError> {
 }
 
 /// ハーベストする鍵の組。持ち主のほかも読めるファイルなら、警告を出す（止めはしない）
-fn read_harvesters(spec: &NodeConfig) -> Result<Vec<(PrivateKey, PrivateKey)>, NodeError> {
+fn read_harvesters(spec: &NodeConfig) -> Result<Vec<KeyPair>, NodeError> {
     let mut keys = Vec::new();
     for harvester in &spec.harvesters {
         for path in [&harvester.signer, &harvester.vrf] {
@@ -508,9 +555,6 @@ fn read_harvesters(spec: &NodeConfig) -> Result<Vec<(PrivateKey, PrivateKey)>, N
             read_private_key(&harvester.signer)?,
             read_private_key(&harvester.vrf)?,
         ));
-    }
-    if !keys.is_empty() {
-        println!("{} 組の鍵でハーベストします", keys.len());
     }
     Ok(keys)
 }

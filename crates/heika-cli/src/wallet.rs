@@ -12,6 +12,7 @@ use heika_core::address::Address;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkIdentifier;
 use heika_wallet::bip39::{Mnemonic, WordCount};
+use heika_wallet::harvest_request::HarvesterKeys;
 use heika_wallet::keystore::{Account, Entry, Keystore, KeystoreError, Secret, check_label};
 use heika_wallet::keystore_file;
 use zeroize::Zeroizing;
@@ -176,6 +177,58 @@ pub struct ExpertArgs {
     /// BIP39 のパスフレーズはどこにも保存しないので、忘れると取り戻せない
     #[arg(long, conflicts_with = "passphrase_file")]
     expert: bool,
+}
+
+/// ハーベストの鍵を、キーストアのアカウントから導出するときの引数。
+#[derive(Args)]
+pub struct HarvestKeystoreArgs {
+    #[command(flatten)]
+    keystore: KeystoreArgs,
+    #[command(flatten)]
+    expert: ExpertArgs,
+}
+
+/// キーストアから導出した、アカウントのハーベストの鍵
+pub struct DerivedHarvester {
+    pub network: NetworkIdentifier,
+    /// アカウント（メインアカウント）の公開鍵
+    pub public_key: PublicKey,
+    pub keys: HarvesterKeys,
+}
+
+impl HarvestKeystoreArgs {
+    /// キーストアを開き、`label` のアカウントのハーベストの鍵（リモートと VRF）を導出する。作り直しの番号は 0。
+    /// キーストアにハーベストの秘密がまだなければ、作って書き直す
+    pub fn derive(&self, label: &str) -> Result<DerivedHarvester, String> {
+        let (path, passphrase, mut store) = self.keystore.open()?;
+        let bip39_passphrase = self.expert.bip39_passphrase()?;
+        let (account, private_key) = store
+            .private_key(label, &bip39_passphrase)
+            .map_err(|error| error.to_string())?;
+        let (network, public_key) = (account.network, PublicKey::from_private_key(&private_key));
+        drop(private_key);
+        let derive = |store: &Keystore| {
+            store
+                .harvester_keys(label, &bip39_passphrase, 0)
+                .map_err(|error| error.to_string())
+        };
+        let keys = match derive(&store)? {
+            Some(keys) => keys,
+            None => {
+                save(&path, &mut store, &passphrase)?;
+                eprintln!(
+                    "キーストアに、ハーベストの鍵を導出する秘密を足しました: {}",
+                    path.display()
+                );
+                derive(&store)?.expect("filled when saved")
+            }
+        };
+        Ok(DerivedHarvester {
+            network,
+            public_key,
+            keys,
+        })
+    }
 }
 
 /// 署名に使う鍵を、標準入力の代わりにキーストアから取るときの引数。

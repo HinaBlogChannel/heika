@@ -619,6 +619,16 @@ button.card.selected {
   font-size: 0.8rem;
 }
 
+/* ノードが最後に出した行。1 秒ごとに変わるので、2 行の高さに決めて、はみ出たら省く */
+.node-line {
+  display: -webkit-box;
+  height: 3.2em;
+  overflow: hidden;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 /* 残高。整数の部分を大きく、小数と単位を小さく */
 .balance {
   margin: var(--space-8) 0 var(--space-6);

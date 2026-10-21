@@ -1496,6 +1496,8 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                 .into_any(),
                 state => {
                     let harvest = harvest_panel(ctx, current.clone(), refresh);
+                    let line = current.last_line.clone().unwrap_or_default();
+                    let title = line.clone();
                     let what = match state {
                         "preparing" => "準備しています…".to_owned(),
                         "catching_up" => "確定したところまで追いかけています".to_owned(),
@@ -1525,7 +1527,8 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                         <p>{what}</p>
                         <p class="hint">{detail}</p>
                         {bar}
-                        {current.last_line.map(|line| view! { <p class="hint address">{line}</p> })}
+                        // 行の長さが変わっても下のボタンが動かないように、高さを決めた枠に出す
+                        <p class="hint address node-line" title=title>{line}</p>
                         <div class="row">
                             <button on:click=stop disabled=move || ctx.busy.get() || state_is_stopping(status)>"止める"</button>
                         </div>

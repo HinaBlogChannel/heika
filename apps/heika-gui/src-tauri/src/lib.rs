@@ -497,6 +497,7 @@ pub fn run() {
             send::prepare_send,
             send::send,
             send::outbox,
+            send::fee_multipliers,
             #[cfg(any(desktop, target_os = "android"))]
             node::node_status,
             #[cfg(any(desktop, target_os = "android"))]

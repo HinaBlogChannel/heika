@@ -249,7 +249,10 @@ pub async fn prepare_harvest_link(
     // 急ぐものではないので、REST のノードが受け付けるいちばん安いものにする
     let client = config.client().map_err(|failure| failure.detail)?;
     let speed = Speed::cheapest_accepted(&client).await?;
-    transaction.fee = transaction.fee_for(speed.multiplier(), 0);
+    transaction.fee = transaction.fee_for(
+        speed.multiplier(None).expect("a preset has a multiplier"),
+        0,
+    );
     if let Some(problem) = transaction.validate(network).first() {
         return Err(format!("ノードで弾かれる形です: {}", problem.failure));
     }

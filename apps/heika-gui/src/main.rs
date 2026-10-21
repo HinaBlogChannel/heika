@@ -83,12 +83,24 @@ struct BalanceArgs {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PrepareArgs {
     from: String,
     to: String,
     amount: String,
     message: String,
     speed: String,
+    /// `speed` が `custom` のときの倍率
+    custom_multiplier: Option<u32>,
+}
+
+/// 本体の `fee_multipliers` が返す、設定した REST のノードの手数料の倍率
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeMultipliers {
+    median_fee_multiplier: u32,
+    /// これより安いと、ノードが受け取った時点で捨てる
+    min_fee_multiplier: u32,
 }
 
 #[derive(Serialize)]
@@ -158,6 +170,7 @@ struct DraftView {
     network: String,
     amount: String,
     fee: String,
+    multiplier: u32,
     total: String,
     deadline: f64,
     message: String,
@@ -323,8 +336,10 @@ struct SendForm {
     to: RwSignal<String>,
     amount: RwSignal<String>,
     message: RwSignal<String>,
-    /// 手数料の倍率。`slow`、`normal`、`fast`
+    /// 手数料の倍率。`slow`、`normal`、`fast`、`custom`
     speed: RwSignal<String>,
+    /// `custom` のときに入れた倍率
+    custom: RwSignal<String>,
 }
 
 impl SendForm {
@@ -334,6 +349,7 @@ impl SendForm {
             amount: RwSignal::new(String::new()),
             message: RwSignal::new(String::new()),
             speed: RwSignal::new("normal".to_owned()),
+            custom: RwSignal::new(String::new()),
         }
     }
 
@@ -1005,6 +1021,13 @@ fn sent_list(list: Vec<SentView>, hidden: bool) -> impl IntoView {
 }
 
 /// XYM を送る。宛先と量を入れてもらい、確かめる画面に進む
+/// 決め打ちの手数料の速さ（値、倍率、名前、説明）。安い順
+const SPEEDS: [(&str, u32, &str, &str); 3] = [
+    ("slow", 10, "ゆっくり", "混んでいると、入るまで待たされます"),
+    ("normal", 25, "ふつう", "たいていはすぐ入ります"),
+    ("fast", 100, "いそぐ", "混んでいても先に入りやすくなります"),
+];
+
 fn send_view(ctx: Ctx) -> impl IntoView {
     let Some(account) = ctx.current() else {
         return view! { <p class="lead">"アカウントがありません。"</p> }.into_any();
@@ -1025,37 +1048,75 @@ fn send_view(ctx: Ctx) -> impl IntoView {
             amount: form.amount.get_untracked(),
             message: form.message.get_untracked(),
             speed: form.speed.get_untracked(),
+            custom_multiplier: form.custom.get_untracked().trim().parse().ok(),
         };
+        if args.speed == "custom" && args.custom_multiplier.is_none() {
+            ctx.error.set(Some(
+                "手数料の倍率を、0 以上の整数で入れてください".to_owned(),
+            ));
+            return;
+        }
         ctx.run("prepare_send", args, move |draft| {
             ctx.go(Screen::Approve(draft))
         });
     };
-    let speeds = [
-        (
-            "slow",
-            "ゆっくり",
-            "手数料 ×10。混んでいると、入るまで待たされます",
-        ),
-        ("normal", "ふつう", "手数料 ×25"),
-        ("fast", "いそぐ", "手数料 ×100"),
-    ]
-    .into_iter()
-    .map(|(value, label, description)| {
-        view! {
-            <label class="speed">
-                <input
-                    type="radio"
-                    name="speed"
-                    value=value
-                    prop:checked=move || form.speed.get() == value
-                    on:change=move |_| form.speed.set(value.to_owned())
-                />
-                <span class="name">{label}</span>
-                <span class="hint">{description}</span>
-            </label>
+    // REST のノードが受け付ける倍率を聞いて、それより安い決め打ちのものは選べなくする。聞けなければ、どれも選べる
+    let fees = RwSignal::new(None::<FeeMultipliers>);
+    spawn_local(async move {
+        if let Ok(current) = call::<FeeMultipliers>("fee_multipliers", NoArgs {}).await {
+            fees.set(Some(current));
+            // 選んでいたものが受け付けられないなら、受け付けられるいちばん安いものにする
+            let selected = SPEEDS
+                .iter()
+                .find(|(value, ..)| *value == form.speed.get_untracked());
+            if selected.is_some_and(|(_, multiplier, ..)| *multiplier < current.min_fee_multiplier)
+            {
+                let cheapest = SPEEDS
+                    .iter()
+                    .find(|(_, multiplier, ..)| *multiplier >= current.min_fee_multiplier)
+                    .map_or("custom", |(value, ..)| value);
+                form.speed.set(cheapest.to_owned());
+            }
         }
-    })
-    .collect_view();
+    });
+    let rejected = move |multiplier: u32| {
+        fees.get()
+            .is_some_and(|fees| multiplier < fees.min_fee_multiplier)
+    };
+    let speeds = SPEEDS
+        .into_iter()
+        .map(|(value, multiplier, label, description)| {
+            view! {
+                <label class="speed" class:rejected=move || rejected(multiplier)>
+                    <input
+                        type="radio"
+                        name="speed"
+                        value=value
+                        prop:checked=move || form.speed.get() == value
+                        prop:disabled=move || rejected(multiplier)
+                        on:change=move |_| form.speed.set(value.to_owned())
+                    />
+                    <span class="name">{label}</span>
+                    <span class="hint">
+                        {move || if rejected(multiplier) {
+                            format!("手数料 ×{multiplier}。つなぐノードが受け付けません")
+                        } else {
+                            format!("手数料 ×{multiplier}。{description}")
+                        }}
+                    </span>
+                </label>
+            }
+        })
+        .collect_view();
+    let custom_low = move || {
+        form.speed.get() == "custom"
+            && form
+                .custom
+                .get()
+                .trim()
+                .parse::<u32>()
+                .is_ok_and(rejected)
+    };
     view! {
         <div class="row heading">
             <strong>{account.label.clone()}</strong>
@@ -1079,6 +1140,32 @@ fn send_view(ctx: Ctx) -> impl IntoView {
             <fieldset class="speeds">
                 <legend>"手数料"</legend>
                 {speeds}
+                <label class="speed">
+                    <input
+                        type="radio"
+                        name="speed"
+                        value="custom"
+                        prop:checked=move || form.speed.get() == "custom"
+                        on:change=move |_| form.speed.set("custom".to_owned())
+                    />
+                    <span class="name">"カスタム"</span>
+                    <span class="hint">"倍率を自分で決めます"</span>
+                </label>
+                {move || (form.speed.get() == "custom").then(|| view! {
+                    <label class="field">
+                        "手数料の倍率"
+                        <input type="text" inputmode="numeric" autocomplete="off" placeholder="100" bind:value=form.custom />
+                        {move || fees.get().map(|fees| view! {
+                            <span class="note">{format!(
+                                "つなぐノードは ×{} から受け付けます。最近のブロックの真ん中は ×{} です",
+                                fees.min_fee_multiplier, fees.median_fee_multiplier
+                            )}</span>
+                        })}
+                    </label>
+                })}
+                {move || custom_low().then(|| view! {
+                    <p class="warn">"つなぐノードが受け付けるより安いので、送っても捨てられます。"</p>
+                })}
             </fieldset>
             <div class="row">
                 <button type="submit" class="primary" disabled=move || ctx.busy.get()>"確かめる"</button>
@@ -1114,7 +1201,7 @@ fn approve(ctx: Ctx, draft: DraftView) -> impl IntoView {
         </p>
         <dl class="terms">
             <dt>"手数料"</dt>
-            <dd>{format!("{} XYM", grouped(&draft.fee))}</dd>
+            <dd>{format!("{} XYM（×{}）", grouped(&draft.fee), draft.multiplier)}</dd>
             <dt>"合わせて減る量"</dt>
             <dd>{format!("{} XYM", grouped(&draft.total))}</dd>
             <dt>"ネットワーク"</dt>

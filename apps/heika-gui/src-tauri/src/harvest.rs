@@ -174,7 +174,6 @@ pub async fn prepare_harvest_link(
     config: tauri::State<'_, Config>,
     drafts: tauri::State<'_, LinkDraft>,
     address: String,
-    speed: Speed,
 ) -> Result<LinkDraftView, String> {
     let checked = check(&wallet, &config, &address)
         .await
@@ -247,6 +246,9 @@ pub async fn prepare_harvest_link(
         deadline.0,
         Body::AggregateComplete(aggregate),
     );
+    // 急ぐものではないので、REST のノードが受け付けるいちばん安いものにする
+    let client = config.client().map_err(|failure| failure.detail)?;
+    let speed = Speed::cheapest_accepted(&client).await?;
     transaction.fee = transaction.fee_for(speed.multiplier(), 0);
     if let Some(problem) = transaction.validate(network).first() {
         return Err(format!("ノードで弾かれる形です: {}", problem.failure));

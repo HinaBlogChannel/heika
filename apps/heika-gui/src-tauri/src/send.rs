@@ -35,6 +35,31 @@ pub enum Speed {
 }
 
 impl Speed {
+    /// 安い順
+    const ALL: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
+
+    /// REST のノードが受け付けるもののうち、いちばん安いもの。安すぎると、受け取った時点で捨てられる
+    pub(crate) async fn cheapest_accepted(client: &Client) -> Result<Self, String> {
+        let body = client
+            .get("/network/fees/transaction".to_owned())
+            .await?
+            .ok_or("REST の /network/fees/transaction がありません")?;
+        let fees: FeeMultipliers = serde_json::from_slice(&body)
+            .map_err(|error| format!("REST の手数料の倍率が読めません: {error}"))?;
+        Self::cheapest_above(fees.min_fee_multiplier).ok_or_else(|| {
+            format!(
+                "REST のノードは、手数料の倍率が {} より安いと受け付けません",
+                fees.min_fee_multiplier
+            )
+        })
+    }
+
+    fn cheapest_above(min: u32) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|speed| speed.multiplier() >= min)
+    }
+
     pub(crate) fn multiplier(self) -> u32 {
         match self {
             Self::Slow => 10,
@@ -42,6 +67,14 @@ impl Speed {
             Self::Fast => 100,
         }
     }
+}
+
+/// REST の `/network/fees/transaction` の、使うところ
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeMultipliers {
+    /// REST のノードが受け付ける最低の倍率
+    min_fee_multiplier: u32,
 }
 
 /// 下書きと、送ったものの控え
@@ -409,6 +442,16 @@ pub(crate) fn xym(amount: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_cheapest_speed_the_node_accepts() {
+        let pick = |min| Speed::cheapest_above(min).map(Speed::multiplier);
+        assert_eq!(pick(0), Some(10));
+        assert_eq!(pick(10), Some(10));
+        assert_eq!(pick(11), Some(25));
+        assert_eq!(pick(100), Some(100));
+        assert_eq!(pick(101), None);
+    }
 
     #[test]
     fn writes_xym_with_six_decimals() {

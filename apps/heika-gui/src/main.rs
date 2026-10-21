@@ -92,12 +92,6 @@ struct PrepareArgs {
 }
 
 #[derive(Serialize)]
-struct LinkArgs {
-    address: String,
-    speed: &'static str,
-}
-
-#[derive(Serialize)]
 struct SettingsArgs {
     settings: Settings,
 }
@@ -1612,10 +1606,7 @@ fn harvest_panel(
                 } else {
                     ctx.run(
                         "prepare_harvest_link",
-                        LinkArgs {
-                            address,
-                            speed: "normal",
-                        },
+                        BalanceArgs { address },
                         move |draft| ctx.go(Screen::ApproveLink(draft)),
                     );
                 }

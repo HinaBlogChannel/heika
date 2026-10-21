@@ -9,7 +9,7 @@
 - ブロックの署名、難易度、VRF の証明とハーベストの当たり、トランザクションの中身、StateHash と ReceiptsHash、ファイナライズの証明（投票の署名と重み）まで、自分で確かめる
 - 残し方をアーカイブ、フル、ライトから選ぶ
 - 接続を受けて、ほかのノードの問い合わせに答える
-- ハーベストする（鍵のファイルを渡したとき）
+- ハーベストする（キーストアのアカウントを `--harvest` で渡すか、鍵のファイルを設定に書いたとき）
 - SIGINT か SIGTERM で、今のブロックを書き終えてから止まり、次に始めると続きから進む
 
 ## コマンドの例
@@ -17,6 +17,15 @@
 ```sh
 heika experimental peer start --config peer.yaml
 ```
+
+```sh
+heika harvesting --network mainnet --link-derived main --out link.bin
+heika tx sign --network mainnet --wallet-account main --out link.signed.bin link.bin
+heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem link.signed.bin < node.key.pem
+heika experimental peer start --config peer.yaml --harvest main
+```
+
+`--harvest <ラベル>` を付けると、起動するときにキーストアのパスフレーズを聞き、そのアカウントのリモートと VRF の鍵を導出して、ノードのメモリにだけ渡す。鍵はディスクに書かないので、止めて起動し直すたびにパスフレーズを聞く。先に `heika harvesting --link-derived` で、同じ鍵をチェーンに紐づけておく。`--keystore`、`--passphrase-file`、`--expert` は `heika wallet` と同じ。
 
 前で動き、様子を標準出力と標準エラーに出す。止めるときは Ctrl+C か `kill <pid>`（SIGTERM）にする。DB は書きかけで落ちても壊れないが、SIGKILL で止めると、次に開くときに直すのに時間がかかる。
 
@@ -48,7 +57,7 @@ spec:
 - `minFreeGigabytes`: ディスクの空きがこれより少なければ、書く前に止める。既定は 10
 - `storage`: 何を残すか（下の「残し方」）
 - `listen`: 接続を受ける。`address`（`0.0.0.0:7900` など）、`publicHost`（ほかのノードに名乗るホスト名。なければ相手が接続元から決める）、`friendlyName`。なければ、自分からつなぐだけ
-- `harvesters`: ハーベストする鍵の組の並び。`signer`（ブロックに署名する鍵。メインアカウントか、リンクしたリモートの鍵）と `vrf`（リンクした VRF の鍵）に、鍵のファイルの場所を書く。鍵は PEM、DER、16進のどれでも読む。持ち主のほかも読めるファイルなら警告を出す
+- `harvesters`: 鍵のファイルでハーベストするときの、鍵の組の並び。キーストアのアカウントでハーベストするなら、ここには書かずに `--harvest` を使う。`signer`（ブロックに署名する鍵。メインアカウントか、リンクしたリモートの鍵）と `vrf`（リンクした VRF の鍵）に、鍵のファイルの場所を書く。鍵は PEM、DER、16進のどれでも読む。持ち主のほかも読めるファイルなら警告を出す
 
 ## 残し方
 
@@ -74,3 +83,4 @@ spec:
 
 - デスクトップでは、ノードはウォレットとは別のプロセスで動く。ノードが動いているあいだは、窓を閉じても通知領域に隠れるだけで、通知領域のメニューの「終了」でノードを止めて終わる
 - Android では、ノードはアプリの中で動き、そのあいだは通知を出して、裏に回っても画面を消しても動き続ける
+- ノードが動いているあいだは、「このノードでブロックを作る」で、今のアカウントから導出した鍵でハーベストする。リンクがまだか、ほかの鍵なら、リンクのアグリゲートを確かめてもらってから送り、ブロックに入ったのが見えたら、鍵をノードのメモリにだけ渡す。鍵は、キーストアを閉じてもノードを止めるまで渡したままにする

@@ -10,6 +10,7 @@ use heika_wallet::harvest_request::{self, HarvesterKeys};
 
 use crate::tx::Unsigned;
 use crate::voting::VotingLink;
+use crate::wallet::HarvestKeystoreArgs;
 use crate::{Failure, Network};
 
 /// `heika harvesting` の引数。
@@ -18,9 +19,9 @@ use crate::{Failure, Network};
 pub struct HarvestingArgs {
     #[arg(long, value_enum)]
     network: Network,
-    /// メインアカウントの公開鍵
-    #[arg(long)]
-    signer: PublicKey,
+    /// メインアカウントの公開鍵。--link-derived なら、省くとキーストアのアカウントのものにする
+    #[arg(long, required_unless_present = "link_derived")]
+    signer: Option<PublicKey>,
     /// いま紐づいているリモートアカウントの公開鍵を外す
     #[arg(long, value_name = "PUBLIC_KEY", group = "action")]
     unlink_remote: Option<PublicKey>,
@@ -54,6 +55,17 @@ pub struct HarvestingArgs {
         conflicts_with_all = ["link_remote", "link_vrf", "link_node"]
     )]
     delegate: Option<PublicKey>,
+    /// キーストアのこのアカウントから導出したリモートと VRF の鍵を紐づける。heika experimental peer start --harvest
+    /// で同じ鍵を導出してハーベストするので、鍵のファイルは要らない
+    #[arg(
+        long,
+        value_name = "LABEL",
+        group = "action",
+        conflicts_with_all = ["link_remote", "link_vrf", "delegate"]
+    )]
+    link_derived: Option<String>,
+    #[command(flatten)]
+    keystore: HarvestKeystoreArgs,
     #[command(flatten)]
     unsigned: Unsigned,
 }
@@ -71,9 +83,26 @@ pub fn run(args: HarvestingArgs) -> Result<(), Failure> {
         mut link_node,
         link_voting,
         delegate,
+        link_derived,
+        keystore,
         unsigned,
     } = args;
     let identifier = NetworkIdentifier::from(network);
+
+    let mut signer = signer;
+    if let Some(label) = &link_derived {
+        let derived = keystore.derive(label)?;
+        if derived.network != identifier {
+            return Err(format!("{label} は --network と違うネットワークのアカウントです").into());
+        }
+        if signer.is_some_and(|signer| signer != derived.public_key) {
+            return Err(format!("--signer が {label} の公開鍵と違います").into());
+        }
+        signer = Some(derived.public_key);
+        link_remote = Some(PublicKey::from_private_key(&derived.keys.signing));
+        link_vrf = Some(PublicKey::from_private_key(&derived.keys.vrf));
+    }
+    let signer = signer.expect("required unless --link-derived");
 
     let mut request = None;
     if let Some(node) = delegate {

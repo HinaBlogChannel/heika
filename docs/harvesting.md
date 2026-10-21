@@ -3,6 +3,7 @@
 ## できること
 
 - ハーベストのためのリンクと委任（古いリンクの解除、新しいリンク、委任の要求を1つのアグリゲートにまとめる。委任ではリモートと VRF の鍵を毎回作り直す）
+- キーストアから導出したリモートと VRF の鍵のリンク（`--link-derived`）。同じ鍵を `heika experimental peer start --harvest` で導出して、鍵のファイルなしでハーベストする（[peer.md](peer.md)）
 - 投票鍵のファイルの作成と確認、チェーンへの紐づけ（catapult の votingkey と同じファイルを書き、公式の Python SDK と照合している）
 - トランザクションの中身の表示（25種類すべてと、チェーンにある古いバージョンのアグリゲート）
 - トランザクションへの署名と連署と、ノードへの送信（ノードの証明書で名乗って、ノードと TLS でつなぐ）
@@ -15,6 +16,7 @@ heika key voting show private_key_tree1.dat
 
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --delegate <ノードの公開鍵> --out harvesting.bin
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-remote <公開鍵> --link-vrf <公開鍵> --out harvesting.bin
+heika harvesting --network mainnet --link-derived main --out harvesting.bin
 heika harvesting --network mainnet --signer <メインアカウントの公開鍵> --link-voting <公開鍵>:<最初のエポック>-<最後のエポック> --out voting.bin
 heika tx show harvesting.bin
 heika tx show --json harvesting.bin
@@ -29,7 +31,7 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 
 ## ハーベストのリンクと委任
 
-`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。投票鍵は、`heika key voting generate` が出す `<公開鍵>:<最初のエポック>-<最後のエポック>` を `--link-voting` に渡して紐づけ、同じ書き方で `--unlink-voting` に渡して外す。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。
+`heika harvesting` は、リンクの解除、紐づけ、委任の要求を1つのアグリゲートにまとめる。`--delegate` を付けると、リモートアカウントと VRF の鍵をその場で作り、委任先のノードにだけ渡す。前の委任先のノードは古い鍵を知っているので、使い回すとそのノードがハーベストを続けられてしまうためである。自分のノードでハーベストするなら、`--link-derived <ラベル>` で、キーストアのそのアカウントから導出したリモートと VRF の公開鍵を紐づける。鍵はキーストアの `Harvest-Secret` から決まった形で導出するので、ファイルに書いて持っておく必要がない（[keystore.md](keystore.md)）。`--signer` を省くと、そのアカウントの公開鍵にする。heika のほかのノードで使う鍵なら、`heika key generate` で作った鍵の公開鍵を `--link-remote` と `--link-vrf` に渡す。古いリンクは `--unlink-remote`、`--unlink-vrf`、`--unlink-node` で外す。外すべき公開鍵は、前回の `heika harvesting` が表示する。投票鍵は、`heika key voting generate` が出す `<公開鍵>:<最初のエポック>-<最後のエポック>` を `--link-voting` に渡して紐づけ、同じ書き方で `--unlink-voting` に渡して外す。組むのに秘密鍵は要らず、メインアカウントの秘密鍵は `heika tx sign` で読む。
 
 ## トランザクション
 

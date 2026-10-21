@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Subcommand;
-use heika_node::config::Manifest;
+use heika_core::network::NetworkIdentifier;
+use heika_node::config::{Manifest, NetworkType};
+use heika_node::harvesters::MemoryHarvesters;
+
+use crate::wallet::HarvestKeystoreArgs;
 
 #[derive(Subcommand)]
 pub enum ExperimentalCommand {
@@ -20,6 +24,12 @@ pub enum PeerCommand {
     Start {
         #[arg(long)]
         config: PathBuf,
+        /// キーストアのこのアカウントから導出したリモートと VRF の鍵で、ハーベストする。鍵はノードのメモリにだけ置き、
+        /// ディスクには書かない。先に heika harvesting --link-derived で紐づけておく
+        #[arg(long, value_name = "LABEL")]
+        harvest: Option<String>,
+        #[command(flatten)]
+        keystore: HarvestKeystoreArgs,
     },
 }
 
@@ -28,13 +38,33 @@ static STOP: AtomicBool = AtomicBool::new(false);
 
 pub fn run(command: ExperimentalCommand) -> Result<(), String> {
     match command {
-        ExperimentalCommand::Peer(PeerCommand::Start { config }) => {
+        ExperimentalCommand::Peer(PeerCommand::Start {
+            config,
+            harvest,
+            keystore,
+        }) => {
             let manifest = Manifest::load(&config).map_err(|error| error.to_string())?;
+            let memory = MemoryHarvesters::new();
+            if let Some(label) = &harvest {
+                let derived = keystore.derive(label)?;
+                let expected = match manifest.spec.network.network_type {
+                    NetworkType::Mainnet => Some(NetworkIdentifier::MAINNET),
+                    NetworkType::Testnet => Some(NetworkIdentifier::TESTNET),
+                    NetworkType::Custom => None,
+                };
+                if expected.is_some_and(|network| network != derived.network) {
+                    return Err(format!(
+                        "{label} は、設定のネットワークと違うネットワークのアカウントです"
+                    ));
+                }
+                memory.replace(vec![(derived.keys.signing, derived.keys.vrf)]);
+                println!("{label} から導出した鍵を、ノードのメモリにだけ渡してハーベストします");
+            }
             if !manifest.metadata.name.is_empty() {
                 println!("{} を動かします", manifest.metadata.name);
             }
             watch_signals();
-            heika_node::driver::run(&manifest, &|| STOP.load(Ordering::Relaxed))
+            heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &memory)
                 .map_err(|error| error.to_string())
         }
     }

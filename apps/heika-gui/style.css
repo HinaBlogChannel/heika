@@ -826,6 +826,12 @@ fieldset.speeds legend {
   margin: 0;
 }
 
+/* つなぐノードが受け付けない速さ */
+.speed.rejected {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* 送ったもの */
 .sent {
   margin: 0;

@@ -25,27 +25,24 @@ pub(crate) const LIFETIME: Duration = Duration::from_secs(2 * 60 * 60);
 /// XYM の可分性。メインネットもテストネットも 6
 const XYM_DIVISIBILITY: u8 = 6;
 
-/// 手数料の倍率。トランザクションのバイト数に掛ける
+/// 手数料の倍率（トランザクションのバイト数に掛ける）の選び方
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Speed {
     Slow,
     Normal,
     Fast,
+    /// 倍率を自分で決める
+    Custom,
 }
 
 impl Speed {
-    /// 安い順
-    const ALL: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
+    /// 決め打ちのもの。安い順
+    const PRESETS: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
 
-    /// REST のノードが受け付けるもののうち、いちばん安いもの。安すぎると、受け取った時点で捨てられる
+    /// REST のノードが受け付けるもののうち、いちばん安い決め打ちのもの。安すぎると、受け取った時点で捨てられる
     pub(crate) async fn cheapest_accepted(client: &Client) -> Result<Self, String> {
-        let body = client
-            .get("/network/fees/transaction".to_owned())
-            .await?
-            .ok_or("REST の /network/fees/transaction がありません")?;
-        let fees: FeeMultipliers = serde_json::from_slice(&body)
-            .map_err(|error| format!("REST の手数料の倍率が読めません: {error}"))?;
+        let fees = fee_multipliers_of(client).await?;
         Self::cheapest_above(fees.min_fee_multiplier).ok_or_else(|| {
             format!(
                 "REST のノードは、手数料の倍率が {} より安いと受け付けません",
@@ -55,26 +52,48 @@ impl Speed {
     }
 
     fn cheapest_above(min: u32) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|speed| speed.multiplier() >= min)
+        Self::PRESETS.into_iter().find(|speed| {
+            speed
+                .multiplier(None)
+                .is_some_and(|multiplier| multiplier >= min)
+        })
     }
 
-    pub(crate) fn multiplier(self) -> u32 {
+    /// 倍率。自分で決めるときは `custom`
+    pub(crate) fn multiplier(self, custom: Option<u32>) -> Option<u32> {
         match self {
-            Self::Slow => 10,
-            Self::Normal => 25,
-            Self::Fast => 100,
+            Self::Slow => Some(10),
+            Self::Normal => Some(25),
+            Self::Fast => Some(100),
+            Self::Custom => custom,
         }
     }
 }
 
-/// REST の `/network/fees/transaction` の、使うところ
-#[derive(Deserialize)]
+/// REST の `/network/fees/transaction` の、使うところ。画面にもそのまま渡す
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FeeMultipliers {
-    /// REST のノードが受け付ける最低の倍率
+pub struct FeeMultipliers {
+    /// 最近のブロックの倍率の中央値
+    median_fee_multiplier: u32,
+    /// REST のノードが受け付ける最低の倍率。これより安いと、受け取った時点で捨てる
     min_fee_multiplier: u32,
+}
+
+async fn fee_multipliers_of(client: &Client) -> Result<FeeMultipliers, String> {
+    let body = client
+        .get("/network/fees/transaction".to_owned())
+        .await?
+        .ok_or("REST の /network/fees/transaction がありません")?;
+    serde_json::from_slice(&body)
+        .map_err(|error| format!("REST の手数料の倍率が読めません: {error}"))
+}
+
+/// 設定した REST のノードの、手数料の倍率の様子。画面で、受け付けない速さを選べなくするのに使う
+#[tauri::command]
+pub async fn fee_multipliers(config: tauri::State<'_, Config>) -> Result<FeeMultipliers, String> {
+    let client = config.client().map_err(|failure| failure.detail)?;
+    fee_multipliers_of(&client).await
 }
 
 /// 下書きと、送ったものの控え
@@ -134,6 +153,8 @@ pub struct DraftView {
     network: &'static str,
     amount: String,
     fee: String,
+    /// 手数料の倍率
+    multiplier: u32,
     total: String,
     /// 期限。Unix 時刻のミリ秒
     deadline: u64,
@@ -153,6 +174,7 @@ pub fn prepare_send(
     amount: String,
     message: String,
     speed: Speed,
+    custom_multiplier: Option<u32>,
 ) -> Result<DraftView, String> {
     let client = config.client().map_err(|failure| failure.detail)?;
     let from: Address = from.parse().map_err(|error| format!("{error}"))?;
@@ -219,7 +241,10 @@ pub fn prepare_send(
         .ok_or("時計がネットワークのエポックより前になっています")?;
     let mut transaction =
         Transaction::new(signer, from.network(), 0, deadline.0, Body::Transfer(body));
-    transaction.fee = transaction.fee_for(speed.multiplier(), 0);
+    let multiplier = speed
+        .multiplier(custom_multiplier)
+        .ok_or("手数料の倍率を入れてください")?;
+    transaction.fee = transaction.fee_for(multiplier, 0);
     if let Some(problem) = transaction.validate(network).first() {
         return Err(format!("ノードで弾かれる形です: {}", problem.failure));
     }
@@ -230,6 +255,7 @@ pub fn prepare_send(
         network: network_name(network),
         amount: xym(amount),
         fee: xym(transaction.fee),
+        multiplier,
         total: xym(amount.saturating_add(transaction.fee)),
         deadline: unix_millis(network, deadline.0).unwrap_or_default(),
         message,
@@ -445,7 +471,7 @@ mod tests {
 
     #[test]
     fn picks_the_cheapest_speed_the_node_accepts() {
-        let pick = |min| Speed::cheapest_above(min).map(Speed::multiplier);
+        let pick = |min| Speed::cheapest_above(min).and_then(|speed| speed.multiplier(None));
         assert_eq!(pick(0), Some(10));
         assert_eq!(pick(10), Some(10));
         assert_eq!(pick(11), Some(25));

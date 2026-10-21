@@ -18,16 +18,18 @@
 //! プロセスの標準出力と標準エラー出力を、そのファイルに向け直す。
 
 use std::fs::File;
-#[cfg(desktop)]
-use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 #[cfg(desktop)]
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(desktop)]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(desktop)]
+use heika_node::harvesters::MemoryHarvesters;
 use serde::{Deserialize, Serialize};
 
 use crate::rest;
@@ -40,7 +42,8 @@ const LISTEN: &str = "127.0.0.1:7900";
 /// 証明書の CN
 const NAME: &str = "heika";
 
-/// `--node <設定ファイル>` で起動されたなら、ノードとして動いて真を返す。標準入力が閉じたら止める
+/// `--node <設定ファイル>` で起動されたなら、ノードとして動いて真を返す。標準入力の `harvesters` の行
+/// （[`heika_node::harvesters`]）でハーベストの鍵を入れ替え、標準入力が閉じたら止める
 #[cfg(desktop)]
 pub fn run_child_if_asked() -> bool {
     let mut args = std::env::args_os().skip(1);
@@ -52,15 +55,16 @@ pub fn run_child_if_asked() -> bool {
         std::process::exit(2);
     };
     static STOP: AtomicBool = AtomicBool::new(false);
+    static HARVESTERS: LazyLock<MemoryHarvesters> = LazyLock::new(MemoryHarvesters::new);
     std::thread::spawn(|| {
-        // 親は何も書かない。閉じる（EOF）か、読めなくなったら止める合図
-        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        // 閉じる（EOF）か、読めなくなったら止める合図
+        heika_node::harvesters::read_input(std::io::stdin().lock(), &HARVESTERS);
         STOP.store(true, Ordering::Relaxed);
     });
     let result = heika_node::config::Manifest::load(Path::new(&config))
         .map_err(|error| error.to_string())
         .and_then(|manifest| {
-            heika_node::driver::run(&manifest, &|| STOP.load(Ordering::Relaxed))
+            heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &HARVESTERS)
                 .map_err(|error| error.to_string())
         });
     if let Err(error) = result {

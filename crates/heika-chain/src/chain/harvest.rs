@@ -26,14 +26,11 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         if self.harvesters.is_empty() || !matches!(self.sync, Sync::Idle) {
             return Ok(());
         }
-        // ピアの言う高さを聞いていて、どのピアも自分より先にいないときだけ作る。始めたばかりで統計がまだなら
-        // 待つ（でないと、追いつく前の古い先端の上に、自分だけの枝を作ってしまう）
-        let heard: Vec<u64> = self
+        let heard = self
             .peers
             .values()
-            .filter_map(|peer| peer.statistics.map(|statistics| statistics.height))
-            .collect();
-        if heard.is_empty() || heard.iter().any(|&height| height > self.tip.height) {
+            .filter_map(|peer| peer.statistics.map(|statistics| statistics.height));
+        if !ready_to_harvest(self.tip.height, self.finalized.height, heard) {
             return Ok(());
         }
         let harvesters = Arc::clone(&self.harvesters);
@@ -252,5 +249,34 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             retries += 1;
             self.undo_and_load(&draft, missed).await?;
         }
+    }
+}
+
+/// ピアの言う高さ `heard` から、先端（高さ `tip`）の上でハーベストしてよいか。
+///
+/// 自分の確定（高さ `finalized`）より後ろのピアは、同じチェーンにいるとは言えない（古いところで止まったノードなど）
+/// ので数えない。残りのピアの高さを1つ以上聞いていて、どれも自分より先にいないときだけ作る。始めたばかりで
+/// 聞けていないなら待つ。でないと、追いつく前の古い先端の上に、自分だけの枝を作ってしまう
+fn ready_to_harvest(tip: u64, finalized: u64, heard: impl Iterator<Item = u64>) -> bool {
+    let mut same_chain = heard.filter(|&height| height >= finalized).peekable();
+    same_chain.peek().is_some() && same_chain.all(|height| height <= tip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ready_to_harvest;
+
+    #[test]
+    fn harvests_only_when_no_peer_on_the_chain_is_ahead() {
+        let ready = |heights: &[u64]| ready_to_harvest(100, 90, heights.iter().copied());
+        assert!(ready(&[100, 99]));
+        // 先にいるピアがいれば、追いつくのを待つ
+        assert!(!ready(&[100, 101]));
+        // まだ聞けていなければ待つ
+        assert!(!ready(&[]));
+        // 確定より後ろの、古いところで止まったピアだけなら、聞けていないのと同じ
+        assert!(!ready(&[10]));
+        assert!(ready(&[10, 100]));
+        assert!(!ready(&[10, 101]));
     }
 }

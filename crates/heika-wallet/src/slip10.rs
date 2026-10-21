@@ -27,6 +27,31 @@ pub fn symbol_path(network: NetworkIdentifier, account: u32) -> [u32; 5] {
     [44, coin_type, account, 0, 0]
 }
 
+/// ハーベストの鍵の役割。[`harvest_path`] の4番目の番号になる。
+///
+/// [`symbol_path`] の4番目は 0 なので、1 から始めて、間違えて同じシードを渡してもアカウントの鍵にはならないようにする。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HarvestRole {
+    /// ブロックに署名するリモートアカウント
+    Remote = 1,
+    /// VRF
+    Vrf = 2,
+}
+
+/// ハーベストの鍵を導出するパス `m/44'/<coin type>'/<アカウント>'/<役割>'/<作り直しの番号>'`。
+///
+/// heika だけの約束。アカウントの鍵とは別のシード（キーストアの `Harvest-Secret`）から導出するので、
+/// [`symbol_path`] と同じ形でもぶつからない。作り直しの番号は、鍵を作り直すたびに1つ上げる。
+pub fn harvest_path(
+    network: NetworkIdentifier,
+    account: u32,
+    role: HarvestRole,
+    rotation: u32,
+) -> [u32; 5] {
+    let [purpose, coin_type, account, ..] = symbol_path(network, account);
+    [purpose, coin_type, account, role as u32, rotation]
+}
+
 /// 秘密鍵とチェーンコードの組。使い終わるとメモリを0で上書きする。
 #[derive(Clone)]
 pub struct ExtendedKey {

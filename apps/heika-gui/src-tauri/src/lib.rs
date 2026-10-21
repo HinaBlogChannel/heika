@@ -247,6 +247,7 @@ fn create(
     keystore
         .add(Entry {
             secret,
+            harvest_secret: None,
             accounts: vec![Account {
                 network,
                 index,
@@ -255,7 +256,7 @@ fn create(
         })
         .map_err(|error| error.to_string())?;
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
-    keystore_file::save(&mut rng, &path, &keystore, passphrase)
+    keystore_file::save(&mut rng, &path, &mut keystore, passphrase)
         .map_err(|error| error.to_string())?;
     let accounts = describe(&keystore)?;
     wallet.lock().keystore = Some(keystore);

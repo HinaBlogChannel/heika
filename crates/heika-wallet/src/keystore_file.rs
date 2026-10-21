@@ -55,16 +55,18 @@ pub fn remove_backup(path: &Path) -> Result<(), KeystoreFileError> {
 
 /// キーストアを書く。どこで落ちても、古いファイルか新しいファイルのどちらかが完全な形で残るようにする。
 ///
+/// ハーベストの秘密がない秘密には、先に作って入れる（[`Keystore::fill_harvest_secrets`]）。
 /// 同じフォルダーの一時ファイルに書いて同期し、読み戻して同じパスフレーズで開けることを確かめてから、
 /// 前のファイルを [`backup_path`] に写し、一時ファイルを本来の名前に置き換えて、フォルダーも同期する。
 pub fn save<R: CryptoRng + ?Sized>(
     rng: &mut R,
     path: &Path,
-    keystore: &Keystore,
+    keystore: &mut Keystore,
     passphrase: &str,
 ) -> Result<(), KeystoreFileError> {
     let directory = directory_of(path);
     create_private_directory(directory)?;
+    keystore.fill_harvest_secrets(rng);
     let sealed = keystore.seal(rng, passphrase.as_bytes(), age::DEFAULT_WORK_FACTOR);
 
     let temporary = with_suffix(path, ".tmp");
@@ -214,7 +216,7 @@ mod tests {
     fn writes_crash_safely_and_keeps_a_backup() {
         let directory = env::temp_dir().join(format!("heika-wallet-test-{}", std::process::id()));
         let path = directory.join("nested").join(FILE_NAME);
-        save(&mut Replay(&[1; 64]), &path, &Keystore::new(), "first").unwrap();
+        save(&mut Replay(&[1; 64]), &path, &mut Keystore::new(), "first").unwrap();
         let first = fs::read(&path).unwrap();
         assert!(Keystore::open(b"first", &first).is_ok());
         assert!(!backup_path(&path).exists());
@@ -231,6 +233,7 @@ mod tests {
         keystore
             .add(Entry {
                 secret: Secret::PrivateKey(PrivateKey::from_bytes(&[1; 32])),
+                harvest_secret: None,
                 accounts: vec![Account {
                     network: NetworkIdentifier::TESTNET,
                     index: None,
@@ -240,11 +243,14 @@ mod tests {
             .unwrap();
         // 前に落ちたときの一時ファイルが残っていても書ける
         fs::write(with_suffix(&path, ".tmp"), b"broken").unwrap();
-        save(&mut Replay(&[2; 64]), &path, &keystore, "second").unwrap();
+        save(&mut Replay(&[2; 96]), &path, &mut keystore, "second").unwrap();
         let backup = fs::read(backup_path(&path)).unwrap();
         assert_eq!(backup, first);
         let second = Keystore::open(b"second", &fs::read(&path).unwrap()).unwrap();
         assert_eq!(second.accounts().count(), 1);
+        // 書くときにハーベストの秘密を入れていて、読み戻しても同じ
+        assert!(keystore.entries()[0].harvest_secret.is_some());
+        assert_eq!(*second.to_text(), *keystore.to_text());
         fs::remove_dir_all(&directory).unwrap();
     }
 }

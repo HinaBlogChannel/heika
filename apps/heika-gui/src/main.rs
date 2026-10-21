@@ -92,6 +92,12 @@ struct PrepareArgs {
 }
 
 #[derive(Serialize)]
+struct LinkArgs {
+    address: String,
+    speed: &'static str,
+}
+
+#[derive(Serialize)]
 struct SettingsArgs {
     settings: Settings,
 }
@@ -162,6 +168,53 @@ struct DraftView {
     deadline: f64,
     message: String,
     rest: String,
+}
+
+/// 本体の `harvest_check` が返す、ハーベストできるかの様子
+#[derive(Clone, Deserialize)]
+struct HarvestView {
+    /// `none`、`ours`（このノード用の鍵）、`other`（ほかの鍵）
+    remote: String,
+    vrf: String,
+    importance: String,
+    balance: String,
+    min_balance: String,
+    enough_balance: bool,
+}
+
+impl HarvestView {
+    fn linked(&self) -> bool {
+        self.remote == "ours" && self.vrf == "ours"
+    }
+
+    /// 当たらないわけ。当たりうるなら `None`
+    fn warning(&self) -> Option<String> {
+        if !self.enough_balance {
+            Some(format!(
+                "残高が {} XYM で、ハーベストに要る {} XYM に足りません。このままでは当たりません。",
+                grouped(&self.balance),
+                grouped(&self.min_balance)
+            ))
+        } else if self.importance == "0" {
+            Some(
+                "重要度がまだ 0 なので、今は当たりません。重要度は数時間ごとに計算し直されるので、残高が足りていれば、そのうち当たるようになります。"
+                    .to_owned(),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+/// 本体の `prepare_harvest_link` が返す、リンクを送る前に確かめてもらう下書き
+#[derive(Clone, Deserialize)]
+struct LinkDraftView {
+    actions: Vec<String>,
+    network: String,
+    fee: String,
+    deadline: f64,
+    rest: String,
+    check: HarvestView,
 }
 
 /// 本体の `outbox` が返す、送ったもの
@@ -256,6 +309,8 @@ enum Screen {
     Licenses,
     /// 送る前に確かめてもらう。メニューは出さず、送るか戻るかだけにする
     Approve(DraftView),
+    /// ハーベストの鍵のリンクを、送る前に確かめてもらう
+    ApproveLink(LinkDraftView),
 }
 
 impl Screen {
@@ -308,6 +363,10 @@ struct Ctx {
     form: SendForm,
     /// ノードを動かせる（デスクトップと Android。iOS は裏で動かし続けられないので出さない）
     has_node: RwSignal<bool>,
+    /// ハーベストの鍵のリンクを送って、ブロックに入るのを待っているアカウントのアドレス
+    linking: RwSignal<Option<String>>,
+    /// 最後に確かめた、ハーベストできるかの様子
+    harvest: RwSignal<Option<HarvestView>>,
 }
 
 impl Ctx {
@@ -390,6 +449,8 @@ fn App() -> impl IntoView {
         settings: RwSignal::new(Settings::default()),
         form: SendForm::new(),
         has_node: RwSignal::new(false),
+        linking: RwSignal::new(None),
+        harvest: RwSignal::new(None),
     };
     ctx.restart();
 
@@ -414,7 +475,7 @@ fn App() -> impl IntoView {
         <div
             class="shell"
             class:inside=move || ctx.screen.with(Screen::inside)
-            class:approve=move || ctx.screen.with(|screen| matches!(screen, Screen::Approve(_)))
+            class:approve=move || ctx.screen.with(|screen| matches!(screen, Screen::Approve(_) | Screen::ApproveLink(_)))
         >
             {move || ctx.screen.with(Screen::inside).then(|| menu(ctx))}
             <main>
@@ -432,6 +493,7 @@ fn App() -> impl IntoView {
                     Screen::Home => home(ctx).into_any(),
                     Screen::Send => send_view(ctx).into_any(),
                     Screen::Approve(draft) => approve(ctx, draft).into_any(),
+                    Screen::ApproveLink(draft) => approve_link(ctx, draft).into_any(),
                     Screen::Accounts => accounts_view(ctx).into_any(),
                     Screen::Node => node_view(ctx).into_any(),
                     Screen::Settings => settings_view(ctx).into_any(),
@@ -1313,6 +1375,8 @@ struct NodeStatus {
     error: Option<String>,
     /// これまでに動かした残し方（`light` など）。あれば選ばせない
     saved: Option<String>,
+    /// 鍵を渡して、ハーベストしているアカウントのアドレス
+    harvesting: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1351,6 +1415,35 @@ fn node_view(ctx: Ctx) -> impl IntoView {
     };
     refresh();
     if let Ok(handle) = set_interval_with_handle(refresh, Duration::from_secs(1)) {
+        on_cleanup(move || handle.clear());
+    }
+    // リンクを送ったら、ブロックに入ったのが見えるまで確かめ直し、見えたら鍵を渡す
+    let poll_link = move || {
+        let Some(address) = ctx.linking.get_untracked() else {
+            return;
+        };
+        spawn_local(async move {
+            let Ok(view) = call::<HarvestView>(
+                "harvest_check",
+                BalanceArgs {
+                    address: address.clone(),
+                },
+            )
+            .await
+            else {
+                return;
+            };
+            let linked = view.linked();
+            ctx.harvest.set(Some(view));
+            if linked && ctx.linking.get_untracked().as_ref() == Some(&address) {
+                ctx.linking.set(None);
+                ctx.run("harvest_start", BalanceArgs { address }, move |()| {
+                    refresh()
+                });
+            }
+        });
+    };
+    if let Ok(handle) = set_interval_with_handle(poll_link, Duration::from_secs(15)) {
         on_cleanup(move || handle.clear());
     }
     let start = move |mode: &'static str| {
@@ -1408,6 +1501,7 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                 }
                 .into_any(),
                 state => {
+                    let harvest = harvest_panel(ctx, current.clone(), refresh);
                     let what = match state {
                         "preparing" => "準備しています…".to_owned(),
                         "catching_up" => "確定したところまで追いかけています".to_owned(),
@@ -1441,11 +1535,150 @@ fn node_view(ctx: Ctx) -> impl IntoView {
                         <div class="row">
                             <button on:click=stop disabled=move || ctx.busy.get() || state_is_stopping(status)>"止める"</button>
                         </div>
+                        {harvest}
                     }
                     .into_any()
                 }
             }
         }}
+    }
+}
+
+/// 動いているノードでブロックを作る（ハーベスト）。今のアカウントの鍵を、ノードにメモリだけで渡す
+fn harvest_panel(
+    ctx: Ctx,
+    status: NodeStatus,
+    refresh: impl Fn() + Copy + 'static,
+) -> impl IntoView {
+    let account = ctx.current();
+    let label_of = move |address: &str| {
+        ctx.accounts
+            .get_untracked()
+            .into_iter()
+            .find(|account| account.address == address)
+            .map_or_else(|| address.to_owned(), |account| account.label)
+    };
+    let warning = move || {
+        ctx.harvest
+            .get()
+            .and_then(|view| view.warning())
+            .map(|warning| view! { <p class="warn">{warning}</p> })
+    };
+    if let Some(address) = &status.harvesting {
+        let stop = move |_| ctx.run("harvest_stop", NoArgs {}, move |()| refresh());
+        return view! {
+            <p class="label">"ブロックを作る"</p>
+            <p>{format!("{}の鍵で、当たりを待っています。", label_of(address))}</p>
+            {warning}
+            <p class="hint">"鍵はノードのメモリにだけ渡しています。ノードを止めたら、もう一度押してください。"</p>
+            <div class="row">
+                <button on:click=stop disabled=move || ctx.busy.get()>"作るのをやめる"</button>
+            </div>
+        }
+        .into_any();
+    }
+    if let Some(address) = ctx.linking.get() {
+        return view! {
+            <p class="label">"ブロックを作る"</p>
+            <p>{format!("{}の鍵のリンクが、ブロックに入るのを待っています…", label_of(&address))}</p>
+            <p class="hint">"入ったのが見えたら、鍵をノードに渡します。15 秒ごとに確かめています。"</p>
+            {warning}
+            <div class="row">
+                <button on:click=move |_| ctx.linking.set(None)>"待つのをやめる"</button>
+            </div>
+        }
+        .into_any();
+    }
+    let fits = account
+        .as_ref()
+        .is_some_and(|account| status.network.as_deref() == Some(account.network.as_str()));
+    let begin = move |_| {
+        let Some(account) = ctx.current() else {
+            return;
+        };
+        let address = account.address.clone();
+        ctx.run(
+            "harvest_check",
+            BalanceArgs {
+                address: address.clone(),
+            },
+            move |view: HarvestView| {
+                let linked = view.linked();
+                ctx.harvest.set(Some(view));
+                if linked {
+                    ctx.run("harvest_start", BalanceArgs { address }, move |()| {
+                        refresh()
+                    });
+                } else {
+                    ctx.run(
+                        "prepare_harvest_link",
+                        LinkArgs {
+                            address,
+                            speed: "normal",
+                        },
+                        move |draft| ctx.go(Screen::ApproveLink(draft)),
+                    );
+                }
+            },
+        );
+    };
+    view! {
+        <p class="label">"ブロックを作る"</p>
+        {match &account {
+            Some(account) if fits => view! {
+                <p class="hint">{format!("{}で、このノードがブロックを作ります（ハーベスト）。", account.label)}</p>
+            }
+            .into_any(),
+            Some(account) => view! {
+                <p class="hint">{format!("{}は {} のアカウントなので、このノードではブロックを作れません。", account.label, account.network)}</p>
+            }
+            .into_any(),
+            None => ().into_any(),
+        }}
+        <div class="row">
+            <button class="primary" on:click=begin disabled=move || ctx.busy.get() || !fits>"このノードでブロックを作る"</button>
+        </div>
+    }
+    .into_any()
+}
+
+/// ハーベストの鍵のリンクを、送る前に確かめてもらう
+fn approve_link(ctx: Ctx, draft: LinkDraftView) -> impl IntoView {
+    let address = ctx.current().map(|account| account.address);
+    let send = move |_| {
+        let address = address.clone();
+        ctx.run("send_harvest_link", NoArgs {}, move |_hash: String| {
+            ctx.linking.set(address);
+            ctx.go(Screen::Node);
+        })
+    };
+    let warning = draft.check.warning();
+    view! {
+        <p class="kicker">"送る前に確かめてください"</p>
+        <p class="lead">"このノードでブロックを作るために、鍵をリンクします"</p>
+        <ol>
+            {draft.actions.iter().map(|action| view! { <li>{action.clone()}</li> }).collect_view()}
+        </ol>
+        {warning.map(|warning| view! { <p class="warn">{warning}</p> })}
+        <dl class="terms">
+            <dt>"手数料"</dt>
+            <dd>{format!("{} XYM", grouped(&draft.fee))}</dd>
+            <dt>"ネットワーク"</dt>
+            <dd>{draft.network.clone()}</dd>
+            <dt>"期限"</dt>
+            <dd>{format!("{} まで", Date::new(draft.deadline).to_locale_string("ja-JP"))}</dd>
+            <dt>"渡す REST"</dt>
+            <dd>{draft.rest.clone()}</dd>
+        </dl>
+        <p class="hint">
+            "リンクする鍵は、キーストアから導出したこのノード用のものです。ディスクには書かず、ブロックに入ったら、ノードのメモリにだけ渡します。"
+        </p>
+        <div class="row">
+            <button class="primary" on:click=send disabled=move || ctx.busy.get()>
+                {move || if ctx.busy.get() { "送っています…" } else { "署名して送る" }}
+            </button>
+            <button on:click=move |_| ctx.go(Screen::Node) disabled=move || ctx.busy.get()>"戻る"</button>
+        </div>
     }
 }
 

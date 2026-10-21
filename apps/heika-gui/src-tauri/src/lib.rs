@@ -21,6 +21,8 @@ use zeroize::Zeroizing;
 #[cfg(target_os = "linux")]
 mod clipboard;
 #[cfg(any(desktop, target_os = "android"))]
+mod harvest;
+#[cfg(any(desktop, target_os = "android"))]
 pub mod node;
 mod rest;
 mod send;
@@ -287,8 +289,18 @@ async fn unlock(
         let path = wallet.lock().path.clone();
         let sealed = std::fs::read(&path)
             .map_err(|error| format!("{} を読めません: {error}", path.display()))?;
-        let keystore =
+        let mut keystore =
             Keystore::open(passphrase.as_bytes(), &sealed).map_err(|error| error.to_string())?;
+        // 前の版で作ったキーストアには、ハーベストの秘密がない。使うかどうかに関わらず、開いたときに足しておく
+        if keystore
+            .entries()
+            .iter()
+            .any(|entry| entry.harvest_secret.is_none())
+        {
+            let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
+            keystore_file::save(&mut rng, &path, &mut keystore, &passphrase)
+                .map_err(|error| error.to_string())?;
+        }
         let accounts = describe(&keystore)?;
         wallet.lock().keystore = Some(keystore);
         Ok(accounts)
@@ -305,13 +317,22 @@ fn accounts(wallet: tauri::State<'_, Wallet>) -> Result<Vec<AccountView>, String
     }
 }
 
-/// キーストアを閉じる。秘密は drop で0に消える。送金の下書きと控えも消す
+/// キーストアを閉じる。秘密は drop で0に消える。送金とリンクの下書きと、送金の控えも消す。ノードに渡した
+/// ハーベストの鍵は、ノードを止めるまで残す
 #[tauri::command]
-fn lock(wallet: tauri::State<'_, Wallet>, outbox: tauri::State<'_, send::Outbox>) {
+fn lock(
+    app: tauri::AppHandle,
+    wallet: tauri::State<'_, Wallet>,
+    outbox: tauri::State<'_, send::Outbox>,
+) {
     let mut session = wallet.lock();
     session.keystore = None;
     session.pending = None;
     outbox.clear();
+    #[cfg(any(desktop, target_os = "android"))]
+    app.state::<harvest::LinkDraft>().clear();
+    #[cfg(not(any(desktop, target_os = "android")))]
+    let _ = app;
 }
 
 /// 開いているキーストアから、`address` のアカウントのラベルと公開鍵を探す
@@ -412,6 +433,8 @@ pub fn run() {
             app.manage(rest::Config::load(path.with_file_name("settings.json")));
             app.manage(send::Outbox::default());
             #[cfg(any(desktop, target_os = "android"))]
+            app.manage(harvest::LinkDraft::default());
+            #[cfg(any(desktop, target_os = "android"))]
             {
                 let node = std::sync::Arc::new(node::Node::default());
                 // Android では、ノードが動いているあいだ、フォアグラウンドサービスの通知に様子を出す
@@ -480,6 +503,16 @@ pub fn run() {
             node::node_start,
             #[cfg(any(desktop, target_os = "android"))]
             node::node_stop,
+            #[cfg(any(desktop, target_os = "android"))]
+            harvest::harvest_check,
+            #[cfg(any(desktop, target_os = "android"))]
+            harvest::prepare_harvest_link,
+            #[cfg(any(desktop, target_os = "android"))]
+            harvest::send_harvest_link,
+            #[cfg(any(desktop, target_os = "android"))]
+            harvest::harvest_start,
+            #[cfg(any(desktop, target_os = "android"))]
+            harvest::harvest_stop,
         ])
         .on_window_event(|_window, _event| {
             // ノードが動いているあいだに窓を閉じたら、隠すだけにしてノードを動かし続ける。止まっていれば終わる

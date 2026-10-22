@@ -445,6 +445,8 @@ impl Executor {
 
     /// 次の高さのブロックを実行する。ブロックそのものは確かめてあること。
     pub fn apply(&mut self, block: &Block) -> Result<(), ExecError> {
+        // 前に弾いたときの何件目かを、トランザクションを当てる前に弾いたときに残さない
+        self.current_transaction = None;
         let height = self.height + 1;
         if block.height != height {
             return Err(invalid(format!("高さ {height} のはずが {}", block.height)));

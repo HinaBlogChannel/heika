@@ -568,6 +568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-mempool"
+version = "0.9.0"
+dependencies = [
+ "heika-chain",
+ "heika-core",
+ "heika-packet",
+ "heika-transaction",
+]
+
+[[package]]
 name = "heika-node"
 version = "0.9.0"
 dependencies = [

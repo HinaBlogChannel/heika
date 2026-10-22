@@ -9,8 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 
-use heika_chain::produce::Candidate;
+use heika_chain::produce::{Candidate, Pending};
 use heika_chain::verify::VerifyError;
 use heika_core::hash::Hash256;
 use heika_core::key::PublicKey;
@@ -313,6 +314,28 @@ impl Mempool {
             answer.push(entry.candidate.bytes.as_slice());
         }
         answer
+    }
+}
+
+/// スレッドをまたいで使う [`Mempool`]。待ち受けのスレッドが受け付け、駆動役が先端の変化を伝え、中核が候補をもらう
+pub struct SharedMempool(Mutex<Mempool>);
+
+impl SharedMempool {
+    pub fn new(mempool: Mempool) -> Self {
+        Self(Mutex::new(mempool))
+    }
+
+    pub fn lock(&self) -> MutexGuard<'_, Mempool> {
+        // 持ち主が途中で落ちても、置き場は捨てて困るものではないので使い続ける
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Pending for SharedMempool {
+    fn candidates(&self, timestamp: u64) -> Vec<Candidate> {
+        self.lock().candidates(timestamp)
     }
 }
 

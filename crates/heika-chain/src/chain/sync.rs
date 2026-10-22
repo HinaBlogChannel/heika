@@ -279,6 +279,19 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             })
             .collect::<Result<Vec<_>, ChainError>>()?;
         self.rewind(common, &orphans).await?;
+        // 外れる元の枝のトランザクションは、未承認に戻す。新しい枝に入っていれば、受け入れたときに外れる
+        if self.pending.is_some() {
+            let restored: Vec<Vec<u8>> = orphans
+                .iter()
+                .flat_map(|&(_, _, bytes)| match Block::from_bytes(bytes) {
+                    Ok(block) => block.transactions().map(<[u8]>::to_vec).collect(),
+                    Err(_) => Vec::new(),
+                })
+                .collect();
+            if !restored.is_empty() {
+                self.actions.push(Action::Restored(restored));
+            }
+        }
         let mut failure = None;
         // 枝が正しくないか、スコアが高くないなら罰する。こちらの都合で取り替えられなかったなら罰さない
         let mut penalty = Penalty::Failure;

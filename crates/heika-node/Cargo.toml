@@ -11,6 +11,7 @@ heika-block = { path = "../heika-block" }
 heika-chain = { path = "../heika-chain" }
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core" }
+heika-mempool = { path = "../heika-mempool" }
 heika-packet = { path = "../heika-packet" }
 heika-peer = { path = "../heika-peer" }
 heika-peer-protocol = { path = "../heika-peer-protocol" }
@@ -21,3 +22,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_norway = "0.9.42"
 rayon = "1.12.0"
 zeroize = "1.9.1"
+
+[dev-dependencies]
+heika-transaction = { path = "../heika-transaction" }

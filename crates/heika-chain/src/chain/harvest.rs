@@ -197,7 +197,10 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
     }
 
     /// [`Chain::produce_and_accept`] の、作って確かめるまで。状態に当て始めたら `touched` を立てる。返すのは、
-    /// 作ったブロック、それを足した先端、ステートメント
+    /// 作ったブロック、それを足した先端、ステートメント。
+    ///
+    /// 未承認の置き場があれば、その候補から [`produce::choose`] で選んで入れる。状態に依る確かめで弾かれた
+    /// トランザクションは、[`Action::Dropped`] で知らせて外し、当てかけた状態を戻して選び直す
     pub(super) async fn try_produce(
         &mut self,
         timestamp: u64,
@@ -207,47 +210,88 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
     ) -> Result<(Block, Tip, BlockStatement), ChainError> {
         let parent = self.harvest_parent();
         let context = parent.context();
-        let decisions = produce::Decisions {
-            timestamp,
-            transactions: Vec::new(),
-            beneficiary: Address::from_public_key(
-                &PublicKey::from_private_key(signing),
-                self.parameters.identifier,
-            ),
-            fee_multiplier: 0,
-        };
-        let draft = produce::draft(self.parameters, &context, signing, vrf_key, &decisions)?;
-        // アカウントを全部はメモリに持たないなら、要りそうなものを先に読み、足りなければ戻して読み足す
-        if self.executor.is_partial() {
-            let wanted = self.executor.wanted_for(&draft);
-            self.executor.load_wanted(self.store, &wanted)?;
-        }
-        let mut retries = 0;
+        let mut candidates = self
+            .pending
+            .as_ref()
+            .map_or_else(Vec::new, |pending| pending.candidates(timestamp));
+        let beneficiary = Address::from_public_key(
+            &PublicKey::from_private_key(signing),
+            self.parameters.identifier,
+        );
+        let mut drops = 0;
         loop {
-            *touched = true;
-            let produced = produce::produce_with_statement(
-                &mut self.executor,
-                self.parameters,
-                &context,
-                signing,
-                vrf_key,
-                &decisions,
-            );
-            let missed = self.executor.take_missed();
-            if missed.is_empty() {
-                let (block, statement) = produced?;
-                let tip = verify_link(Some(self.tip), &block)?;
-                return Ok((block, tip, statement));
+            // 手数料の下限は、置き場が受け付けるときに絞っている
+            let (chosen, fee_multiplier) = produce::choose(&candidates, 0);
+            let decisions = produce::Decisions {
+                timestamp,
+                transactions: chosen
+                    .iter()
+                    .map(|candidate| candidate.bytes.clone())
+                    .collect(),
+                beneficiary,
+                fee_multiplier,
+            };
+            let draft = produce::draft(self.parameters, &context, signing, vrf_key, &decisions)?;
+            // アカウントを全部はメモリに持たないなら、要りそうなものを先に読み、足りなければ戻して読み足す
+            if self.executor.is_partial() {
+                let wanted = self.executor.wanted_for(&draft);
+                self.executor.load_wanted(self.store, &wanted)?;
             }
-            if retries == MAX_RETRIES {
-                return Err(format!(
-                    "{MAX_RETRIES} 回作り直しても、読んでいない状態が {} 個あります",
-                    missed.len()
-                )
-                .into());
+            let mut retries = 0;
+            let produced = loop {
+                *touched = true;
+                let produced = produce::produce_with_statement(
+                    &mut self.executor,
+                    self.parameters,
+                    &context,
+                    signing,
+                    vrf_key,
+                    &decisions,
+                );
+                let missed = self.executor.take_missed();
+                if missed.is_empty() {
+                    break produced;
+                }
+                if retries == MAX_RETRIES {
+                    return Err(format!(
+                        "{MAX_RETRIES} 回作り直しても、読んでいない状態が {} 個あります",
+                        missed.len()
+                    )
+                    .into());
+                }
+                retries += 1;
+                self.undo_and_load(&draft, missed).await?;
+            };
+            let error = match produced {
+                Ok((block, statement)) => {
+                    let tip = verify_link(Some(self.tip), &block)?;
+                    return Ok((block, tip, statement));
+                }
+                Err(error) => error,
+            };
+            let Some(failed) = self
+                .executor
+                .failed_transaction()
+                .and_then(|index| chosen.get(index))
+            else {
+                return Err(error.into());
+            };
+            if drops == MAX_DROPS {
+                return Err(format!("{MAX_DROPS} 件外しても、まだ弾かれます: {error}").into());
             }
-            retries += 1;
-            self.undo_and_load(&draft, missed).await?;
+            drops += 1;
+            let hash = failed.hash();
+            self.progress(format!(
+                "高さ {} に入れようとしたトランザクション {hash} を外します: {error}",
+                self.tip.height + 1
+            ));
+            self.actions.push(Action::Dropped(hash));
+            candidates.retain(|candidate| candidate.hash() != hash);
+            if self.executor.is_partial() {
+                self.undo_and_load(&draft, Wanted::default()).await?;
+            } else {
+                self.reload_executor().await?;
+            }
         }
     }
 }

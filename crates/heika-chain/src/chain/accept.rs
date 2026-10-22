@@ -116,6 +116,15 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
     pub(super) fn advance(&mut self, block: &Block, tip: Tip, generation_hash: GenerationHash) {
         // 要るものだけを読む形なら、読み込んだものを手放す。ブロックをまたいで持つのは読み口のキャッシュ
         self.executor.release_loaded();
+        if self.pending.is_some() && block.transactions().next().is_some() {
+            let seed = &self.parameters.generation_hash_seed;
+            let hashes = block
+                .transactions()
+                .filter_map(|bytes| Transaction::from_bytes(bytes).ok())
+                .map(|transaction| transaction.hash(seed))
+                .collect();
+            self.actions.push(Action::Included(hashes));
+        }
         self.parent = block.clone();
         self.generation_hash = generation_hash;
         self.tip = tip;

@@ -13,11 +13,13 @@ use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
+use heika_chain::produce::Pending;
 use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::nemesis_hash;
 use heika_core::hash::Hash256;
 use heika_core::key::PrivateKey;
 use heika_core::network::NetworkParameters;
+use heika_mempool::{Mempool, SharedMempool};
 use heika_packet::{NetworkNode, NodeRoles, NodeVersion};
 use heika_peer::book::{FIRST_TRIES, best};
 use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers, endpoint};
@@ -331,6 +333,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         .harvesters_if_changed(None)
         .expect("always returned the first time");
     chain.set_harvesters(keys);
+    let mempool = Arc::new(SharedMempool::new(Mempool::new(
+        parameters,
+        heika_mempool::Config::default(),
+    )));
+    chain.set_pending(Arc::clone(&mempool) as Arc<dyn Pending>);
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
@@ -349,6 +356,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
             let (status, reply, gate, done) = (&status, &reply, &gate, &done);
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
+            let mempool = &*mempool;
             let server_config = Arc::new(heika_tls::server_config(identity));
             scope.spawn(move || {
                 let source = DbSource {
@@ -362,6 +370,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     parameters,
                     node,
                     pushes: Some(pushes),
+                    mempool: Some(mempool),
                 };
                 let stop = || stopping() || done.load(std::sync::atomic::Ordering::SeqCst);
                 if let Err(error) = serve(listener, server_config, &responder, gate, &stop) {
@@ -396,6 +405,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 applied = version;
                                 chain.set_harvesters(keys);
                             }
+                            mempool.lock().prune(network_now(parameters));
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
                                 return Ok(outcome);
                             }
@@ -447,6 +457,21 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                             Action::RejectPush(key) => gate.cut(key),
                             Action::Notify(notice) if notice.is_warning() => eprintln!("{notice}"),
                             Action::Notify(notice) => println!("{notice}"),
+                            Action::Included(hashes) => mempool.lock().tip_changed(
+                                &hashes,
+                                Vec::new(),
+                                network_now(parameters),
+                                chain.height() + 1,
+                            ),
+                            Action::Restored(transactions) => mempool.lock().tip_changed(
+                                &[],
+                                transactions,
+                                network_now(parameters),
+                                chain.height() + 1,
+                            ),
+                            Action::Dropped(hash) => {
+                                mempool.lock().remove(&hash);
+                            }
                         }
                     }
                     for action in peers.take_actions() {
@@ -629,6 +654,15 @@ fn save_known(db: &Db, records: &[(String, KnownPeer)]) -> Result<(), NodeError>
     batch.replace_known_peers(&records)?;
     batch.commit()?;
     Ok(())
+}
+
+/// Nemesis からのミリ秒。トランザクションの期限と同じ数え方
+fn network_now(parameters: &NetworkParameters) -> u64 {
+    SystemTime::now()
+        .duration_since(parameters.epoch())
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn unix_now() -> u64 {

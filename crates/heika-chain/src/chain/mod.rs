@@ -30,6 +30,7 @@ use heika_packet::ChainStatistics;
 use heika_state_transition::config::ChainConfig;
 use heika_state_transition::executor::source::StateSource;
 use heika_state_transition::executor::{Executor, Wanted};
+use heika_transaction::Transaction;
 
 use crate::ChainError;
 use crate::env::Env;
@@ -246,6 +247,13 @@ pub enum Action {
     RejectPush(PublicKey),
     /// 使う側に知らせること（画面やログに出すかは使う側が決める）
     Notify(Notice),
+    /// 先端の枝に、これらのトランザクションが入った。未承認の置き場から外す。置き場を渡したときだけ出す
+    Included(Vec<Hash256>),
+    /// 巻き戻して、これらのトランザクション（署名したもの）が先端の枝から外れた。未承認の置き場に戻す。
+    /// 置き場を渡したときだけ出す
+    Restored(Vec<Vec<u8>>),
+    /// ブロックを作ってみたら、このトランザクションで弾かれた。未承認の置き場から外す
+    Dropped(Hash256),
 }
 
 /// 先端の段階で起きたこと。`Display` は CLI に出す文
@@ -525,6 +533,8 @@ impl fmt::Display for PushCounts {
 
 /// アカウントを全部はメモリに持たないときに、1ブロックで読み足して当て直す回数の上限
 const MAX_RETRIES: usize = 8;
+/// ブロックを作るときに、弾かれたトランザクションを外して作り直す回数の上限
+const MAX_DROPS: usize = 16;
 /// 当てる途中で、まだ読んでいない状態のキーを引いた
 #[derive(Debug)]
 struct Missed(Wanted);
@@ -600,6 +610,8 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     planned: Option<Planned>,
     /// 最後に知らせた、ハーベストできないわけ。同じものは繰り返さない
     harvest_warning: Option<String>,
+    /// 未承認のトランザクションの置き場。なければ、トランザクションのないブロックを作る
+    pending: Option<Arc<dyn produce::Pending>>,
     /// 駆動役にまだ渡していない指示
     actions: Vec<Action>,
 }
@@ -650,6 +662,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
             harvesters: Arc::new(Vec::new()),
             planned: None,
             harvest_warning: None,
+            pending: None,
             actions: Vec::new(),
         })
     }
@@ -659,6 +672,12 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
     pub fn set_harvesters(&mut self, keys: Arc<Vec<(PrivateKey, PrivateKey)>>) {
         self.harvesters = keys;
         self.planned = None;
+    }
+
+    /// ブロックを作るときに、`pending` から候補をもらう。渡すと、先端の枝に入ったものと外れたものを
+    /// [`Action::Included`] と [`Action::Restored`] で知らせる
+    pub fn set_pending(&mut self, pending: Arc<dyn produce::Pending>) {
+        self.pending = Some(pending);
     }
 
     /// 確定を上げるたびに、残す分より下の差分を消す

@@ -129,6 +129,13 @@ impl Candidate {
     }
 }
 
+/// 未承認のトランザクションの置き場。中核はブロックを作るときに候補をもらうだけで、置き場を変えるのは
+/// 指示（[`crate::chain::Action::Included`] など）を受けた駆動役
+pub trait Pending {
+    /// 時刻 `timestamp` のブロックに入れられる候補
+    fn candidates(&self, timestamp: u64) -> Vec<Candidate>;
+}
+
 /// 候補から、手数料の合計（ブロックの倍率 × 大きさの合計）が一番大きくなるものを選ぶ（catapult の
 /// `maximize-fee`）。倍率の高い順に並べ、ブロックの倍率はその先頭の最後のものの倍率にする。合計が同じなら多く
 /// 入れる。`min_fee_multiplier` より低いものと、件数の上限を超える分は入れない。選んだもの（入れる順）と、

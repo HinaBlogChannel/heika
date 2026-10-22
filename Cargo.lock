@@ -568,6 +568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-mempool"
+version = "0.9.0"
+dependencies = [
+ "heika-chain",
+ "heika-core",
+ "heika-packet",
+ "heika-transaction",
+]
+
+[[package]]
 name = "heika-node"
 version = "0.9.0"
 dependencies = [
@@ -575,12 +585,14 @@ dependencies = [
  "heika-cert",
  "heika-chain",
  "heika-core",
+ "heika-mempool",
  "heika-packet",
  "heika-peer",
  "heika-peer-protocol",
  "heika-state-transition",
  "heika-store-redb",
  "heika-tls",
+ "heika-transaction",
  "rayon",
  "serde",
  "serde_norway",

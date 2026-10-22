@@ -1,0 +1,13 @@
+[package]
+name = "heika-mempool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "未承認のトランザクションの置き場。受け付けて溜め、ブロックを作るときの候補とピアへの答えを出す"
+
+[dependencies]
+heika-chain = { path = "../heika-chain" }
+heika-core = { path = "../heika-core", default-features = false }
+heika-packet = { path = "../heika-packet" }
+heika-transaction = { path = "../heika-transaction" }

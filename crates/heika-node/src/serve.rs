@@ -9,7 +9,7 @@
 //! 全体）に上限を置き、決まりを破った相手（知らない種類、大きすぎるパケット、確かめを通らないブロック）は、
 //! 鍵でしばらく受けない。先端につながるのに中核が弾いたブロックを押し付けた鍵も、[`Gate::ban`] で受けない。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -19,8 +19,10 @@ use heika_block::Block;
 use heika_block::finalization::proof::proof_header;
 use heika_core::key::PublicKey;
 use heika_core::network::NetworkParameters;
+use heika_mempool::SharedMempool;
 use heika_packet::{
     BlockHashesRequest, ChainStatistics, NetworkTime, PullBlocksRequest, packet_type,
+    read_pull_transactions_request, split_size_prefixed,
 };
 use heika_tls::{Connection, RequestError, ServerConfig};
 
@@ -104,6 +106,8 @@ pub struct Responder<'a> {
     pub node: Vec<u8>,
     /// 押し付けられたブロックを入れる、チェーンの持ち主の受信箱。`None` なら読み捨てる
     pub pushes: Option<Sender<NodeEvent>>,
+    /// 押し付けられたトランザクションを入れ、`Pull_Transactions` に答える置き場。`None` なら読み捨て、空で答える
+    pub mempool: Option<&'a SharedMempool>,
 }
 
 impl Responder<'_> {
@@ -178,9 +182,29 @@ impl Responder<'_> {
                 .encode()
                 .to_vec(),
             ),
-            // 未承認のトランザクションと、集めている投票は持っていない
-            packet_type::PULL_TRANSACTIONS
-            | packet_type::PULL_PARTIAL_TRANSACTION_INFOS
+            packet_type::PULL_TRANSACTIONS => {
+                let (min_deadline, min_fee_multiplier, known) =
+                    match read_pull_transactions_request(body) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return Ok(Answer::Close(format!(
+                                "未承認のトランザクションの要求を読めません: {error}"
+                            )));
+                        }
+                    };
+                let Some(mempool) = self.mempool else {
+                    return reply(Vec::new());
+                };
+                let known: HashSet<u32> = known.into_iter().collect();
+                let mempool = mempool.lock();
+                reply(
+                    mempool
+                        .pull(min_deadline, min_fee_multiplier, &known)
+                        .concat(),
+                )
+            }
+            // 連署を待つトランザクションと、集めている投票は持っていない
+            packet_type::PULL_PARTIAL_TRANSACTION_INFOS
             | packet_type::PULL_FINALIZATION_MESSAGES => reply(Vec::new()),
             packet_type::CHAIN_STATISTICS
             | packet_type::FINALIZATION_STATISTICS
@@ -204,9 +228,25 @@ impl Responder<'_> {
                 }
                 Ok(Answer::Pushed(Box::new(block), body.to_vec()))
             }
+            packet_type::PUSH_TRANSACTIONS => {
+                // catapult と同じく、切り出せなければ切らずに読み捨てる
+                let Ok(transactions) = split_size_prefixed(body) else {
+                    return Ok(Answer::Nothing);
+                };
+                if let Some(mempool) = self.mempool {
+                    // 次のブロックに入れるつもりで確かめる。受け付けなかったものは、わけを返さずに捨てる（catapult と同じ）
+                    let height = self.source.status().height + 1;
+                    let mut mempool = mempool.lock();
+                    for bytes in transactions {
+                        if let Ok(hash) = mempool.add(bytes.to_vec(), received, height) {
+                            println!("未承認のトランザクション {hash} を受け付けました");
+                        }
+                    }
+                }
+                Ok(Answer::Nothing)
+            }
             // ほかの押し付けられたものは、今は読み捨てる
-            packet_type::PUSH_TRANSACTIONS
-            | packet_type::PUSH_PARTIAL_TRANSACTIONS
+            packet_type::PUSH_PARTIAL_TRANSACTIONS
             | packet_type::PUSH_DETACHED_COSIGNATURES
             | packet_type::NODE_DISCOVERY_PUSH_PING
             | packet_type::NODE_DISCOVERY_PUSH_PEERS
@@ -743,8 +783,12 @@ mod tests {
     use std::time::SystemTime;
 
     use heika_block::finalization::FinalizationRound;
+    use heika_core::address::Address;
     use heika_core::hash::Hash256;
-    use heika_packet::pull_blocks_request;
+    use heika_core::key::PrivateKey;
+    use heika_mempool::Mempool;
+    use heika_packet::{pull_blocks_request, pull_transactions_request, short_hash};
+    use heika_transaction::{Body, Transaction, Transfer, UnresolvedMosaicId};
 
     use heika_block::finalization::FinalizedBlockHeader;
 
@@ -822,6 +866,16 @@ mod tests {
     }
 
     fn answer(source: &Memory, request_type: u32, body: &[u8]) -> Answer {
+        answer_with(source, None, request_type, body)
+    }
+
+    /// 未承認の置き場 `mempool` を持たせて答える。時刻は Nemesis から 1234 ミリ秒
+    fn answer_with(
+        source: &Memory,
+        mempool: Option<&SharedMempool>,
+        request_type: u32,
+        body: &[u8],
+    ) -> Answer {
         let parameters = &NetworkParameters::TESTNET;
         let env = FixedEnv(parameters.epoch() + Duration::from_millis(1234));
         Responder {
@@ -830,8 +884,26 @@ mod tests {
             parameters,
             node: b"node".to_vec(),
             pushes: None,
+            mempool,
         }
         .answer(request_type, body)
+    }
+
+    /// 鍵 `key` で署名した、自分あての転送。期限は 1 時間先
+    fn signed_transfer(key: u8) -> Vec<u8> {
+        let parameters = &NetworkParameters::TESTNET;
+        let private_key = PrivateKey::from_bytes(&[key; 32]);
+        let public_key = PublicKey::from_private_key(&private_key);
+        let recipient = Address::from_public_key(&public_key, parameters.identifier).into();
+        let mosaics = BTreeMap::from([(UnresolvedMosaicId(parameters.currency_mosaic_id), 1)]);
+        let body = Body::Transfer(Transfer::new(recipient, mosaics, Vec::new()).unwrap());
+        let deadline = 1234 + 60 * 60 * 1000;
+        let mut transaction =
+            Transaction::new(public_key, parameters.identifier, 0, deadline, body);
+        transaction
+            .sign(&private_key, &parameters.generation_hash_seed)
+            .unwrap();
+        transaction.to_bytes()
     }
 
     fn reply(answer: Answer) -> Vec<u8> {
@@ -1043,6 +1115,7 @@ mod tests {
             parameters,
             node: Vec::new(),
             pushes: None,
+            mempool: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1117,6 +1190,7 @@ mod tests {
             parameters,
             node: Vec::new(),
             pushes: None,
+            mempool: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1235,6 +1309,60 @@ mod tests {
             assert!(connect(address, 3).chain_statistics().is_err());
             assert!(connect(address, 5).chain_statistics().is_ok());
         });
+    }
+
+    #[test]
+    fn takes_pushed_transactions_and_answers_pulls() {
+        let source = memory(1, 10, 1..=1);
+        let parameters = &NetworkParameters::TESTNET;
+        let mempool =
+            SharedMempool::new(Mempool::new(parameters, heika_mempool::Config::default()));
+        let (first, second) = (signed_transfer(1), signed_transfer(2));
+        let pushed = [first.clone(), second.clone()].concat();
+        assert_eq!(
+            answer_with(
+                &source,
+                Some(&mempool),
+                packet_type::PUSH_TRANSACTIONS,
+                &pushed
+            ),
+            Answer::Nothing
+        );
+        assert_eq!(mempool.lock().len(), 2);
+        let pull = |known: &[u32]| {
+            reply(answer_with(
+                &source,
+                Some(&mempool),
+                packet_type::PULL_TRANSACTIONS,
+                &pull_transactions_request(0, 0, known),
+            ))
+        };
+        assert_eq!(pull(&[]), pushed);
+        let known = short_hash(
+            &Transaction::from_bytes(&first)
+                .unwrap()
+                .hash(&parameters.generation_hash_seed),
+        );
+        assert_eq!(pull(&[known]), second);
+        // 読めない要求なら切る
+        assert!(matches!(
+            answer_with(
+                &source,
+                Some(&mempool),
+                packet_type::PULL_TRANSACTIONS,
+                &[0; 5]
+            ),
+            Answer::Close(_)
+        ));
+        // 置き場がなければ、空で答える
+        assert_eq!(
+            reply(answer(
+                &source,
+                packet_type::PULL_TRANSACTIONS,
+                &pull_transactions_request(0, 0, &[])
+            )),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]

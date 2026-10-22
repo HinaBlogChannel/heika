@@ -141,6 +141,32 @@ pub fn pull_transactions_request(
     request
 }
 
+/// [`pull_transactions_request`] で書いた要求を読む。期限の下限、手数料の倍率の下限、知っている短いハッシュ
+pub fn read_pull_transactions_request(body: &[u8]) -> Result<(u64, u32, Vec<u32>), DecodeError> {
+    if body.len() < 12 {
+        return Err(DecodeError::Truncated {
+            needed: 12,
+            remaining: body.len(),
+        });
+    }
+    let (filter, hashes) = body.split_at(12);
+    if !hashes.len().is_multiple_of(4) {
+        return Err(DecodeError::BodySize {
+            expected: 12 + hashes.len() / 4 * 4,
+            actual: body.len(),
+        });
+    }
+    let min_deadline = u64::from_le_bytes(filter[..8].try_into().expect("8 bytes"));
+    let min_fee_multiplier = u32::from_le_bytes(filter[8..].try_into().expect("4 bytes"));
+    let known = hashes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&bytes| u32::from_le_bytes(bytes))
+        .collect();
+    Ok((min_deadline, min_fee_multiplier, known))
+}
+
 /// catapult の `utils::ToShortHash`。ハッシュの先頭4バイトを u32 として読んだもの。
 /// `Pull_Transactions` で、もう知っているトランザクションを伝えるのに使う。
 pub fn short_hash(hash: &Hash256) -> u32 {
@@ -642,6 +668,29 @@ mod tests {
             .concat()
         );
         assert_eq!(pull_transactions_request(0, 0, &[]), [0; 12]);
+    }
+
+    #[test]
+    fn reads_a_pull_transactions_request() {
+        let request = pull_transactions_request(0x0102_0304_0506_0708, 100, &[1, 0xddcc_bbaa]);
+        assert_eq!(
+            read_pull_transactions_request(&request),
+            Ok((0x0102_0304_0506_0708, 100, vec![1, 0xddcc_bbaa]))
+        );
+        assert_eq!(
+            read_pull_transactions_request(&[0; 11]),
+            Err(DecodeError::Truncated {
+                needed: 12,
+                remaining: 11
+            })
+        );
+        assert_eq!(
+            read_pull_transactions_request(&[0; 14]),
+            Err(DecodeError::BodySize {
+                expected: 12,
+                actual: 14
+            })
+        );
     }
 
     #[test]

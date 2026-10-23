@@ -772,7 +772,9 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     Ok(outcome)
 }
 
-fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, NodeError> {
+pub(crate) fn network_parameters(
+    spec: &NodeConfig,
+) -> Result<&'static NetworkParameters, NodeError> {
     Ok(match spec.network.network_type {
         NetworkType::Mainnet => &NetworkParameters::MAINNET,
         NetworkType::Testnet => &NetworkParameters::TESTNET,
@@ -788,7 +790,7 @@ fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, N
 }
 
 /// `resources` があればそこから読み、なければメインネットとテストネットは決め打ちの設定を使う
-fn chain_config(spec: &NodeConfig) -> Result<ChainConfig, NodeError> {
+pub(crate) fn chain_config(spec: &NodeConfig) -> Result<ChainConfig, NodeError> {
     Ok(match (&spec.network.resources, spec.network.network_type) {
         (Some(resources), _) => ChainConfig::load(resources)?,
         (None, NetworkType::Mainnet) => ChainConfig::mainnet(),
@@ -798,7 +800,7 @@ fn chain_config(spec: &NodeConfig) -> Result<ChainConfig, NodeError> {
 }
 
 /// 残し方（`storage.mode`）を、中核の刈り込みの設定にする。`archive` なら刈り込まない
-fn keep(spec: &NodeConfig) -> Result<Option<Keep>, NodeError> {
+pub(crate) fn keep(spec: &NodeConfig) -> Result<Option<Keep>, NodeError> {
     let retention = spec.storage.retention();
     let (Some(state), Some(trie)) = (retention.state, retention.state_proofs) else {
         return Ok(None);

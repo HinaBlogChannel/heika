@@ -31,6 +31,15 @@ pub enum PeerCommand {
         #[command(flatten)]
         keystore: HarvestKeystoreArgs,
     },
+    /// 止めたノードの DB を、設定の残し方（storage.mode）で刈り込んで、新しいフォルダーに写す。アーカイブから
+    /// ライトの DB を作るときや、刈り込んでも縮まないファイルを詰め直すときに使う。写しを data に置き換えて使う
+    Copy {
+        #[arg(long)]
+        config: PathBuf,
+        /// 写しを作るフォルダー。DB がもうあれば写さない
+        #[arg(long)]
+        to: PathBuf,
+    },
 }
 
 /// 止める合図を受けた
@@ -66,6 +75,10 @@ pub fn run(command: ExperimentalCommand) -> Result<(), String> {
             watch_signals();
             heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &memory)
                 .map_err(|error| error.to_string())
+        }
+        ExperimentalCommand::Peer(PeerCommand::Copy { config, to }) => {
+            let manifest = Manifest::load(&config).map_err(|error| error.to_string())?;
+            heika_node::copy::copy_pruned(&manifest, &to).map_err(|error| error.to_string())
         }
     }
 }

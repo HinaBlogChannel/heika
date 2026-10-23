@@ -139,31 +139,22 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         Ok(())
     }
 
-    /// 確定 `finalized` から [`CHECKPOINT_EPOCHS`] より下のチェックポイントと、刈り込むなら残す分より下の差分を消す。
-    /// 確定より上に分かれ目があって巻き戻すときは、分かれ目以下で一番新しいチェックポイントまで戻るので、確定以下で
-    /// 一番新しいチェックポイントより上は消さない
+    /// 確定 `finalized` から [`CHECKPOINT_EPOCHS`] より下のチェックポイントと、刈り込むなら残す分より下の差分を消す
+    /// （[`Keep::plan`]）
     pub(super) async fn prune(&self, finalized: u64) -> Result<crate::store::Pruned, ChainError> {
-        let grouping = self.config.finalization.voting_set_grouping;
-        let checkpoints_below = finalized.saturating_sub(CHECKPOINT_EPOCHS * grouping);
         let floor = self
             .store
             .checkpoint_at_or_below(finalized)
             .await?
             .map_or(0, |(height, _)| height);
-        let bound = |epochs: u64| finalized.saturating_sub(epochs * grouping).min(floor);
-        let history = self.keep.map(|keep| (bound(keep.state), bound(keep.trie)));
-        let blocks = self.keep.filter(|keep| keep.history).map(|keep| {
-            let through = bound(keep.state).saturating_sub(self.config.blocks_for_restart());
-            let epoch =
-                u32::try_from(self.parameters.finalization_epoch(through)).unwrap_or(u32::MAX);
-            (through, epoch)
-        });
         self.store
-            .prune(Prune {
-                checkpoints_below,
-                history,
-                blocks,
-            })
+            .prune(Keep::plan(
+                self.keep,
+                &self.config,
+                self.parameters,
+                finalized,
+                floor,
+            ))
             .await
     }
 

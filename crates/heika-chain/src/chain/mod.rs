@@ -72,6 +72,34 @@ pub struct Keep {
     pub history: bool,
 }
 
+impl Keep {
+    /// 確定を `finalized` に上げたときに消すもの。`floor` は確定以下で一番新しいチェックポイントの高さ。`keep` が
+    /// なければ（アーカイブ）、チェックポイントだけを消す。
+    ///
+    /// 確定より上に分かれ目があって巻き戻すときは、分かれ目以下で一番新しいチェックポイントまで戻るので、`floor`
+    /// より上は消さない
+    pub fn plan(
+        keep: Option<Self>,
+        config: &ChainConfig,
+        parameters: &NetworkParameters,
+        finalized: u64,
+        floor: u64,
+    ) -> Prune {
+        let grouping = config.finalization.voting_set_grouping;
+        let bound = |epochs: u64| finalized.saturating_sub(epochs * grouping).min(floor);
+        Prune {
+            checkpoints_below: finalized.saturating_sub(CHECKPOINT_EPOCHS * grouping),
+            history: keep.map(|keep| (bound(keep.state), bound(keep.trie))),
+            blocks: keep.filter(|keep| keep.history).map(|keep| {
+                let through = bound(keep.state).saturating_sub(config.blocks_for_restart());
+                let epoch =
+                    u32::try_from(parameters.finalization_epoch(through)).unwrap_or(u32::MAX);
+                (through, epoch)
+            }),
+        }
+    }
+}
+
 /// DB の実行した先端の状態を戻したもの
 pub struct Loaded {
     pub executor: Executor,

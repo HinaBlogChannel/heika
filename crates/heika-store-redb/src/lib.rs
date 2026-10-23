@@ -113,6 +113,9 @@ pub struct CopyBounds {
     pub trie: u64,
     /// ステートメントも、この高さより上だけを写す。`None` なら全部
     pub statements: Option<u64>,
+    /// ブロックをこの高さより上だけ、ファイナライズの証明をこのエポックから写す（[`Db::prune_history`] と同じ境）。
+    /// `None` なら全部
+    pub blocks: Option<(u64, u32)>,
 }
 
 /// 状態の行（キー、値）
@@ -1132,17 +1135,35 @@ impl Db {
         };
         let progress = &mut progress;
         let whole = [
-            copier.table(BLOCKS, progress)?,
             copier.table(STATE, progress)?,
             copier.table(TRIE_TABLES.current, progress)?,
             copier.table(META, progress)?,
-            copier.table(PROOFS, progress)?,
             copier.table(VOTERS, progress)?,
             copier.table(CHECKPOINTS, progress)?,
             copier.table(ORPHANS, progress)?,
+            copier.table(PEERS, progress)?,
         ];
         if whole.contains(&false) {
             return Ok(false);
+        }
+        match bounds.and_then(|bounds| bounds.blocks) {
+            Some((through, epoch)) => {
+                let blocks = source.open_table(BLOCKS).map_err(db_error)?;
+                let proofs = source.open_table(PROOFS).map_err(db_error)?;
+                if !copier.rows(
+                    BLOCKS,
+                    blocks.range(through + 1..).map_err(db_error)?,
+                    progress,
+                )? || !copier.rows(PROOFS, proofs.range(epoch..).map_err(db_error)?, progress)?
+                {
+                    return Ok(false);
+                }
+            }
+            None => {
+                if !copier.table(BLOCKS, progress)? || !copier.table(PROOFS, progress)? {
+                    return Ok(false);
+                }
+            }
         }
         let read_from = |name| -> Result<Option<u64>, DbError> {
             Ok(source
@@ -1178,6 +1199,10 @@ impl Db {
                 return Ok(false);
             }
             meta.extend([(tables.from, through), (tables.indexed, through)]);
+        }
+        if let Some((through, _)) = bounds.blocks {
+            let from = read_from(BLOCKS_FROM)?.unwrap_or(0).max(through + 1);
+            meta.push((BLOCKS_FROM, from));
         }
         match bounds.statements {
             Some(through) => {
@@ -2202,6 +2227,7 @@ mod tests {
             state: 2,
             trie: 1,
             statements: Some(2),
+            blocks: None,
         };
         let mut tables = Vec::new();
         assert!(
@@ -2235,6 +2261,45 @@ mod tests {
             target.state_rows().unwrap(),
             vec![(b"a".to_vec(), b"a2".to_vec())]
         );
+    }
+
+    #[test]
+    fn copying_with_block_bounds_matches_pruning_history_in_place() {
+        let (dir, copy) = (TempDir::new(), TempDir::new());
+        let db = pruning_fixture(&dir.0);
+        let mut batch = db.batch().unwrap();
+        for height in 1..=5u64 {
+            batch.put_block(height, &[height as u8]).unwrap();
+        }
+        for epoch in 1..=3u32 {
+            batch.put_proof(epoch, &[epoch as u8]).unwrap();
+        }
+        batch
+            .replace_known_peers(&[("peer".to_owned(), b"p".to_vec())])
+            .unwrap();
+        batch.commit().unwrap();
+        let target = Db::open(&copy.0).unwrap();
+        let bounds = CopyBounds {
+            state: 2,
+            trie: 1,
+            statements: Some(3),
+            blocks: Some((3, 2)),
+        };
+        assert!(db.copy_to(&target, Some(bounds), |_, _| true).unwrap());
+        assert!(target.build_history(|_, _| true).unwrap());
+
+        db.prune_state_history(2, |_| true).unwrap();
+        db.prune_trie_history(1, |_| true).unwrap();
+        db.prune_history(3, 2).unwrap();
+        assert_same(&db, &target);
+        assert_eq!(target.blocks_from().unwrap(), 4);
+        for height in 1..=5 {
+            assert_eq!(db.block(height).unwrap(), target.block(height).unwrap());
+        }
+        for epoch in 1..=3 {
+            assert_eq!(db.proof(epoch).unwrap(), target.proof(epoch).unwrap());
+        }
+        assert_eq!(target.known_peers().unwrap().len(), 1);
     }
 
     #[test]

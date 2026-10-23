@@ -688,6 +688,7 @@ dependencies = [
  "heika-tls",
  "heika-transaction",
  "heika-wallet",
+ "rand_core",
  "rayon",
  "serde",
  "serde_norway",

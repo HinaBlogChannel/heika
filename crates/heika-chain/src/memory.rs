@@ -168,7 +168,11 @@ impl ChainStore for MemoryStore {
             rows += std::mem::replace(&mut inner.proofs, kept).len() as u64;
             inner.blocks_from = inner.blocks_from.max(through + 1);
         }
-        Ok(Pruned { checkpoints, rows })
+        Ok(Pruned {
+            checkpoints,
+            rows,
+            remaining: false,
+        })
     }
 
     async fn checkpoint_at_or_below(

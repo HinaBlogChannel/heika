@@ -49,6 +49,8 @@ pub struct Prune {
 pub struct Pruned {
     pub checkpoints: usize,
     pub rows: u64,
+    /// 時間の上限で途中で止め、消し残しがある。次に呼んだときに続きを消す
+    pub remaining: bool,
 }
 
 /// 先端の段階が使う保存の口

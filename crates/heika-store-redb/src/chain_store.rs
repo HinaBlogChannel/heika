@@ -1,11 +1,16 @@
 //! 中核（heika-chain）の保存の口 [`ChainStore`] を、[`Db`] で実装する。
 
+use std::time::{Duration, Instant};
+
 use heika_chain::ChainError;
 use heika_chain::store::{BlockWrite, ChainStore, EXECUTOR_META, Prune, Pruned};
 use heika_core::patricia::SubCache;
 use heika_state_transition::executor::is_partial_row;
 
 use crate::{Change, Db, StateRow};
+
+/// 先端を追うあいだの刈り込みに、1回で使う時間の目安。まとまりの途中では止めないので、少し超えることがある
+const PRUNE_BUDGET: Duration = Duration::from_secs(2);
 
 impl ChainStore for Db {
     async fn load_state(&self) -> Result<(Vec<u8>, Vec<StateRow>, Vec<StateRow>), ChainError> {
@@ -83,17 +88,36 @@ impl ChainStore for Db {
         Ok(())
     }
 
+    /// 1回で刈り込むのは [`PRUNE_BUDGET`] まで。アーカイブからライトにしたときなど、消すものが多くても先端を追うのを
+    /// 長く止めないように、残りは次に呼ばれたとき（次の確定）に続ける。どの刈り込みも、続きから消せる
     async fn prune(&self, prune: Prune) -> Result<Pruned, ChainError> {
         let checkpoints = self.prune_checkpoints(prune.checkpoints_below)?;
+        let deadline = Instant::now() + PRUNE_BUDGET;
+        let keep_going = || Instant::now() < deadline;
         let mut rows = 0;
+        let mut remaining = false;
         if let Some((state, trie)) = prune.history {
-            rows += self.prune_state_history(state, |_| true)?.rows;
-            rows += self.prune_trie_history(trie, |_| true)?.rows;
+            let pruned = self.prune_state_history(state, |_| keep_going())?;
+            rows += pruned.rows;
+            remaining |= !pruned.done;
+            if !remaining {
+                let pruned = self.prune_trie_history(trie, |_| keep_going())?;
+                rows += pruned.rows;
+                remaining |= !pruned.done;
+            }
         }
-        if let Some((through, epoch)) = prune.blocks {
-            rows += self.prune_history(through, epoch)?;
+        if let Some((through, epoch)) = prune.blocks
+            && !remaining
+        {
+            let pruned = self.prune_history_while(through, epoch, keep_going)?;
+            rows += pruned.rows;
+            remaining |= !pruned.done;
         }
-        Ok(Pruned { checkpoints, rows })
+        Ok(Pruned {
+            checkpoints,
+            rows,
+            remaining,
+        })
     }
 
     async fn checkpoint_at_or_below(

@@ -202,7 +202,7 @@ fn settle(
             }
             Some(PartialCheck::Complete) => {
                 pool.lock().remove(hash);
-                match mempool.lock().add(stitched.clone(), now, height) {
+                match mempool.lock().add_completed(stitched.clone(), now, height) {
                     Ok(_) => {
                         println!(
                             "連署を待つトランザクション {hash} の連署が揃ったので、未承認のトランザクションにしました"

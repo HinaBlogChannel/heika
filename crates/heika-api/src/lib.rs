@@ -41,8 +41,9 @@ use heika_core::patricia::{self, SubCache};
 use heika_rest::block::BlockInfo;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
-    AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson, ErrorJson,
-    NodeInfoJson, TransactionFeesJson, UnlockedAccountJson,
+    AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson,
+    DeploymentJson, ErrorJson, HealthStatusJson, NetworkJson, NodeHealthJson, NodeInfoJson,
+    ServerInfoJson, ServerJson, TransactionFeesJson, UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
@@ -173,6 +174,44 @@ async fn node_info(State(api): State<Api>) -> Json<NodeInfoJson> {
 
 async fn node_peers(State(api): State<Api>) -> Json<Vec<NodeInfoJson>> {
     Json(read(&api).peers)
+}
+
+/// ネットワークの名前。catapult の REST の設定の `network.name` にあたる
+async fn network(State(api): State<Api>) -> Json<NetworkJson> {
+    let (name, description) = match read(&api).node.network_identifier {
+        104 => ("mainnet", "Symbol mainnet"),
+        152 => ("testnet", "Symbol testnet"),
+        _ => ("custom", "Symbol private network"),
+    };
+    Json(NetworkJson {
+        name: name.to_owned(),
+        description: description.to_owned(),
+    })
+}
+
+/// REST の版。catapult の REST の版の代わりに heika の版を返し、配った道具として heika を名乗る
+async fn node_server() -> Json<ServerInfoJson> {
+    let version = env!("CARGO_PKG_VERSION").to_owned();
+    Json(ServerInfoJson {
+        server_info: ServerJson {
+            rest_version: version.clone(),
+            deployment: DeploymentJson {
+                deployment_tool: "heika".to_owned(),
+                deployment_tool_version: version,
+                last_updated_date: "N/A".to_owned(),
+            },
+        },
+    })
+}
+
+/// REST はノードと同じプロセスにいるので、答えられればノードも DB も動いている
+async fn node_health() -> Json<NodeHealthJson> {
+    Json(NodeHealthJson {
+        status: HealthStatusJson {
+            api_node: "up".to_owned(),
+            db: "up".to_owned(),
+        },
+    })
 }
 
 async fn chain_info(State(api): State<Api>) -> Json<ChainInfoJson> {
@@ -500,6 +539,9 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/node/info", get(node_info))
         .route("/node/peers", get(node_peers))
         .route("/chain/info", get(chain_info))
+        .route("/network", get(network))
+        .route("/node/server", get(node_server))
+        .route("/node/health", get(node_health))
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
         .route("/heika/sourcecode.zip", get(source_code))
@@ -775,6 +817,22 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn answers_network_server_and_health_like_catapult() {
+        let (status, body) = get_status("/network").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["name"].is_string() && body["description"].is_string());
+        let (status, body) = get_status("/node/server").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["serverInfo"]["restVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["serverInfo"]["deployment"]["deploymentTool"], "heika");
+        assert_eq!(body["serverInfo"]["deployment"]["lastUpdatedDate"], "N/A");
+        let (status, body) = get_status("/node/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"]["apiNode"], "up");
+        assert_eq!(body["status"]["db"], "up");
     }
 
     #[tokio::test]

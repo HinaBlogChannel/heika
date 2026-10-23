@@ -1,0 +1,23 @@
+# heika のノードを systemd で動かす。/etc/systemd/system/heika.service に置き、User、WorkingDirectory、ExecStart の
+# パスを自分のものにする。手順は docs/deploy.md
+#
+# 止めるときは SIGTERM で、今のブロックを書き終えるまで待つ（TimeoutStopSec=infinity）。SIGKILL で止めると、
+# 次に起動したときに DB の修復が走って長くかかる。
+
+[Unit]
+Description=heika node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=heika
+WorkingDirectory=/home/heika/heika-mainnet
+ExecStart=/home/heika/heika-mainnet/bin/heika experimental peer start --config /home/heika/heika-mainnet/peer.yaml
+KillSignal=SIGTERM
+TimeoutStopSec=infinity
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

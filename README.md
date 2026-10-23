@@ -113,6 +113,7 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 - [docs/harvesting.md](docs/harvesting.md): 投票鍵、ハーベストのリンクと委任、トランザクションの表示、署名、送信（`heika key voting`、`heika harvesting`、`heika tx`）
 - [docs/node.md](docs/node.md): 速いノードを探す、ノードあての委任の一覧（`heika node`）
 - [docs/peer.md](docs/peer.md): 試験的なノード（`heika experimental peer start`）
+- [docs/deploy.md](docs/deploy.md): systemd と Caddy で、ノードを P2P と REST で外に出す
 - `heika legal`: heika と依存のライセンス、ビルドしたときのソース（下の「ライセンス」）
 
 ## テスト

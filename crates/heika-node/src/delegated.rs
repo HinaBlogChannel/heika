@@ -117,7 +117,7 @@ fn reason(rejection: &Rejection) -> String {
                     LinkKind::Node => "NodeKeyLink がこのノードの委任の鍵",
                 })
                 .collect();
-            format!("メインアカウントの {} になっていません", names.join("、"))
+            format!("メインアカウントの {}になっていません", names.join("、"))
         }
     }
 }
@@ -268,7 +268,13 @@ impl Delegated {
             match unlocked::check(&remote, &vrf, &self.public_key, lookup) {
                 Ok(found) => eligible.push((entry, found)),
                 Err(rejection) => rejected.push(DelegationStatus {
-                    main_account: sender,
+                    // 前に引き受けていたものなら、そのときに辿れたメインアカウントを引き継ぐ
+                    main_account: sender.or_else(|| {
+                        self.statuses
+                            .iter()
+                            .find(|status| status.remote == remote)
+                            .and_then(|status| status.main_account)
+                    }),
                     remote,
                     height: entry.height,
                     state: DelegationState::Rejected(reason(&rejection)),

@@ -18,13 +18,16 @@ use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::nemesis_hash;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
-use heika_core::key::PrivateKey;
+use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkParameters;
 use heika_mempool::{Mempool, SharedMempool};
 use heika_packet::{NetworkNode, NodeRoles, NodeVersion};
 use heika_peer::book::{FIRST_TRIES, best};
 use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers, endpoint};
 use heika_peer_protocol::ClientConnection;
+use heika_rest::node::{
+    ChainInfoJson, DelegationJson, DelegationStateJson, NodeInfoJson, UnlockedAccountJson,
+};
 use heika_state_transition::config::{ChainConfig, load_network_parameters};
 use heika_state_transition::executor::persist::height_of_meta;
 use heika_store_redb::Db;
@@ -32,7 +35,7 @@ use heika_tls::{ConnectError, Identity};
 
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
-use crate::delegated::Delegated;
+use crate::delegated::{Delegated, DelegationState};
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
@@ -47,6 +50,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const ANNOUNCED_VERSION: NodeVersion = NodeVersion(0x0100_0309);
 /// catapult の `NodeRoles::IPv4`
 const NODE_ROLE_IPV4: u32 = 0x40;
+/// `roles` の API のビット。REST の口を立てるときに名乗る
+const NODE_ROLE_API: u32 = 0x02;
 
 /// ノードを動かせなかったわけ
 pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
@@ -377,7 +382,38 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     let gate = Gate::default();
     let (events, inbox) = mpsc::channel::<NodeEvent>();
     let done = std::sync::atomic::AtomicBool::new(false);
+    // REST の口。駆動役が様子を書き、API のスレッドが読んで返す
+    let api = if spec.rest.is_empty() {
+        None
+    } else {
+        let node_public_key = match &delegated {
+            Some(delegated) => delegated.public_key(),
+            None => PublicKey::from_private_key(&read_private_key(
+                &spec.certificates.directory.join("tls.key"),
+            )?),
+        };
+        let snapshot = heika_api::Snapshot {
+            node: api_node(identity, spec, parameters, &node_public_key),
+            chain: api_chain(&chain.status()),
+            unlocked: Default::default(),
+            delegations: Vec::new(),
+        };
+        let shared: heika_api::Shared = Arc::new(RwLock::new(snapshot));
+        refresh_api(&shared, &chain, delegated.as_ref());
+        Some(shared)
+    };
+    let api_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let outcome = std::thread::scope(|scope| -> Result<Outcome, NodeError> {
+        if let Some(shared) = &api {
+            let addresses: Vec<String> =
+                spec.rest.iter().map(|rest| rest.address.clone()).collect();
+            let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
+            scope.spawn(move || {
+                if let Err(error) = heika_api::serve(&addresses, shared, stop) {
+                    eprintln!("{error}");
+                }
+            });
+        }
         if let (Some(listen), Some(node)) = (&spec.listen, &announce) {
             let listener = std::net::TcpListener::bind(&listen.address)
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
@@ -568,10 +604,14 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 }
                 *status.write().expect("not poisoned") = chain.status();
                 *reply.write().expect("not poisoned") = peers.reply();
+                if let Some(shared) = &api {
+                    refresh_api(shared, &chain, delegated.as_ref());
+                }
             }
             Ok(Outcome::Stopped)
         })();
         done.store(true, std::sync::atomic::Ordering::SeqCst);
+        api_stop.store(true, std::sync::atomic::Ordering::SeqCst);
         result
     })?;
     save_known(store.db(), &peers.book().records())?;
@@ -648,6 +688,90 @@ fn read_harvesters(spec: &NodeConfig) -> Result<Vec<KeyPair>, NodeError> {
         ));
     }
     Ok(keys)
+}
+
+/// API の `/node/info`。役割は、ピアと API と IPv4
+fn api_node(
+    identity: &Identity,
+    spec: &NodeConfig,
+    parameters: &NetworkParameters,
+    node_public_key: &PublicKey,
+) -> NodeInfoJson {
+    let listen = spec.listen.as_ref();
+    NodeInfoJson {
+        version: ANNOUNCED_VERSION.0,
+        public_key: identity.key().to_string(),
+        network_generation_hash_seed: parameters.generation_hash_seed.to_string(),
+        roles: NodeRoles::PEER.0 | NODE_ROLE_API | NODE_ROLE_IPV4,
+        port: listen
+            .and_then(|listen| listen.address.rsplit_once(':'))
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(7900),
+        network_identifier: parameters.identifier.0,
+        host: listen
+            .and_then(|listen| listen.public_host.clone())
+            .unwrap_or_default(),
+        friendly_name: listen
+            .and_then(|listen| listen.friendly_name.clone())
+            .unwrap_or_default(),
+        node_public_key: node_public_key.to_string(),
+    }
+}
+
+/// API の `/chain/info`
+fn api_chain(status: &heika_chain::chain::Status) -> ChainInfoJson {
+    let finalized = &status.finalized;
+    ChainInfoJson::new(
+        status.height,
+        status.score,
+        finalized.round.epoch,
+        finalized.round.point,
+        finalized.height,
+        finalized.hash.to_string(),
+    )
+}
+
+/// API の様子を、チェーンと委任の今に書き換える
+fn refresh_api(
+    shared: &heika_api::Shared,
+    chain: &Chain<'_, CachedStore>,
+    delegated: Option<&Delegated>,
+) {
+    let mut snapshot = shared
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    snapshot.chain = api_chain(&chain.status());
+    let Some(delegated) = delegated else {
+        return;
+    };
+    let hex = |key: &PublicKey| key.to_string();
+    let statuses = delegated.statuses();
+    snapshot.unlocked = UnlockedAccountJson {
+        unlocked_account: statuses
+            .iter()
+            .filter(|status| status.state == DelegationState::Accepted)
+            .map(|status| hex(&status.remote))
+            .collect(),
+    };
+    snapshot.delegations = statuses
+        .iter()
+        .map(|status| {
+            let (state, reason) = match &status.state {
+                DelegationState::Accepted => (DelegationStateJson::Accepted, None),
+                DelegationState::Waiting => (DelegationStateJson::Waiting, None),
+                DelegationState::Rejected(reason) => {
+                    (DelegationStateJson::Rejected, Some(reason.clone()))
+                }
+            };
+            DelegationJson {
+                main_public_key: status.main_account.as_ref().map(hex),
+                remote_public_key: hex(&status.remote),
+                height: status.height.map(|height| height.to_string()),
+                state,
+                reason,
+            }
+        })
+        .collect();
 }
 
 /// 設定ファイルとメモリの自分の鍵に、引き受けている委任の鍵を足す

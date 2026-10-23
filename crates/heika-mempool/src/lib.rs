@@ -145,6 +145,16 @@ impl Mempool {
         self.entries.contains_key(hash)
     }
 
+    /// 持っているものの短いハッシュ（[`short_hash`]）。ピアに `Pull_Transactions` で頼むとき、持っているものを伝える
+    pub fn short_hashes(&self) -> Vec<u32> {
+        self.entries.keys().map(short_hash).collect()
+    }
+
+    /// 受け付ける手数料の倍率の下限。ピアに頼むときも、これより低いものは要らないと伝える
+    pub fn min_fee_multiplier(&self) -> u32 {
+        self.config.min_fee_multiplier
+    }
+
     /// 持っていれば、その期限（Nemesis からのミリ秒）
     pub fn deadline(&self, hash: &Hash256) -> Option<u64> {
         self.entries.get(hash).map(|entry| entry.deadline)

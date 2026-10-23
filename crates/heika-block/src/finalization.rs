@@ -1,8 +1,11 @@
 //! ファイナライズ。catbuffer の `finalization/`。
 //!
 //! 投票でファイナライズされたブロックを、ラウンド（エポックとポイント）、高さ、ハッシュで示す。
-//! 証明を投票者で確かめるのは [`proof`]、1つのラウンドの投票の数え方は [`round`]。
+//! 投票のメッセージは [`message`]、1つのラウンドの投票の数え方は [`round`]、メッセージを集めるのは
+//! [`aggregator`]、証明を投票者で確かめるのは [`proof`]。
 
+pub mod aggregator;
+pub mod message;
 pub mod proof;
 pub mod round;
 

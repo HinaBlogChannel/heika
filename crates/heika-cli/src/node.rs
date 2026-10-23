@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 use heika_block::finalization::FinalizationRound;
-use heika_block::finalization::proof::FinalizationMessage;
+use heika_block::finalization::message::FinalizationMessage;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};

@@ -11,16 +11,15 @@
 //!
 //! 投票者とその重みは、証明の外から渡す。エポック E の投票者は、E − 1 の最後の高さの状態で決まる。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use heika_core::hash::Hash256;
-use heika_core::key::PublicKey;
-use heika_core::signature::Signature;
-use sha3::{Digest, Sha3_256};
 
-use super::round::RoundContext;
-use super::{FinalizationRound, FinalizedBlockHeader};
+use super::FinalizedBlockHeader;
+use super::aggregator::RoundAggregator;
+use super::message::{FinalizationMessage, SIGNATURE_SIZE, u32_at};
 
 /// 証明を確かめるのに要る、ネットワークの設定（config-network.properties の `[chain]` と `[finalization]`）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,10 +154,6 @@ impl std::error::Error for ProofError {}
 const PROOF_HEADER_SIZE: usize = 8 + FinalizedBlockHeader::SIZE;
 /// `FinalizationMessageGroup` の見出し。大きさ、ハッシュの数、署名の数、段階、高さ
 const GROUP_HEADER_SIZE: usize = 4 + 4 + 4 + 4 + 8;
-/// `BmTreeSignature`。（根の公開鍵、根の署名）、（下の公開鍵、下の署名）
-const SIGNATURE_SIZE: usize = 2 * (32 + 64);
-/// `FinalizationMessage` のうち、署名しない見出し。大きさ、予約、署名
-const MESSAGE_HEADER_SIZE: usize = 4 + 4 + SIGNATURE_SIZE;
 
 /// 証明の見出し。大きさと版だけを確かめ、投票の署名と重みはまだ確かめない
 pub fn proof_header(proof: &[u8]) -> Result<FinalizedBlockHeader, ProofError> {
@@ -201,7 +196,7 @@ pub fn verify_proof(
         });
     }
 
-    let mut aggregator = Aggregator::new(epoch, voters, parameters);
+    let mut aggregator = RoundAggregator::new(epoch, Arc::new(voters.clone()), *parameters);
     let mut index = 0;
     let mut offset = PROOF_HEADER_SIZE;
     while offset < proof.len() {
@@ -223,18 +218,23 @@ pub fn verify_proof(
             1 => false,
             _ => return Err(malformed("組の段階")),
         };
-        let hashes = &group[GROUP_HEADER_SIZE..GROUP_HEADER_SIZE + hashes_count * 32];
+        let hashes: Vec<Hash256> = group[GROUP_HEADER_SIZE..GROUP_HEADER_SIZE + hashes_count * 32]
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|hash| Hash256(*hash))
+            .collect();
         let signatures = &group[GROUP_HEADER_SIZE + hashes_count * 32..group_size];
         for signature in signatures.as_chunks::<SIGNATURE_SIZE>().0 {
-            let message = Message {
+            let message = FinalizationMessage {
                 round: header.round,
                 is_prevote,
                 height,
-                hashes,
-                signature,
+                hashes: hashes.clone(),
+                signature: *signature,
             };
             aggregator
-                .add(&message)
+                .add(message)
                 .map_err(|reason| ProofError::Message { index, reason })?;
             index += 1;
         }
@@ -246,7 +246,7 @@ pub fn verify_proof(
     }
 
     let (best_height, best_hash) = aggregator
-        .round
+        .round()
         .best_precommit()
         .ok_or(ProofError::NoPrecommit)?;
     if best_height != header.height || best_hash != header.hash {
@@ -258,233 +258,10 @@ pub fn verify_proof(
     Ok(header)
 }
 
-/// 投票のメッセージ1つ。catapult の `FinalizationMessage`。ノードどうしが確定の前に配り合うもので、証明は
-/// これを段階と高さとハッシュごとにまとめたもの
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinalizationMessage {
-    pub round: FinalizationRound,
-    pub is_prevote: bool,
-    /// 最初のハッシュのブロックの高さ
-    pub height: u64,
-    /// 高さ `height` から続くブロックのハッシュ
-    pub hashes: Vec<Hash256>,
-    signature: [u8; SIGNATURE_SIZE],
-}
-
-impl FinalizationMessage {
-    /// バイト列から読む。署名は確かめない（[`FinalizationMessage::verify_signature`]）
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProofError> {
-        let malformed = |what: &str| ProofError::Malformed(what.to_owned());
-        if bytes.len() < MESSAGE_HEADER_SIZE + 24 {
-            return Err(malformed("メッセージの長さ"));
-        }
-        let size = u32_at(bytes, 0) as usize;
-        let version = u32_at(bytes, MESSAGE_HEADER_SIZE);
-        let hashes_count = u32_at(bytes, MESSAGE_HEADER_SIZE + 4) as usize;
-        if size != bytes.len() || size != MESSAGE_HEADER_SIZE + 24 + hashes_count * 32 {
-            return Err(malformed("メッセージの大きさ"));
-        }
-        if version != 1 {
-            return Err(malformed("メッセージの版"));
-        }
-        let point_stage = u32_at(bytes, MESSAGE_HEADER_SIZE + 12);
-        let is_prevote = point_stage & 1 == 0;
-        let hashes_at = MESSAGE_HEADER_SIZE + 24;
-        Ok(Self {
-            round: FinalizationRound {
-                epoch: u32_at(bytes, MESSAGE_HEADER_SIZE + 8),
-                point: point_stage >> 1,
-            },
-            is_prevote,
-            height: u64::from_le_bytes(
-                bytes[MESSAGE_HEADER_SIZE + 16..hashes_at]
-                    .try_into()
-                    .expect("8 bytes"),
-            ),
-            hashes: bytes[hashes_at..]
-                .as_chunks::<32>()
-                .0
-                .iter()
-                .map(|hash| Hash256(*hash))
-                .collect(),
-            signature: bytes[8..MESSAGE_HEADER_SIZE].try_into().expect("signature"),
-        })
-    }
-
-    /// 投票の鍵（BM ツリーの根の公開鍵）。[`VotingSet`] の鍵と同じもの
-    pub fn root_key(&self) -> [u8; 32] {
-        self.signature[..32].try_into().expect("32 bytes")
-    }
-
-    /// 根の鍵がこのエポックの下の鍵に、下の鍵がメッセージに署名しているか
-    pub fn verify_signature(&self) -> bool {
-        let hashes: Vec<u8> = self.hashes.iter().flat_map(|hash| hash.0).collect();
-        let message = Message {
-            round: self.round,
-            is_prevote: self.is_prevote,
-            height: self.height,
-            hashes: &hashes,
-            signature: &self.signature,
-        };
-        message.verify_signature(&message.signed_part())
-    }
-}
-
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
-}
-
-/// 組と署名から組み直した1つのメッセージ
-struct Message<'a> {
-    round: FinalizationRound,
-    is_prevote: bool,
-    height: u64,
-    hashes: &'a [u8],
-    signature: &'a [u8; SIGNATURE_SIZE],
-}
-
-impl Message<'_> {
-    fn hashes_count(&self) -> u64 {
-        (self.hashes.len() / 32) as u64
-    }
-
-    fn signed_part(&self) -> Vec<u8> {
-        signed_part(self.round, self.is_prevote, self.height, self.hashes)
-    }
-
-    /// catapult の `CalculateMessageHash`。メッセージ全体の SHA3-256
-    fn hash(&self, signed_part: &[u8]) -> [u8; 32] {
-        let size = (MESSAGE_HEADER_SIZE + signed_part.len()) as u32;
-        let mut hasher = Sha3_256::new();
-        hasher.update(size.to_le_bytes());
-        hasher.update(0u32.to_le_bytes());
-        hasher.update(self.signature);
-        hasher.update(signed_part);
-        hasher.finalize().into()
-    }
-
-    fn root_key(&self) -> [u8; 32] {
-        self.signature[..32].try_into().expect("32 bytes")
-    }
-
-    /// 2段の Bellare-Miner の署名。根の鍵が（下の鍵、エポック）に、下の鍵がメッセージに署名している
-    fn verify_signature(&self, signed_part: &[u8]) -> bool {
-        let root_key = PublicKey(self.root_key());
-        let root_signature = Signature(self.signature[32..96].try_into().expect("64 bytes"));
-        let bottom_key: [u8; 32] = self.signature[96..128].try_into().expect("32 bytes");
-        let bottom_signature = Signature(self.signature[128..].try_into().expect("64 bytes"));
-        let epoch = u64::from(self.round.epoch).to_le_bytes();
-        root_key.verify(&[&bottom_key, &epoch], &root_signature)
-            && PublicKey(bottom_key).verify(&[signed_part], &bottom_signature)
-    }
-}
-
-/// メッセージの署名するところ。版、ハッシュの数、ステップ（エポック、ポイントと段階）、高さ、ハッシュ
-fn signed_part(round: FinalizationRound, is_prevote: bool, height: u64, hashes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(24 + hashes.len());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&((hashes.len() / 32) as u32).to_le_bytes());
-    out.extend_from_slice(&round.epoch.to_le_bytes());
-    let point_stage = (round.point << 1) | u32::from(!is_prevote);
-    out.extend_from_slice(&point_stage.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
-    out.extend_from_slice(hashes);
-    out
-}
-
-/// catapult の `RoundMessageAggregator`
-struct Aggregator<'a> {
-    epoch: u32,
-    voters: &'a VotingSet,
-    parameters: &'a ProofParameters,
-    /// 投票者を決めた高さ
-    voting_set_height: u64,
-    /// （投票者、prevote か）→ メッセージのハッシュ
-    messages: HashMap<([u8; 32], bool), [u8; 32]>,
-    round: RoundContext,
-}
-
-impl<'a> Aggregator<'a> {
-    fn new(epoch: u32, voters: &'a VotingSet, parameters: &'a ProofParameters) -> Self {
-        let total = voters.total();
-        // catapult は u64 のまま掛ける
-        let threshold = total.wrapping_mul(parameters.threshold) / parameters.size;
-        Self {
-            epoch,
-            voters,
-            parameters,
-            voting_set_height: parameters.voting_set_end_height(epoch.saturating_sub(1).max(1)),
-            messages: HashMap::new(),
-            round: RoundContext::new(total, threshold),
-        }
-    }
-
-    fn add(&mut self, message: &Message) -> Result<(), MessageError> {
-        let count = message.hashes_count();
-        if count == 0 || count > self.parameters.max_hashes_per_point {
-            return Err(MessageError::InvalidHashes);
-        }
-        let last_height = message.height + count - 1;
-        if self.voting_set_height > last_height {
-            return Err(MessageError::InvalidHeight);
-        }
-        if message.is_prevote {
-            let min = self
-                .parameters
-                .voting_set_end_height(self.epoch.saturating_sub(1).max(1));
-            let max = self.parameters.voting_set_end_height(self.epoch);
-            if message.height < min || last_height > max {
-                return Err(MessageError::InvalidHashes);
-            }
-        } else if count != 1 {
-            return Err(MessageError::InvalidHashes);
-        }
-
-        let signed_part = message.signed_part();
-        let key = (message.root_key(), message.is_prevote);
-        let hash = message.hash(&signed_part);
-        if let Some(existing) = self.messages.get(&key) {
-            return Err(if *existing == hash {
-                MessageError::Redundant
-            } else {
-                MessageError::Conflicting
-            });
-        }
-        // catapult の `ProcessMessage`。予約と版は組み直したときに 0 と 1 にしてある
-        let weight = self
-            .voters
-            .voters
-            .get(&message.root_key())
-            .copied()
-            .unwrap_or(0);
-        if weight == 0 {
-            return Err(MessageError::Voter);
-        }
-        if !message.verify_signature(&signed_part) {
-            return Err(MessageError::Signature);
-        }
-        self.messages.insert(key, hash);
-        let hashes: Vec<Hash256> = message
-            .hashes
-            .as_chunks::<32>()
-            .0
-            .iter()
-            .map(|hash| Hash256(*hash))
-            .collect();
-        if message.is_prevote {
-            self.round.accept_prevote(message.height, &hashes, weight);
-        } else {
-            self.round
-                .accept_precommit(message.height, hashes[0], weight);
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use heika_core::key::PrivateKey;
-
+    use super::super::FinalizationRound;
+    use super::super::message::testing::{Voter, block_hash};
     use super::*;
 
     /// エポックは 10 ブロック。エポック 3 の prevote は高さ 10〜20
@@ -499,44 +276,6 @@ mod tests {
         epoch: EPOCH,
         point: 2,
     };
-
-    /// 根の鍵と、エポックごとの下の鍵
-    struct Voter {
-        root: PrivateKey,
-        bottom: PrivateKey,
-    }
-
-    impl Voter {
-        fn new(seed: u8) -> Self {
-            Self {
-                root: PrivateKey::from_bytes(&[seed; 32]),
-                bottom: PrivateKey::from_bytes(&[seed ^ 0x80; 32]),
-            }
-        }
-
-        fn key(&self) -> [u8; 32] {
-            PublicKey::from_private_key(&self.root).0
-        }
-
-        /// `BmTreeSignature`
-        fn sign(&self, round: FinalizationRound, signed: &[u8]) -> Vec<u8> {
-            let bottom = PublicKey::from_private_key(&self.bottom).0;
-            let epoch = u64::from(round.epoch).to_le_bytes();
-            let mut out = Vec::with_capacity(SIGNATURE_SIZE);
-            out.extend_from_slice(&self.key());
-            out.extend_from_slice(&self.root.sign(&[&bottom, &epoch]).0);
-            out.extend_from_slice(&bottom);
-            out.extend_from_slice(&self.bottom.sign(&[signed]).0);
-            out
-        }
-    }
-
-    /// 高さ `height` のブロックのハッシュ。`fork` で別の枝にする
-    fn block_hash(height: u64, fork: u8) -> Hash256 {
-        let mut hash = [fork; 32];
-        hash[..8].copy_from_slice(&height.to_le_bytes());
-        Hash256(hash)
-    }
 
     struct Group<'a> {
         is_prevote: bool,
@@ -567,15 +306,22 @@ mod tests {
     fn build(header: &FinalizedBlockHeader, groups: &[Group]) -> Vec<u8> {
         let mut body = Vec::new();
         for (index, group) in groups.iter().enumerate() {
-            let hashes: Vec<u8> = group.hashes.iter().flat_map(|hash| hash.0).collect();
-            let signed = signed_part(header.round, group.is_prevote, group.height, &hashes);
+            let unsigned = FinalizationMessage {
+                round: header.round,
+                is_prevote: group.is_prevote,
+                height: group.height,
+                hashes: group.hashes.clone(),
+                signature: [0; SIGNATURE_SIZE],
+            };
+            let signed = unsigned.signed_part();
+            let hashes = &signed[24..];
             let size = GROUP_HEADER_SIZE + hashes.len() + group.voters.len() * SIGNATURE_SIZE;
             body.extend_from_slice(&(size as u32).to_le_bytes());
             body.extend_from_slice(&(group.hashes.len() as u32).to_le_bytes());
             body.extend_from_slice(&(group.voters.len() as u32).to_le_bytes());
             body.extend_from_slice(&u32::from(!group.is_prevote).to_le_bytes());
             body.extend_from_slice(&group.height.to_le_bytes());
-            body.extend_from_slice(&hashes);
+            body.extend_from_slice(hashes);
             for voter in &group.voters {
                 body.extend_from_slice(&voter.sign(header.round, &signed));
             }
@@ -622,38 +368,6 @@ mod tests {
             &voting_set(voters, &[40, 30, 30]),
             &PARAMETERS,
         )
-    }
-
-    #[test]
-    fn reads_and_verifies_a_single_message() {
-        let voter = Voter::new(1);
-        let hashes: Vec<u8> = (10..=12).flat_map(|at| block_hash(at, 0).0).collect();
-        let signed = signed_part(ROUND, false, 10, &hashes);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&((MESSAGE_HEADER_SIZE + signed.len()) as u32).to_le_bytes());
-        bytes.extend_from_slice(&[0; 4]);
-        bytes.extend_from_slice(&voter.sign(ROUND, &signed));
-        bytes.extend_from_slice(&signed);
-        let message = FinalizationMessage::from_bytes(&bytes).unwrap();
-        assert_eq!(message.round, ROUND);
-        assert!(!message.is_prevote);
-        assert_eq!(message.height, 10);
-        assert_eq!(
-            message.hashes,
-            (10..=12).map(|at| block_hash(at, 0)).collect::<Vec<_>>()
-        );
-        assert_eq!(message.root_key(), voter.key());
-        assert!(message.verify_signature());
-
-        // 署名したところを変えると通らない。大きさが合わなければ読まない
-        let mut changed = bytes.clone();
-        *changed.last_mut().unwrap() ^= 1;
-        assert!(
-            !FinalizationMessage::from_bytes(&changed)
-                .unwrap()
-                .verify_signature()
-        );
-        assert!(FinalizationMessage::from_bytes(&bytes[..bytes.len() - 32]).is_err());
     }
 
     #[test]

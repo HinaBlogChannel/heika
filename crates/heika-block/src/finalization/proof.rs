@@ -171,6 +171,53 @@ pub fn proof_header(proof: &[u8]) -> Result<FinalizedBlockHeader, ProofError> {
     FinalizedBlockHeader::from_bytes(&proof[8..PROOF_HEADER_SIZE]).map_err(|_| malformed("見出し"))
 }
 
+/// ファイナライズしたブロック `header` の証明を、メッセージ `messages` から組む。catapult の `CreateFinalizationProof`。
+///
+/// 段階、高さ、ハッシュが同じメッセージを1つの組にまとめ、署名を並べる。組は（大きさ、署名するところのバイト列）の順、
+/// 組の中の署名は渡された順。`header` のラウンドでないメッセージは入れない。組の大きさはいつも8の倍数なので、
+/// 組のあいだに詰め物は要らない
+pub fn build_proof<'a>(
+    header: &FinalizedBlockHeader,
+    messages: impl IntoIterator<Item = &'a FinalizationMessage>,
+) -> Vec<u8> {
+    // （大きさ、署名するところ）→（組の見本、署名の並び）
+    type Group<'a> = (&'a FinalizationMessage, Vec<[u8; SIGNATURE_SIZE]>);
+    let mut groups: BTreeMap<(usize, Vec<u8>), Group> = BTreeMap::new();
+    for message in messages {
+        if message.round != header.round {
+            continue;
+        }
+        groups
+            .entry((message.size(), message.signed_part()))
+            .or_insert_with(|| (message, Vec::new()))
+            .1
+            .push(message.signature);
+    }
+    let mut body = Vec::new();
+    for (template, signatures) in groups.values() {
+        let size =
+            GROUP_HEADER_SIZE + template.hashes.len() * 32 + signatures.len() * SIGNATURE_SIZE;
+        body.extend_from_slice(&(size as u32).to_le_bytes());
+        body.extend_from_slice(&(template.hashes.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
+        body.extend_from_slice(&u32::from(!template.is_prevote).to_le_bytes());
+        body.extend_from_slice(&template.height.to_le_bytes());
+        for hash in &template.hashes {
+            body.extend_from_slice(&hash.0);
+        }
+        for signature in signatures {
+            body.extend_from_slice(signature);
+        }
+    }
+    let size = PROOF_HEADER_SIZE + body.len();
+    let mut proof = Vec::with_capacity(size);
+    proof.extend_from_slice(&(size as u32).to_le_bytes());
+    proof.extend_from_slice(&1u32.to_le_bytes());
+    proof.extend_from_slice(&header.to_bytes());
+    proof.extend_from_slice(&body);
+    proof
+}
+
 /// 証明が、エポックの最後の高さ（[`ProofParameters::voting_set_end_height`]）を指しているか。
 /// エポックの途中のポイントの証明は、エポックが終わると最後のものに替わる
 pub fn closes_epoch(header: &FinalizedBlockHeader, voting_set_grouping: u64) -> bool {
@@ -586,6 +633,43 @@ mod tests {
         assert_eq!(VotingSet::decode(&set.encode()), Some(set.clone()));
         let encoded = set.encode();
         assert_eq!(VotingSet::decode(&encoded[..encoded.len() - 1]), None);
+    }
+
+    #[test]
+    fn builds_proofs_that_verify() {
+        let voters = voters();
+        let header = header_at(15);
+        let mut messages = Vec::new();
+        for voter in &voters {
+            for (is_prevote, height, through) in [(true, 10, 15), (false, 15, 15)] {
+                messages.push(voter.message(
+                    ROUND,
+                    is_prevote,
+                    height,
+                    (height..=through).map(|at| block_hash(at, 0)).collect(),
+                ));
+            }
+        }
+        // 別のラウンドのメッセージは入らない
+        let other = FinalizationRound {
+            epoch: EPOCH,
+            point: 1,
+        };
+        messages.push(voters[0].message(other, true, 10, vec![block_hash(10, 0)]));
+        let proof = build_proof(&header, &messages);
+        assert_eq!(verify(&proof, &voters), Ok(header));
+        // 組は2つ（prevote と precommit）、それぞれ3人の署名
+        assert_eq!(
+            proof.len(),
+            PROOF_HEADER_SIZE + 2 * GROUP_HEADER_SIZE + 7 * 32 + 6 * SIGNATURE_SIZE
+        );
+        // 渡す順を変えても同じ組になる
+        let mut reversed = messages.clone();
+        reversed.reverse();
+        assert_eq!(
+            verify(&build_proof(&header, &reversed), &voters),
+            Ok(header)
+        );
     }
 
     #[test]

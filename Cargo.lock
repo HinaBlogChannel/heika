@@ -662,6 +662,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-finalization"
+version = "0.9.0"
+dependencies = [
+ "heika-block",
+ "heika-core",
+]
+
+[[package]]
 name = "heika-harvesting"
 version = "0.9.0"
 dependencies = [

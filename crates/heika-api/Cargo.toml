@@ -8,6 +8,7 @@ description = "heika のノードの REST。catapult の REST のうち、ウォ
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base16ct = "1.0.0"
 heika-rest = { path = "../heika-rest" }
 tokio = { version = "1.53.3", features = ["net", "rt", "time"] }
 

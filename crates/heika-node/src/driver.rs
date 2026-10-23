@@ -20,7 +20,7 @@ use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkParameters;
-use heika_mempool::{Mempool, SharedMempool};
+use heika_mempool::{Mempool, Rejected, SharedMempool};
 use heika_packet::{NetworkNode, NodeRoles, NodeVersion};
 use heika_peer::book::{FIRST_TRIES, best};
 use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers, endpoint};
@@ -377,7 +377,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         .map(|listen| local_node(identity, listen, parameters))
         .transpose()?
         .map(Arc::new);
-    let status = RwLock::new(chain.status());
+    let status = Arc::new(RwLock::new(chain.status()));
     let reply = RwLock::new(peers.reply());
     let gate = Gate::default();
     let (events, inbox) = mpsc::channel::<NodeEvent>();
@@ -407,9 +407,15 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         if let Some(shared) = &api {
             let addresses: Vec<String> =
                 spec.rest.iter().map(|rest| rest.address.clone()).collect();
+            let submit = submit(
+                parameters,
+                Arc::clone(&mempool),
+                Arc::clone(&status),
+                events.clone(),
+            );
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {
-                if let Err(error) = heika_api::serve(&addresses, shared, stop) {
+                if let Err(error) = heika_api::serve(&addresses, shared, submit, stop) {
                     eprintln!("{error}");
                 }
             });
@@ -417,7 +423,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         if let (Some(listen), Some(node)) = (&spec.listen, &announce) {
             let listener = std::net::TcpListener::bind(&listen.address)
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
-            let (status, reply, gate, done) = (&status, &reply, &gate, &done);
+            let (status, reply, gate, done) = (&*status, &reply, &gate, &done);
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
             let mempool = &*mempool;
             let server_config = Arc::new(heika_tls::server_config(identity));
@@ -477,6 +483,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                         NodeEvent::Chain(event) => {
                             if let Some(outcome) = now_or_never(chain.handle(event))? {
                                 return Ok(outcome);
+                            }
+                        }
+                        NodeEvent::Relay(bytes) => {
+                            for sender in senders.values() {
+                                let _ = sender.send(Request::Transactions(Arc::clone(&bytes)));
                             }
                         }
                         NodeEvent::Peer(event) => {
@@ -857,6 +868,31 @@ fn save_known(db: &Db, records: &[(String, KnownPeer)]) -> Result<(), NodeError>
     batch.replace_known_peers(&records)?;
     batch.commit()?;
     Ok(())
+}
+
+/// REST で届いたトランザクションを、次のブロックに入れるつもりでメモリプールに入れ、受け付けたらピアに流す口
+fn submit(
+    parameters: &'static NetworkParameters,
+    mempool: Arc<SharedMempool>,
+    status: Arc<RwLock<heika_chain::chain::Status>>,
+    relay: Sender<NodeEvent>,
+) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let height = status.read().expect("not poisoned").height + 1;
+        let added = mempool
+            .lock()
+            .add(bytes.clone(), network_now(parameters), height);
+        match added {
+            Ok(hash) => {
+                println!("REST から未承認のトランザクション {hash} を受け付けました");
+                let _ = relay.send(NodeEvent::Relay(Arc::new(bytes)));
+                Ok(())
+            }
+            // 前に受け付けたもの。もう流してある
+            Err(Rejected::Known) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    })
 }
 
 /// Nemesis からのミリ秒。トランザクションの期限と同じ数え方

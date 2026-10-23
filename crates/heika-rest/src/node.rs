@@ -1,5 +1,5 @@
 //! ノードとチェーンの様子。`/node/info`、`/chain/info`、`/node/unlockedaccount` が返す JSON と、heika だけの
-//! `/heika/delegations`（委任の様子）。
+//! `/heika/delegations`（委任の様子）と、`PUT /transactions` の本文と答え。
 //!
 //! catapult の REST の `NodeInfoDTO`、`ChainInfoDTO`、`UnlockedAccountDTO` に合わせている。64ビットの数は、catapult の
 //! REST と同じく10進の文字列にする。heika の API はこれを返し、クライアントはこれで読む。
@@ -98,6 +98,33 @@ pub struct DelegationJson {
     pub height: Option<String>,
     pub state: DelegationStateJson,
     pub reason: Option<String>,
+}
+
+/// `PUT /transactions` の本文。署名したトランザクション（16進）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct AnnounceJson {
+    pub payload: String,
+}
+
+/// `PUT /transactions` が受け付けたときの答え（catapult の REST と同じ文）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct AnnounceResultJson {
+    pub message: String,
+}
+
+impl AnnounceResultJson {
+    pub fn pushed() -> Self {
+        Self {
+            message: "packet 9 was pushed to the network via /transactions".to_owned(),
+        }
+    }
+}
+
+/// 受け付けなかったときの答え（catapult の REST のエラーと同じ形）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct ErrorJson {
+    pub code: String,
+    pub message: String,
 }
 
 #[cfg(test)]

@@ -1977,6 +1977,7 @@ name = "heika-api"
 version = "0.9.0"
 dependencies = [
  "axum",
+ "base16ct",
  "heika-rest",
  "tokio",
 ]

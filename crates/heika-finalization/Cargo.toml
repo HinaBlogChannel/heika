@@ -1,0 +1,11 @@
+[package]
+name = "heika-finalization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Symbol のファイナライズの投票の段取り。ラウンドの進め方、投票するかどうか、確定と証明"
+
+[dependencies]
+heika-block = { path = "../heika-block" }
+heika-core = { path = "../heika-core", default-features = false }

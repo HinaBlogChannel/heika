@@ -4,7 +4,7 @@
 //!
 //! ラウンド（エポック、ポイント）ごとに、prevote を出し、precommit を出し、ラウンドの結果がもう変わらなくなったら
 //! 次のポイントに進む。いつ出すかは [`stage`]、出す順と出したかどうかは [`orchestrator`]、エポックの切り替えと、
-//! 集まったメッセージからの確定と証明は [`epoch`]。
+//! 集まったメッセージからの確定と証明は [`epoch`]、鍵でメッセージを作るのは [`signer`]。
 //!
 //! 投票の鍵がなくても同じ段取りで進める。メッセージを作れないだけで、ラウンドは進み、集まったメッセージから確定と
 //! 証明を出せる（catapult も、鍵で署名できないときは作れなかったとログに出すだけで進む）。
@@ -15,6 +15,7 @@
 pub mod epoch;
 pub mod orchestrator;
 pub mod prevote;
+pub mod signer;
 pub mod stage;
 
 /// 段取りの設定。catapult の config-finalization.properties と、config-network.properties の `votingSetGrouping`

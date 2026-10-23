@@ -19,7 +19,7 @@ use super::FinalizationRound;
 use super::proof::ProofError;
 
 /// `BmTreeSignature`。（根の公開鍵、根の署名）、（下の公開鍵、下の署名）
-pub(super) const SIGNATURE_SIZE: usize = 2 * (32 + 64);
+pub const SIGNATURE_SIZE: usize = 2 * (32 + 64);
 /// 署名しない見出し。大きさ、予約、署名
 pub(super) const MESSAGE_HEADER_SIZE: usize = 4 + 4 + SIGNATURE_SIZE;
 /// 署名するところの、ハッシュより前。版、ハッシュの数、エポック、ポイントと段階、高さ
@@ -82,6 +82,26 @@ impl FinalizationMessage {
         })
     }
 
+    /// 署名したメッセージを作る。`sign` は署名するところ（[`FinalizationMessage::signed_part`] と同じもの）を受け取り、
+    /// エポック `round.epoch` の鍵での `BmTreeSignature` を返す。署名できなければ `None`
+    pub fn sign(
+        round: FinalizationRound,
+        is_prevote: bool,
+        height: u64,
+        hashes: Vec<Hash256>,
+        sign: impl FnOnce(&[u8]) -> Option<[u8; SIGNATURE_SIZE]>,
+    ) -> Option<Self> {
+        let mut message = Self {
+            round,
+            is_prevote,
+            height,
+            hashes,
+            signature: [0; SIGNATURE_SIZE],
+        };
+        message.signature = sign(&message.signed_part())?;
+        Some(message)
+    }
+
     /// catapult と同じバイト列
     pub fn to_bytes(&self) -> Vec<u8> {
         let signed = self.signed_part();
@@ -130,7 +150,7 @@ impl FinalizationMessage {
     }
 
     /// 署名するところ。版、ハッシュの数、エポック、ポイントと段階、高さ、ハッシュ
-    pub(super) fn signed_part(&self) -> Vec<u8> {
+    pub fn signed_part(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(SIGNED_HEADER_SIZE + self.hashes.len() * 32);
         out.extend_from_slice(&1u32.to_le_bytes());
         out.extend_from_slice(&(self.hashes.len() as u32).to_le_bytes());
@@ -253,6 +273,12 @@ mod tests {
                 .unwrap()
                 .verify_signature()
         );
+        // 署名する関数で作っても同じ
+        let signed = FinalizationMessage::sign(ROUND, false, 10, chain(10, 12), |signed| {
+            Some(voter.sign(ROUND, signed))
+        });
+        assert_eq!(signed.as_ref(), Some(&message));
+        assert!(FinalizationMessage::sign(ROUND, false, 10, chain(10, 12), |_| None).is_none());
         // 別のエポックの下の鍵としては通らない
         let mut moved = message.clone();
         moved.round.epoch += 1;

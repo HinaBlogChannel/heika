@@ -665,8 +665,10 @@ dependencies = [
 name = "heika-finalization"
 version = "0.9.0"
 dependencies = [
+ "getrandom 0.4.3",
  "heika-block",
  "heika-core",
+ "rand_core",
 ]
 
 [[package]]

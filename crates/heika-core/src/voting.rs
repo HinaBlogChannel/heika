@@ -178,6 +178,48 @@ impl VotingKeyTree {
         bytes
     }
 
+    /// エポック `epoch` の鍵で署名できるか。catapult の `BmPrivateKeyTree::canSign` と同じく、前に使ったエポックより
+    /// 前と、期間の外ではできない。消した鍵でもできない
+    pub fn can_sign(&self, epoch: u32) -> bool {
+        self.last_used_epoch.is_none_or(|last| epoch >= last)
+            && (self.start_epoch..=self.end_epoch).contains(&epoch)
+            && self.entries[(epoch - self.start_epoch) as usize]
+                .private_key
+                .is_some()
+    }
+
+    /// `message` を続けたものに、エポック `epoch` の鍵で署名し、catapult の `BmTreeSignature`（根の公開鍵、根による
+    /// 下の公開鍵への署名、下の公開鍵、下の署名）を返す。使ったエポックを覚える。署名できなければ `None`。
+    ///
+    /// 覚えたことはメモリの中だけなので、署名を誰かに渡す前に [`VotingKeyTree::to_bytes`] でファイルに書き戻す
+    pub fn sign(&mut self, epoch: u32, message: &[&[u8]]) -> Option<[u8; 192]> {
+        if !self.can_sign(epoch) {
+            return None;
+        }
+        let entry = &self.entries[(epoch - self.start_epoch) as usize];
+        let private_key = entry.private_key.as_ref()?;
+        let mut out = [0; 192];
+        out[..32].copy_from_slice(&self.root_public_key.0);
+        out[32..96].copy_from_slice(&entry.signature.0);
+        out[96..128].copy_from_slice(&PublicKey::from_private_key(private_key).0);
+        out[128..].copy_from_slice(&private_key.sign(message).0);
+        self.last_used_epoch = Some(epoch);
+        Some(out)
+    }
+
+    /// 期間の始めから `epoch` までの鍵を消す。catapult の `BmPrivateKeyTree::wipe`。前に消したところより前なら
+    /// 何もしない。期間を超えるなら終わりまで消す
+    pub fn wipe_through(&mut self, epoch: u32) {
+        if epoch < self.start_epoch || self.last_wiped_epoch.is_some_and(|last| epoch < last) {
+            return;
+        }
+        let epoch = epoch.min(self.end_epoch);
+        for entry in &mut self.entries[..=(epoch - self.start_epoch) as usize] {
+            entry.private_key = None;
+        }
+        self.last_wiped_epoch = Some(epoch);
+    }
+
     /// チェーンに紐づける公開鍵。
     pub fn public_key(&self) -> PublicKey {
         self.root_public_key
@@ -304,6 +346,61 @@ mod tests {
     }
 
     impl rand_core::TryCryptoRng for Counter {}
+
+    #[test]
+    fn signs_with_the_key_of_the_epoch_and_never_goes_back() {
+        let mut tree = VotingKeyTree::generate(&mut Counter(0), 5, 7).unwrap();
+        assert!(!tree.can_sign(4) && !tree.can_sign(8));
+        assert!(tree.sign(4, &[b"x"]).is_none());
+
+        let signature = tree.sign(6, &[b"ab", b"c"]).unwrap();
+        assert_eq!(signature[..32], tree.public_key().0);
+        let bottom = PublicKey(signature[96..128].try_into().unwrap());
+        assert!(tree.public_key().verify(
+            &[&bottom.0, &6u64.to_le_bytes()],
+            &Signature(signature[32..96].try_into().unwrap())
+        ));
+        assert!(bottom.verify(&[b"abc"], &Signature(signature[128..].try_into().unwrap())));
+        assert_eq!(tree.last_used_epoch(), Some(6));
+        // 同じエポックではまた署名できるが、前のエポックにはもう戻れない
+        assert!(tree.can_sign(6));
+        assert!(!tree.can_sign(5));
+
+        // 使ったことは、書き戻したファイルにも残る
+        let reread = VotingKeyTree::from_bytes(&tree.to_bytes()).unwrap();
+        assert_eq!(reread.last_used_epoch(), Some(6));
+        assert!(!reread.can_sign(5));
+    }
+
+    #[test]
+    fn wipes_keys_through_an_epoch() {
+        let mut tree = VotingKeyTree::generate(&mut Counter(0), 5, 7).unwrap();
+        tree.wipe_through(4);
+        assert_eq!(tree.remaining_keys(), 3);
+        tree.wipe_through(5);
+        assert_eq!(
+            (tree.remaining_keys(), tree.last_wiped_epoch()),
+            (2, Some(5))
+        );
+        assert!(!tree.can_sign(5) && tree.can_sign(6));
+        // 前に消したところより前は何もしない
+        tree.wipe_through(4);
+        assert_eq!(tree.last_wiped_epoch(), Some(5));
+
+        let reread = VotingKeyTree::from_bytes(&tree.to_bytes()).unwrap();
+        assert_eq!(
+            (reread.remaining_keys(), reread.last_wiped_epoch()),
+            (2, Some(5))
+        );
+        assert_eq!(reread.verify(), Ok(()));
+
+        tree.wipe_through(9);
+        assert_eq!(
+            (tree.remaining_keys(), tree.last_wiped_epoch()),
+            (0, Some(7))
+        );
+        assert!(!tree.can_sign(7));
+    }
 
     #[test]
     fn writes_the_catapult_layout() {

@@ -18,12 +18,16 @@ use rayon::prelude::*;
 pub enum Request {
     Chain(PeerCommand),
     Peer(Ask),
+    /// 受け付けたトランザクションを押し付ける。返事はなく、失敗したときだけ `ChainEvent::Failed` を返す
+    Transactions(Arc<Vec<u8>>),
 }
 
 /// 駆動役の受信箱に入れる出来事。どちらの状態機械あてか
 pub enum NodeEvent {
     Chain(ChainEvent),
     Peer(PeerEvent),
+    /// REST で受け付けたトランザクション（1件のバイト列）。つないでいるピアのみなに押し付ける
+    Relay(Arc<Vec<u8>>),
 }
 
 /// ピア `peer` のスレッドを立て、命令の口を返す。`announce`（自分の `NetworkNode`）があれば、始めにピアに押し付けて
@@ -58,6 +62,12 @@ pub fn spawn(
                     Ok(nodes) => NodeEvent::Peer(PeerEvent::Nodes { id: peer, nodes }),
                     Err(error) => failed(peer, error, false),
                 },
+                Request::Transactions(bytes) => {
+                    match connection.push(packet_type::PUSH_TRANSACTIONS, &bytes) {
+                        Ok(()) => continue,
+                        Err(error) => failed(peer, error, false),
+                    }
+                }
             };
             let stop = matches!(event, NodeEvent::Chain(ChainEvent::Failed { .. }));
             if events.send(event).is_err() || stop {

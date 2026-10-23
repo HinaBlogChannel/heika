@@ -8899,6 +8899,7 @@ Apache License 2.0
 - serde_path_to_error 0.1.20
 - serde_qs 0.15.0
 - serde_repr 0.1.21
+- serde_urlencoded 0.7.1
 - simdutf8 0.1.5
 - syn 2.0.119
 - syn 3.0.9

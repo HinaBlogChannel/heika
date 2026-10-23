@@ -86,6 +86,8 @@ pub(super) fn config() -> ChainConfig {
             size: 10000,
             threshold: 6700,
             max_hashes_per_point: 256,
+            step_duration: 240_000,
+            prevote_blocks_multiple: 4,
             treasury_reissuance_epoch: 0,
             ineligible_voters: vec![],
         },

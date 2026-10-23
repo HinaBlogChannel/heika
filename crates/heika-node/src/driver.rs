@@ -406,9 +406,10 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 &chain.status().finalized,
                 finalization.proof_parameters(),
                 heika_finalization::Settings {
+                    step_duration: finalization.step_duration,
+                    prevote_blocks_multiple: finalization.prevote_blocks_multiple,
                     max_hashes_per_point: finalization.max_hashes_per_point,
                     voting_set_grouping: finalization.voting_set_grouping,
-                    ..heika_finalization::Settings::MAINNET
                 },
                 voting,
                 status,

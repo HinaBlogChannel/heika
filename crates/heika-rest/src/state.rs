@@ -1,5 +1,6 @@
 //! 状態。`/accounts/{id}`、`/mosaics/{id}`、`/namespaces`、`/metadata` が返す JSON から、
-//! catapult が状態の木の葉にする状態のバイト列を組み直す。
+//! catapult が状態の木の葉にする状態のバイト列を組み直す。アカウントとモザイクは、ノードが REST の口で返すために、
+//! 状態のバイト列から JSON にする逆向きもある。
 //!
 //! 葉の値は、状態のバージョン（u16）に続けて、履歴を除いた状態を書いたものの SHA3-256
 //! （catapult の `CacheSerializerAdapter` と、それぞれの `*NonHistoricalSerializer` や `*Serializer`）。
@@ -14,7 +15,7 @@ use heika_transaction::{MetadataKey, MetadataType};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use crate::{RestError, hex_array, hex_vec, number};
+use crate::{RestError, hex, hex_array, hex_vec, number};
 
 /// どの状態も、バージョンは 1
 const STATE_VERSION: u16 = 1;
@@ -182,6 +183,86 @@ impl AccountJson {
         Ok(out)
     }
 
+    /// 状態のバイト列から、REST が返す形にする。[`AccountJson::to_state_bytes`] の逆。ノードが REST の口で返すときに使う
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let address = hex(reader.take(24)?);
+        let address_height = reader.u64()?.to_string();
+        let public_key = hex(reader.take(32)?);
+        let public_key_height = reader.u64()?.to_string();
+        let account_type = reader.u8()?;
+        let high_value = reader.u8()? != 0;
+        let mask = reader.u8()?;
+        let voting_count = reader.u8()?;
+        // linked、node、vrf の順に、ビットが立っているものだけが並ぶ
+        let key = |bit: u8, reader: &mut StateReader| -> Result<Option<PublicKeyJson>, RestError> {
+            if mask & bit == 0 {
+                return Ok(None);
+            }
+            Ok(Some(PublicKeyJson {
+                public_key: hex(reader.take(32)?),
+            }))
+        };
+        let linked = key(0x01, &mut reader)?;
+        let node = key(0x02, &mut reader)?;
+        let vrf = key(0x04, &mut reader)?;
+        let voting: Vec<VotingPublicKeyJson> = (0..voting_count)
+            .map(|_| {
+                Ok(VotingPublicKeyJson {
+                    public_key: hex(reader.take(32)?),
+                    start_epoch: reader.u32()?,
+                    end_epoch: reader.u32()?,
+                })
+            })
+            .collect::<Result<_, RestError>>()?;
+        let (importance, importance_height, activity_buckets) = if high_value {
+            let importance = reader.u64()?.to_string();
+            let importance_height = reader.u64()?.to_string();
+            let buckets = (0..ACTIVITY_BUCKETS)
+                .map(|_| {
+                    Ok(ActivityBucketJson {
+                        start_height: reader.u64()?.to_string(),
+                        total_fees_paid: reader.u64()?.to_string(),
+                        beneficiary_count: reader.u32()?,
+                        raw_score: reader.u64()?.to_string(),
+                    })
+                })
+                .collect::<Result<_, RestError>>()?;
+            (importance, importance_height, buckets)
+        } else {
+            ("0".to_owned(), "0".to_owned(), Vec::new())
+        };
+        let mosaics = (0..reader.u16()?)
+            .map(|_| {
+                Ok(BalanceJson {
+                    id: format!("{:016X}", reader.u64()?),
+                    amount: reader.u64()?.to_string(),
+                })
+            })
+            .collect::<Result<_, RestError>>()?;
+        reader.finish()?;
+        Ok(Self {
+            version: STATE_VERSION,
+            address,
+            address_height,
+            public_key,
+            public_key_height,
+            account_type,
+            supplemental_public_keys: SupplementalPublicKeysJson {
+                linked,
+                node,
+                vrf,
+                voting: (!voting.is_empty()).then_some(VotingPublicKeysJson {
+                    public_keys: voting,
+                }),
+            },
+            importance,
+            importance_height,
+            activity_buckets,
+            mosaics,
+        })
+    }
+
     /// 状態の木の葉の値。
     pub fn state_hash(&self) -> Result<Hash256, RestError> {
         Ok(sha3(&self.to_state_bytes()?))
@@ -230,6 +311,24 @@ impl MosaicStateJson {
         out.push(self.divisibility);
         out.extend_from_slice(&number(&self.duration, "duration")?.to_le_bytes());
         Ok(out)
+    }
+
+    /// 状態のバイト列から、REST が返す形にする。[`MosaicStateJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let mosaic = Self {
+            version: STATE_VERSION,
+            id: format!("{:016X}", reader.u64()?),
+            supply: reader.u64()?.to_string(),
+            start_height: reader.u64()?.to_string(),
+            owner_address: hex(reader.take(24)?),
+            revision: reader.u32()?,
+            flags: reader.u8()?,
+            divisibility: reader.u8()?,
+            duration: reader.u64()?.to_string(),
+        };
+        reader.finish()?;
+        Ok(mosaic)
     }
 
     pub fn state_hash(&self) -> Result<Hash256, RestError> {
@@ -487,6 +586,59 @@ fn header(version: u16) -> Result<Vec<u8>, RestError> {
         return Err(RestError::InvalidValue { field: "version" });
     }
     Ok(version.to_le_bytes().to_vec())
+}
+
+/// 状態のバイト列を前から読む。足りなかったり余ったりしたら、`state` が読めないことにする
+struct StateReader<'a>(&'a [u8]);
+
+impl<'a> StateReader<'a> {
+    /// バージョンを読んで確かめる
+    fn new(bytes: &'a [u8]) -> Result<Self, RestError> {
+        let mut reader = Self(bytes);
+        if reader.u16()? != STATE_VERSION {
+            return Err(RestError::InvalidValue { field: "version" });
+        }
+        Ok(reader)
+    }
+
+    fn take(&mut self, size: usize) -> Result<&'a [u8], RestError> {
+        let (head, rest) = self
+            .0
+            .split_at_checked(size)
+            .ok_or(RestError::InvalidValue { field: "state" })?;
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn u8(&mut self) -> Result<u8, RestError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, RestError> {
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("2 bytes"),
+        ))
+    }
+
+    fn u32(&mut self) -> Result<u32, RestError> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, RestError> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+
+    fn finish(self) -> Result<(), RestError> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(RestError::InvalidValue { field: "state" })
+        }
+    }
 }
 
 fn sha3(bytes: &[u8]) -> Hash256 {

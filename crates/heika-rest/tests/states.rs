@@ -4,7 +4,10 @@ use heika_core::hash::Hash256;
 use heika_core::patricia::TreeNode;
 use heika_rest::RestError;
 use heika_rest::merkle::MerkleStateInfo;
-use heika_rest::state::{AccountInfo, MetadataInfo, MosaicInfo, NamespaceInfo, RootNamespaceState};
+use heika_rest::state::{
+    AccountInfo, AccountJson, MetadataInfo, MosaicInfo, MosaicStateJson, NamespaceInfo,
+    RootNamespaceState,
+};
 use serde_json::{Value, json};
 use sha3::{Digest, Sha3_256};
 
@@ -101,6 +104,25 @@ fn rebuilds_the_account_state() {
         expected.extend_from_slice(&le(1));
         expected.extend_from_slice(&le(2));
         assert_eq!(info.account.to_state_bytes().unwrap(), expected);
+        // 逆向き（ノードが返すとき）。大口でなければ importance を持たないので、"0" になる
+        let back = AccountJson::from_state_bytes(&expected).unwrap();
+        assert_eq!(back.to_state_bytes().unwrap(), expected);
+        if high_value {
+            assert_eq!(back, info.account);
+        } else {
+            assert_eq!(back.importance, "0");
+            assert!(back.activity_buckets.is_empty());
+        }
+        // 足りなくても余っても読まない
+        for broken in [
+            &expected[..expected.len() - 1],
+            &[&expected[..], &[0]].concat(),
+        ] {
+            assert_eq!(
+                AccountJson::from_state_bytes(broken),
+                Err(RestError::InvalidValue { field: "state" })
+            );
+        }
 
         let state_hash = info.account.state_hash().unwrap();
         assert_eq!(state_hash, Hash256(Sha3_256::digest(&expected).into()));
@@ -152,6 +174,10 @@ fn rebuilds_the_mosaic_state() {
     expected.extend_from_slice(&[2, 6]);
     expected.extend_from_slice(&le(0));
     assert_eq!(info.mosaic.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        MosaicStateJson::from_state_bytes(&expected),
+        Ok(info.mosaic.clone())
+    );
     assert_eq!(
         info.mosaic.tree_key(),
         Ok(heika_core::patricia::id_key(0x6BED_913F_A202_23F8))

@@ -33,6 +33,7 @@ use heika_state_transition::config::{ChainConfig, load_network_parameters};
 use heika_state_transition::executor::persist::height_of_meta;
 use heika_store_redb::Db;
 use heika_tls::{ConnectError, Identity};
+use heika_transaction::{Body, DetachedCosignature, Transaction};
 
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
@@ -431,6 +432,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     Arc::clone(&status),
                     events.clone(),
                 ),
+                submit_partial: submit_partial(events.clone()),
+                submit_cosignature: submit_cosignature(events.clone()),
                 reader: Arc::new(DbReader::new(
                     store.shared_db(),
                     parameters.identifier,
@@ -438,6 +441,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     parameters.generation_hash_seed,
                     Arc::clone(&mempool),
                     Arc::clone(recent),
+                    Arc::clone(&partials),
                 )),
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
@@ -1028,6 +1032,41 @@ fn save_known(db: &Db, records: &[(String, KnownPeer)]) -> Result<(), NodeError>
     batch.replace_known_peers(&records)?;
     batch.commit()?;
     Ok(())
+}
+
+/// REST で届いた連署を待つアグリゲートボンデッドを、駆動役に渡す口。状態に依る確かめは駆動役でするので、
+/// ここでは読めるかと種類だけを見る（catapult の REST と同じく、受け付けたら 202 で答える）
+fn submit_partial(relay: Sender<NodeEvent>) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let transaction = Transaction::from_bytes(&bytes)
+            .map_err(|error| format!("トランザクションとして読めません: {error}"))?;
+        if !matches!(transaction.body, Body::AggregateBonded(_)) {
+            return Err("アグリゲートボンデッドではありません".to_owned());
+        }
+        relay
+            .send(NodeEvent::Partial {
+                incoming: Incoming::Transactions(vec![bytes]),
+                from: None,
+            })
+            .map_err(|_| "ノードが止まっています".to_owned())
+    })
+}
+
+/// REST で届いた連署を、駆動役に渡す口。署名だけはここで確かめる
+fn submit_cosignature(relay: Sender<NodeEvent>) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let detached = DetachedCosignature::from_bytes(&bytes)
+            .map_err(|error| format!("連署として読めません: {error}"))?;
+        if !detached.verify() {
+            return Err("連署の署名が、アグリゲートのハッシュに対して正しくありません".to_owned());
+        }
+        relay
+            .send(NodeEvent::Partial {
+                incoming: Incoming::Cosignatures(vec![detached]),
+                from: None,
+            })
+            .map_err(|_| "ノードが止まっています".to_owned())
+    })
 }
 
 /// REST で届いたトランザクションを、次のブロックに入れるつもりでメモリプールに入れ、受け付けたらピアに流す口

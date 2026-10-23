@@ -5,7 +5,7 @@
 //! ブロックの9本の根は DB にしまっていないので、その高さの木の根のノードを読んで求め直す。差分が残っていない高さの
 //! ブロックは、根を出せないので返さない。
 //!
-//! トランザクションの行方は、メモリプールと、直近のブロックの索引（[`crate::recent`]）で答える。索引より古い
+//! トランザクションの行方は、メモリプール、連署を待つものの置き場と、直近のブロックの索引（[`crate::recent`]）で答える。索引より古い
 //! トランザクションは知らないことにする。
 
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use heika_core::merkle::{self, Position};
 use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::patricia::{SubCache, TreeNode};
 use heika_mempool::SharedMempool;
+use heika_mempool::partial::SharedPartialPool;
 use heika_rest::block::{BlockHeader, BlockInfo, BlockMeta};
 use heika_rest::merkle::{MerklePathItem, MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::TransactionFeesJson;
@@ -45,6 +46,7 @@ pub struct DbReader {
     seed: GenerationHashSeed,
     mempool: Arc<SharedMempool>,
     recent: SharedRecent,
+    partials: Arc<SharedPartialPool>,
 }
 
 impl DbReader {
@@ -55,6 +57,7 @@ impl DbReader {
         seed: GenerationHashSeed,
         mempool: Arc<SharedMempool>,
         recent: SharedRecent,
+        partials: Arc<SharedPartialPool>,
     ) -> Self {
         Self {
             db,
@@ -63,6 +66,7 @@ impl DbReader {
             seed,
             mempool,
             recent,
+            partials,
         }
     }
 
@@ -230,6 +234,9 @@ impl heika_api::Reader for DbReader {
         };
         if let Some(deadline) = self.mempool.lock().deadline(hash) {
             return Ok(Some(status("unconfirmed", deadline, 0)));
+        }
+        if let Some(deadline) = self.partials.lock().deadline(hash) {
+            return Ok(Some(status("partial", deadline, 0)));
         }
         Ok(self
             .recent_transaction(hash)?

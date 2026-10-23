@@ -237,6 +237,11 @@ impl PartialPool {
             .is_some_and(|entry| entry.cosignatures.remove(&signer.0).is_some())
     }
 
+    /// 持っていれば、その期限（Nemesis からのミリ秒）
+    pub fn deadline(&self, hash: &Hash256) -> Option<u64> {
+        self.entries.get(hash).map(|entry| entry.deadline)
+    }
+
     /// 連署を外したトランザクション
     pub fn transaction(&self, hash: &Hash256) -> Option<&[u8]> {
         self.entries

@@ -17,7 +17,8 @@
 
 body {
   margin: 0;
-  background: var(--paper);
+  background: linear-gradient(#cfeaf9, var(--paper) 420px);
+  min-height: 100vh;
   color: var(--ink);
   font-family: var(--sans);
   line-height: 1.6;
@@ -36,9 +37,10 @@ h1 { margin: 0; font-size: 1.6rem; letter-spacing: 0.04em; }
 .field {
   width: min(100%, 576px);
   margin: 0 auto;
-  aspect-ratio: 192 / 196;
+  aspect-ratio: 224 / 260;
   image-rendering: pixelated;
-  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
 }
 .field svg { display: block; width: 100%; height: 100%; }
 

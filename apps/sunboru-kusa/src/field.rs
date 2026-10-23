@@ -5,8 +5,17 @@
 const TILE: u32 = 48;
 /// 畑の一辺（ドット）
 pub const SIZE: u32 = TILE * 4;
-/// 背の高い木が、いちばん上の段からはみ出す分
-const SKY: u32 = 4;
+/// 島のまわりの空（左右）
+const MARGIN: u32 = 16;
+/// 島の上の空。背の高い木と雲が入る
+const TOP: u32 = 24;
+/// 島の土の断面の厚さ
+const DEPTH: u32 = 10;
+/// 島の下に細っていく岩の段数
+const UNDERSIDE: u32 = 22;
+/// 絵の幅と高さ（ドット）
+pub const WIDTH: u32 = SIZE + MARGIN * 2;
+pub const HEIGHT: u32 = TOP + SIZE + DEPTH + UNDERSIDE + 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -349,15 +358,111 @@ impl Plant {
     }
 }
 
-/// 畑の SVG。ドットは横に続く同じ色をまとめて1つの rect にする
+/// 雲のドット絵。`w` が白、`s` が雲の影
+const CLOUD: &[&str] = &[
+    "....wwww....",
+    "..wwwwwwww..",
+    ".wwwwwwwwwww",
+    "wwwwwwwwwwww",
+    ".ssssssssss.",
+];
+
+/// 雲を置く場所（絵の左上）。どの畑でも同じ
+const CLOUDS: [(i64, i64); 4] = [(6, 4), (170, 1), (2, 214), (196, 226)];
+
+/// ドット絵を描く。横に続く同じ色は、まとめて1つの rect にする
+fn draw(
+    out: &mut String,
+    sprite: &[&str],
+    x: i64,
+    y: i64,
+    flip: bool,
+    color: fn(u8) -> Option<&'static str>,
+) {
+    for (dy, line) in sprite.iter().enumerate() {
+        let bytes: Vec<u8> = if flip {
+            line.bytes().rev().collect()
+        } else {
+            line.bytes().collect()
+        };
+        let mut start = 0;
+        while start < bytes.len() {
+            let mut end = start + 1;
+            while end < bytes.len() && bytes[end] == bytes[start] {
+                end += 1;
+            }
+            if let Some(fill) = color(bytes[start]) {
+                out.push_str(&format!(
+                    r#"<rect x="{}" y="{}" width="{}" height="1" fill="{fill}"/>"#,
+                    x + start as i64,
+                    y + dy as i64,
+                    end - start
+                ));
+            }
+            start = end;
+        }
+    }
+}
+
+fn cloud_color(code: u8) -> Option<&'static str> {
+    match code {
+        b'w' => Some("#ffffff"),
+        b's' => Some("#d6ecf8"),
+        _ => None,
+    }
+}
+
+/// 畑の SVG。空に浮いた土の島に、生えたものを奥から順に描く
 pub fn svg(plants: &[Plant]) -> String {
-    let height = SIZE + SKY;
+    let (width, height) = (WIDTH, HEIGHT);
     let mut out = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{SIZE}" height="{height}" viewBox="0 -{SKY} {SIZE} {height}" shape-rendering="crispEdges">"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" shape-rendering="crispEdges">"#
     );
+    // 空。上ほど濃い青の帯にする
+    let bands = ["#9fd6f5", "#addcf7", "#bbe2f8", "#c9e8fa", "#d7eefb"];
+    let band = height.div_ceil(bands.len() as u32);
+    for (index, fill) in bands.iter().enumerate() {
+        out.push_str(&format!(
+            r#"<rect x="0" y="{}" width="{width}" height="{band}" fill="{fill}"/>"#,
+            index as u32 * band
+        ));
+    }
+    for (x, y) in CLOUDS {
+        draw(&mut out, CLOUD, x, y, false, cloud_color);
+    }
+
+    out.push_str(&format!(r#"<g transform="translate({MARGIN} {TOP})">"#));
+    // 島の下側。土の断面と、下に向かって細る岩
     out.push_str(&format!(
-        r##"<rect x="0" y="-{SKY}" width="{SIZE}" height="{SKY}" fill="#dff1fb"/>"##
+        r##"<rect x="0" y="{SIZE}" width="{SIZE}" height="{DEPTH}" fill="#5d4037"/>"##
     ));
+    out.push_str(&format!(
+        r##"<rect x="0" y="{}" width="{SIZE}" height="1" fill="#6d4c41"/>"##,
+        SIZE + 3
+    ));
+    out.push_str(&format!(
+        r##"<rect x="0" y="{}" width="{SIZE}" height="1" fill="#4e342e"/>"##,
+        SIZE + 7
+    ));
+    for row in 0..UNDERSIDE {
+        let jag = |salt: u32| (row * 7 + salt).wrapping_mul(2654435761) >> 28;
+        let left = 2 + row * 4 + jag(1);
+        let right = 2 + row * 4 + jag(2);
+        if left + right >= SIZE {
+            break;
+        }
+        let fill = match row * 3 / UNDERSIDE {
+            0 => "#5d4037",
+            1 => "#4e342e",
+            _ => "#3e2723",
+        };
+        out.push_str(&format!(
+            r#"<rect x="{left}" y="{}" width="{}" height="1" fill="{fill}"/>"#,
+            SIZE + DEPTH + row,
+            SIZE - left - right
+        ));
+    }
+
     for tile in 0..16 {
         let (column, row) = (tile % 4, tile / 4);
         let fill = if (column + row) % 2 == 0 {
@@ -381,43 +486,28 @@ pub fn svg(plants: &[Plant]) -> String {
             ));
         }
     }
+
     let mut order: Vec<&Plant> = plants.iter().collect();
     order.sort_by_key(|plant| (plant.ground, plant.x));
     for plant in order {
         let sprite = plant.kind.sprite();
-        // 背の高い木は、いちばん上の段で空（負の y）にはみ出す
-        let top = plant.ground as i64 - sprite.len() as i64;
         if plant.growing {
             out.push_str(r#"<g opacity="0.45">"#);
         }
-        for (dy, line) in sprite.iter().enumerate() {
-            let bytes: Vec<u8> = if plant.flip {
-                line.bytes().rev().collect()
-            } else {
-                line.bytes().collect()
-            };
-            let mut start = 0;
-            while start < bytes.len() {
-                let mut end = start + 1;
-                while end < bytes.len() && bytes[end] == bytes[start] {
-                    end += 1;
-                }
-                if let Some(fill) = color(bytes[start]) {
-                    out.push_str(&format!(
-                        r#"<rect x="{}" y="{}" width="{}" height="1" fill="{fill}"/>"#,
-                        plant.x + start as u32,
-                        top + dy as i64,
-                        end - start
-                    ));
-                }
-                start = end;
-            }
-        }
+        // 背の高い木は、いちばん上の段で島の上の空（負の y）にはみ出す
+        draw(
+            &mut out,
+            sprite,
+            plant.x as i64,
+            plant.ground as i64 - sprite.len() as i64,
+            plant.flip,
+            color,
+        );
         if plant.growing {
             out.push_str("</g>");
         }
     }
-    out.push_str("</svg>");
+    out.push_str("</g></svg>");
     out
 }
 
@@ -460,7 +550,7 @@ mod tests {
                 }
             }
             assert!(
-                kind.sprite().len() as u32 <= 16 + SKY,
+                kind.sprite().len() as u32 <= 16 + TOP,
                 "{} は空にはみ出す",
                 kind.name()
             );
@@ -482,7 +572,7 @@ mod tests {
             let plant = Plant::new(&[byte; 32], false);
             assert!(plant.x + 16 <= SIZE);
             assert!(plant.ground <= SIZE);
-            assert!(plant.ground as i64 - plant.kind.sprite().len() as i64 >= -(SKY as i64));
+            assert!(plant.ground as i64 - plant.kind.sprite().len() as i64 >= -(TOP as i64));
         }
     }
 

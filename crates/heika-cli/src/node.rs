@@ -1,12 +1,14 @@
 //! ノードに TLS でつないで調べる。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Subcommand;
+use heika_block::finalization::FinalizationRound;
+use heika_block::finalization::proof::FinalizationMessage;
 use heika_cert::certificate::Certificate;
 use heika_core::key::PublicKey;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
@@ -95,6 +97,30 @@ pub enum NodeCommand {
         #[arg(long, value_name = "PATH", requires = "harvesters_dat")]
         write_harvesters_dat: Option<PathBuf>,
     },
+    /// ノードが集めている投票のメッセージを引き、ラウンドと段階ごとにまとめる
+    ///
+    /// 投票するノード（Voting のロール）につなぎ、最後にファイナライズしたエポックから次のエポックまでの
+    /// メッセージをもらう。署名を確かめ、ラウンドと段階ごとに、メッセージの数、投票した鍵の数、投票した高さを出す。
+    /// 重みは数えないので、閾値を超えたかはわからない。投票しないノードはメッセージを集めていないので、何も来ない。
+    /// 名乗るのは --client-cert の証明書で、ノードの秘密鍵は標準入力から読む。
+    Votes {
+        /// 投票するノード
+        #[arg(long, value_name = "HOST:PORT")]
+        connect: String,
+        /// 名乗る証明書のチェーン（ノード、CA の順の PEM）
+        #[arg(long, value_name = "PATH")]
+        client_cert: PathBuf,
+    },
+}
+
+/// `heika node votes` の、1つのラウンドの1つの段階
+#[derive(Default)]
+struct VoteSummary {
+    messages: usize,
+    keys: HashSet<[u8; 32]>,
+    bad_signatures: usize,
+    /// 投票した高さの範囲（prevote は最初から最後のハッシュまで、precommit は1つ）
+    heights: Option<(u64, u64)>,
 }
 
 /// 1つのノードを測った結果。
@@ -127,6 +153,88 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             harvesters_dat: harvesters_dat.as_deref(),
             write_harvesters_dat: write_harvesters_dat.as_deref(),
         })?,
+        NodeCommand::Votes {
+            connect,
+            client_cert,
+        } => {
+            let chain = read_chain(&client_cert)?;
+            let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
+            let identity = Identity::new(&chain, &key)
+                .map_err(|error| format!("{}: {error}", client_cert.display()))?;
+            drop(key);
+            let mut node = ClientConnection::connect(&connect, &identity, TIMEOUT)
+                .map_err(|error| format!("{connect}: {error}"))?;
+            let query = |error| format!("{connect}: {error}");
+            let finalized = node.finalization_statistics().map_err(query)?;
+            let epoch = finalized.round.epoch;
+            let messages = node
+                .pull_finalization_messages(
+                    FinalizationRound { epoch, point: 0 },
+                    FinalizationRound {
+                        epoch: epoch + 1,
+                        point: u32::MAX,
+                    },
+                )
+                .map_err(query)?;
+            drop(node);
+
+            let mut summaries: BTreeMap<(FinalizationRound, bool), VoteSummary> = BTreeMap::new();
+            let mut malformed = 0;
+            for bytes in &messages {
+                let Ok(message) = FinalizationMessage::from_bytes(bytes) else {
+                    malformed += 1;
+                    continue;
+                };
+                // prevote を先に並べる
+                let summary = summaries
+                    .entry((message.round, !message.is_prevote))
+                    .or_default();
+                summary.messages += 1;
+                summary.keys.insert(message.root_key());
+                if !message.verify_signature() {
+                    summary.bad_signatures += 1;
+                }
+                let last = message.height + message.hashes.len().saturating_sub(1) as u64;
+                summary.heights = Some(match summary.heights {
+                    None => (message.height, last),
+                    Some((low, high)) => (low.min(message.height), high.max(last)),
+                });
+            }
+
+            outln!(
+                "最後のファイナライズ: エポック {epoch} のポイント {}、高さ {}",
+                finalized.round.point,
+                finalized.height
+            );
+            outln!(
+                "もらったメッセージ: {}（読めなかったもの {malformed}）",
+                messages.len()
+            );
+            if !summaries.is_empty() {
+                outln!();
+                outln!("エポック  ポイント  段階        数   鍵  署名の誤り  高さ");
+            }
+            for ((round, is_precommit), summary) in &summaries {
+                let heights = match summary.heights {
+                    Some((low, high)) if low == high => low.to_string(),
+                    Some((low, high)) => format!("{low}〜{high}"),
+                    None => String::new(),
+                };
+                outln!(
+                    "{:>8}  {:>8}  {:<9}  {:>4} {:>4}  {:>10}  {heights}",
+                    round.epoch,
+                    round.point,
+                    if *is_precommit {
+                        "precommit"
+                    } else {
+                        "prevote"
+                    },
+                    summary.messages,
+                    summary.keys.len(),
+                    summary.bad_signatures,
+                );
+            }
+        }
         NodeCommand::Find {
             connect,
             client_cert,

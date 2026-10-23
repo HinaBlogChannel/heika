@@ -123,6 +123,35 @@ struct VoteSummary {
     heights: Option<(u64, u64)>,
 }
 
+/// 投票のメッセージを、（ラウンド、precommit か）ごとにまとめる。prevote が先に並ぶ。読めなかったものの数も返す
+fn summarize_votes(
+    messages: &[Vec<u8>],
+) -> (BTreeMap<(FinalizationRound, bool), VoteSummary>, usize) {
+    let mut summaries: BTreeMap<(FinalizationRound, bool), VoteSummary> = BTreeMap::new();
+    let mut malformed = 0;
+    for bytes in messages {
+        let Ok(message) = FinalizationMessage::from_bytes(bytes) else {
+            malformed += 1;
+            continue;
+        };
+        // prevote を先に並べる
+        let summary = summaries
+            .entry((message.round, !message.is_prevote))
+            .or_default();
+        summary.messages += 1;
+        summary.keys.insert(message.root_key());
+        if !message.verify_signature() {
+            summary.bad_signatures += 1;
+        }
+        let last = message.height + message.hashes.len().saturating_sub(1) as u64;
+        summary.heights = Some(match summary.heights {
+            None => (message.height, last),
+            Some((low, high)) => (low.min(message.height), high.max(last)),
+        });
+    }
+    (summaries, malformed)
+}
+
 /// 1つのノードを測った結果。
 struct Measurement {
     node: NetworkNode,
@@ -178,28 +207,7 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 .map_err(query)?;
             drop(node);
 
-            let mut summaries: BTreeMap<(FinalizationRound, bool), VoteSummary> = BTreeMap::new();
-            let mut malformed = 0;
-            for bytes in &messages {
-                let Ok(message) = FinalizationMessage::from_bytes(bytes) else {
-                    malformed += 1;
-                    continue;
-                };
-                // prevote を先に並べる
-                let summary = summaries
-                    .entry((message.round, !message.is_prevote))
-                    .or_default();
-                summary.messages += 1;
-                summary.keys.insert(message.root_key());
-                if !message.verify_signature() {
-                    summary.bad_signatures += 1;
-                }
-                let last = message.height + message.hashes.len().saturating_sub(1) as u64;
-                summary.heights = Some(match summary.heights {
-                    None => (message.height, last),
-                    Some((low, high)) => (low.min(message.height), high.max(last)),
-                });
-            }
+            let (summaries, malformed) = summarize_votes(&messages);
 
             outln!(
                 "最後のファイナライズ: エポック {epoch} のポイント {}、高さ {}",
@@ -624,6 +632,73 @@ fn without_controls(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 鍵 `seed` で署名した投票のメッセージ（catapult の `FinalizationMessage`）。`hashes` 個のハッシュが `height` から続く
+    fn vote(
+        seed: u8,
+        round: FinalizationRound,
+        is_prevote: bool,
+        height: u64,
+        hashes: u64,
+    ) -> Vec<u8> {
+        use heika_core::key::PrivateKey;
+        let root = PrivateKey::from_bytes(&[seed; 32]);
+        let bottom = PrivateKey::from_bytes(&[seed ^ 0x80; 32]);
+        let bottom_public = PublicKey::from_private_key(&bottom).0;
+        let mut signed = Vec::new();
+        signed.extend_from_slice(&1u32.to_le_bytes());
+        signed.extend_from_slice(&(hashes as u32).to_le_bytes());
+        signed.extend_from_slice(&round.epoch.to_le_bytes());
+        signed.extend_from_slice(&((round.point << 1) | u32::from(!is_prevote)).to_le_bytes());
+        signed.extend_from_slice(&height.to_le_bytes());
+        for at in height..height + hashes {
+            signed.extend_from_slice(&[at as u8; 32]);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&((4 + 4 + 192 + signed.len()) as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&PublicKey::from_private_key(&root).0);
+        let epoch = u64::from(round.epoch).to_le_bytes();
+        out.extend_from_slice(&root.sign(&[&bottom_public, &epoch]).0);
+        out.extend_from_slice(&bottom_public);
+        out.extend_from_slice(&bottom.sign(&[&signed]).0);
+        out.extend_from_slice(&signed);
+        out
+    }
+
+    #[test]
+    fn summarizes_votes_by_round_and_stage() {
+        let first = FinalizationRound { epoch: 7, point: 1 };
+        let second = FinalizationRound { epoch: 7, point: 2 };
+        let mut broken = vote(3, second, true, 120, 2);
+        let last = broken.len() - 1;
+        broken[last] ^= 1;
+        let messages = vec![
+            // 届く順は、まとめた順と違ってよい
+            vote(1, first, false, 110, 1),
+            vote(1, first, true, 100, 11),
+            vote(2, first, true, 104, 8),
+            vote(1, first, false, 110, 1),
+            broken,
+            vec![0; 10],
+        ];
+        let (summaries, malformed) = summarize_votes(&messages);
+        assert_eq!(malformed, 1);
+        let keys: Vec<_> = summaries.keys().copied().collect();
+        assert_eq!(keys, [(first, false), (first, true), (second, false)]);
+
+        let prevote = &summaries[&(first, false)];
+        assert_eq!((prevote.messages, prevote.keys.len()), (2, 2));
+        assert_eq!(prevote.heights, Some((100, 111)));
+        assert_eq!(prevote.bad_signatures, 0);
+        // 同じ鍵の2通は、数には入るが、鍵は1つ
+        let precommit = &summaries[&(first, true)];
+        assert_eq!((precommit.messages, precommit.keys.len()), (2, 1));
+        assert_eq!(precommit.heights, Some((110, 110)));
+        let broken = &summaries[&(second, false)];
+        assert_eq!(broken.bad_signatures, 1);
+        assert_eq!(broken.heights, Some((120, 121)));
+    }
 
     fn measurement(height: u64, measured_at: Instant) -> Measurement {
         Measurement {

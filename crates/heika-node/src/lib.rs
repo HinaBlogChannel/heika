@@ -6,6 +6,7 @@ pub mod config;
 pub mod copy;
 pub mod delegated;
 pub mod driver;
+pub mod finalization;
 pub mod harvesters;
 pub mod identity;
 pub mod keys;

@@ -139,19 +139,23 @@ impl ClientConnection {
         })
     }
 
-    /// ラウンド `min` から `max` までの、ノードが集めている投票のメッセージのバイト列（catapult の
-    /// `FinalizationMessage`）。中身は確かめない。確定の前に配り合うもので、確定が止まっているときに、誰がどこまで
-    /// 投票しているかが分かる
+    /// ラウンド `min` から `max` までの、ノードが集めている投票のメッセージのうち、短いハッシュが `known` にないものの
+    /// バイト列（catapult の `FinalizationMessage`）。中身は確かめない。確定の前に配り合うもので、確定が止まっている
+    /// ときに、誰がどこまで投票しているかが分かる。投票しないノードは集めていないので、何も返さない
     pub fn pull_finalization_messages(
         &mut self,
         min: FinalizationRound,
         max: FinalizationRound,
+        known: &[u32],
     ) -> Result<Vec<Vec<u8>>, QueryError> {
-        // catapult の `FinalizationRoundRange` に、知っているメッセージの短いハッシュ（なし）が続く
-        let mut request = Vec::with_capacity(16);
+        // catapult の `FinalizationRoundRange` に、知っているメッセージの短いハッシュが続く
+        let mut request = Vec::with_capacity(16 + 4 * known.len());
         for round in [min, max] {
             request.extend_from_slice(&round.epoch.to_le_bytes());
             request.extend_from_slice(&round.point.to_le_bytes());
+        }
+        for short_hash in known {
+            request.extend_from_slice(&short_hash.to_le_bytes());
         }
         let body = self.request(packet_type::PULL_FINALIZATION_MESSAGES, &request)?;
         Ok(split_size_prefixed(&body)?

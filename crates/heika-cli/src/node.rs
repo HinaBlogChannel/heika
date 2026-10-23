@@ -203,6 +203,7 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                         epoch: epoch + 1,
                         point: u32::MAX,
                     },
+                    &[],
                 )
                 .map_err(query)?;
             drop(node);

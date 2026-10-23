@@ -521,21 +521,35 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                         }
                         NodeEvent::Pulled { peer, transactions } => {
                             let (now, height) = (network_now(parameters), chain.height() + 1);
-                            let mut mempool = mempool.lock();
-                            let added = transactions
-                                .into_iter()
-                                .filter(|bytes| mempool.add(bytes.clone(), now, height).is_ok())
-                                .count();
-                            if added > 0 {
+                            let added: Vec<Vec<u8>> = {
+                                let mut mempool = mempool.lock();
+                                transactions
+                                    .into_iter()
+                                    .filter(|bytes| mempool.add(bytes.clone(), now, height).is_ok())
+                                    .collect()
+                            };
+                            if !added.is_empty() {
                                 println!(
-                                    "ピア {} から、未承認のトランザクション {added} 件を受け付けました",
-                                    peer.0
+                                    "ピア {} から、未承認のトランザクション {} 件を受け付けました",
+                                    peer.0,
+                                    added.len()
                                 );
+                                // ほかのピアにも流す
+                                pending.push(NodeEvent::Relay {
+                                    transactions: Arc::new(added.concat()),
+                                    except: Some(peer),
+                                });
                             }
                         }
-                        NodeEvent::Relay(bytes) => {
-                            for sender in senders.values() {
-                                let _ = sender.send(Request::Transactions(Arc::clone(&bytes)));
+                        NodeEvent::Relay {
+                            transactions,
+                            except,
+                        } => {
+                            for (id, sender) in &senders {
+                                if Some(*id) != except {
+                                    let _ = sender
+                                        .send(Request::Transactions(Arc::clone(&transactions)));
+                                }
                             }
                         }
                         NodeEvent::Peer(event) => {
@@ -943,7 +957,10 @@ fn submit(
         match added {
             Ok(hash) => {
                 println!("REST から未承認のトランザクション {hash} を受け付けました");
-                let _ = relay.send(NodeEvent::Relay(Arc::new(bytes)));
+                let _ = relay.send(NodeEvent::Relay {
+                    transactions: Arc::new(bytes),
+                    except: None,
+                });
                 Ok(())
             }
             // 前に受け付けたもの。もう流してある

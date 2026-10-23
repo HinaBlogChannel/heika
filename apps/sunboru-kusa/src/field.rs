@@ -15,7 +15,11 @@ const DEPTH: u32 = 10;
 const UNDERSIDE: u32 = 22;
 /// 絵の幅と高さ（ドット）
 pub const WIDTH: u32 = SIZE + MARGIN * 2;
-pub const HEIGHT: u32 = TOP + SIZE + DEPTH + UNDERSIDE + 12;
+pub const HEIGHT: u32 = TOP + SIZE + DEPTH + UNDERSIDE + SHADOW_GAP + 5 + 8;
+/// 島の下と、その影のあいだの空
+const SHADOW_GAP: u32 = 14;
+/// 空の帯の色。上から下へ。ページの背景も同じ色でつなぐ（style.css）
+const SKY_BANDS: [&str; 5] = ["#9fd6f5", "#addcf7", "#bbe2f8", "#c9e8fa", "#d7eefb"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -412,23 +416,35 @@ fn cloud_color(code: u8) -> Option<&'static str> {
     }
 }
 
-/// 畑の SVG。空に浮いた土の島に、生えたものを奥から順に描く
-pub fn svg(plants: &[Plant]) -> String {
+/// 畑の SVG。空に浮いた土の島に、生えたものを奥から順に描く。
+/// `sky` が偽なら空の帯を塗らない（画面ではページの背景の空に溶かす。保存する画像には空を入れる）
+pub fn svg(plants: &[Plant], sky: bool) -> String {
     let (width, height) = (WIDTH, HEIGHT);
     let mut out = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" shape-rendering="crispEdges">"#
     );
     // 空。上ほど濃い青の帯にする
-    let bands = ["#9fd6f5", "#addcf7", "#bbe2f8", "#c9e8fa", "#d7eefb"];
-    let band = height.div_ceil(bands.len() as u32);
-    for (index, fill) in bands.iter().enumerate() {
-        out.push_str(&format!(
-            r#"<rect x="0" y="{}" width="{width}" height="{band}" fill="{fill}"/>"#,
-            index as u32 * band
-        ));
+    if sky {
+        let band = height.div_ceil(SKY_BANDS.len() as u32);
+        for (index, fill) in SKY_BANDS.iter().enumerate() {
+            out.push_str(&format!(
+                r#"<rect x="0" y="{}" width="{width}" height="{band}" fill="{fill}"/>"#,
+                index as u32 * band
+            ));
+        }
     }
     for (x, y) in CLOUDS {
         draw(&mut out, CLOUD, x, y, false, cloud_color);
+    }
+    // 島の影。ずっと下の空にうっすら落として、高いところに浮いていると分かるようにする
+    let shadow_top = TOP + SIZE + DEPTH + UNDERSIDE + SHADOW_GAP;
+    for (row, inset) in [24u32, 12, 8, 12, 24].iter().enumerate() {
+        out.push_str(&format!(
+            r##"<rect x="{}" y="{}" width="{}" height="1" fill="#4a6b80" opacity="0.10"/>"##,
+            MARGIN + inset,
+            shadow_top + row as u32,
+            SIZE - inset * 2
+        ));
     }
 
     out.push_str(&format!(r#"<g transform="translate({MARGIN} {TOP})">"#));
@@ -581,7 +597,7 @@ mod tests {
         let plants: Vec<Plant> = (0..40u8)
             .map(|i| Plant::new(&[i.wrapping_mul(37); 32], i % 7 == 0))
             .collect();
-        assert_eq!(svg(&plants), svg(&plants.clone()));
-        assert!(svg(&plants).contains(r#"opacity="0.45""#));
+        assert_eq!(svg(&plants, true), svg(&plants.clone(), true));
+        assert!(svg(&plants, false).contains(r#"opacity="0.45""#));
     }
 }

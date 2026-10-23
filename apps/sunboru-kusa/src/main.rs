@@ -434,13 +434,13 @@ fn App() -> impl IntoView {
         )
     };
     let save = move |_| {
-        let svg = plants.with(|p| field::svg(p));
+        let svg = plants.with(|p| field::svg(p, true));
         spawn_local(async move {
             save_png(&svg).await;
         });
     };
     let share = move |_| {
-        let svg = plants.with(|p| field::svg(p));
+        let svg = plants.with(|p| field::svg(p, true));
         let text = share_text();
         spawn_local(async move {
             share_png(&svg, &text, &page_url()).await;
@@ -453,7 +453,7 @@ fn App() -> impl IntoView {
                 <h1>"すんぼる草不可避"</h1>
                 <p class="tagline">"送金で生えます"</p>
             </header>
-            <section class="field" inner_html=move || plants.with(|p| field::svg(p))></section>
+            <section class="field" inner_html=move || plants.with(|p| field::svg(p, false))></section>
             <p class="count">{move || if plants.with(Vec::is_empty) { String::new() } else { format!("{} 本 ・ {}", count(), plants.with(|p| tally(p))) }}</p>
             <p class="status">{move || status.get()}</p>
             <div class="buttons">

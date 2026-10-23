@@ -28,6 +28,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use heika_packet::NodeRoles;
 use serde::Deserialize;
 
 /// 読める設定の版
@@ -115,6 +116,19 @@ pub struct NodeConfig {
     /// REST の口で待ち受ける。空なら立てない。手元用と公開用のように、いくつでも書ける
     #[serde(default)]
     pub rest: Vec<Rest>,
+}
+
+impl NodeConfig {
+    /// 名乗るロール。`listen.roles` がなければ、Peer と IPv4 に、REST の口があれば Api を足す
+    pub fn roles(&self) -> NodeRoles {
+        self.listen
+            .as_ref()
+            .and_then(|listen| listen.roles)
+            .unwrap_or_else(|| {
+                let api = if self.rest.is_empty() { 0 } else { 0x02 };
+                NodeRoles(NodeRoles::PEER.0 | 0x40 | api)
+            })
+    }
 }
 
 /// REST の口
@@ -268,6 +282,35 @@ pub struct Listen {
     /// ping で答え、名乗るときの名前
     #[serde(default)]
     pub friendly_name: Option<String>,
+    /// 名乗るロール。P2P でも REST の `/node/info` でもこれを名乗る。`0x43` や `67` のような整数か、
+    /// `[Peer, Api, IPv4]` のような catapult の名前の並びで書く。なければ [`NodeConfig::roles`] の既定
+    #[serde(default, deserialize_with = "deserialize_roles")]
+    pub roles: Option<NodeRoles>,
+}
+
+/// `listen.roles` を、整数か名前の並びから読む
+fn deserialize_roles<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NodeRoles>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Roles {
+        Bits(u32),
+        Names(Vec<String>),
+    }
+    let roles = match Roles::deserialize(deserializer)? {
+        Roles::Bits(bits) => NodeRoles(bits),
+        Roles::Names(names) => names.iter().try_fold(NodeRoles(0), |roles, name| {
+            NodeRoles::from_name(name)
+                .map(|role| NodeRoles(roles.0 | role.0))
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "listen.roles の {name} を知りません（Peer、Api、Voting、IPv4、IPv6 のどれか）"
+                    ))
+                })
+        })?,
+    };
+    Ok(Some(roles))
 }
 
 /// ハーベストする鍵の組。鍵そのものは書かず、鍵のファイルの場所を書く。ファイルは他人に読めないこと
@@ -334,6 +377,11 @@ impl Manifest {
         if storage.mode == Mode::Light && storage.partial_state == Some(false) {
             return Err(ConfigError(
                 "storage.mode: light では、storage.partialState を false にできません".to_owned(),
+            ));
+        }
+        if !manifest.spec.roles().contains(NodeRoles::PEER) {
+            return Err(ConfigError(
+                "listen.roles から Peer は外せません".to_owned(),
             ));
         }
         let network = &manifest.spec.network;
@@ -428,6 +476,37 @@ spec:
             }
         );
         assert_eq!(spec.peers, 4);
+    }
+
+    #[test]
+    fn reads_roles_as_bits_or_names_and_defaults_by_rest() {
+        let listen = format!("{MINIMAL}  listen:\n    address: 0.0.0.0:7900\n");
+        let roles = |extra: &str| {
+            Manifest::parse(&format!("{listen}{extra}"))
+                .map(|manifest| manifest.spec.roles().0)
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(roles(""), Ok(0x41));
+        assert_eq!(roles("  rest:\n    - address: 127.0.0.1:3000\n"), Ok(0x43));
+        assert_eq!(roles("    roles: 0x45\n"), Ok(0x45));
+        assert_eq!(roles("    roles: 67\n"), Ok(0x43));
+        assert_eq!(roles("    roles: [Peer, Voting, IPv4]\n"), Ok(0x45));
+        // REST の口があっても、書いたものをそのまま名乗る
+        assert_eq!(
+            roles("    roles: [Peer, IPv4]\n  rest:\n    - address: 127.0.0.1:3000\n"),
+            Ok(0x41)
+        );
+        assert!(
+            roles("    roles: [Peer, Harvester]\n")
+                .unwrap_err()
+                .contains("Harvester")
+        );
+        assert!(
+            roles("    roles: [Api, IPv4]\n")
+                .unwrap_err()
+                .contains("Peer")
+        );
+        assert!(roles("    roles: 0x42\n").is_err());
     }
 
     #[test]

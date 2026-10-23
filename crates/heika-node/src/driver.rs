@@ -53,10 +53,6 @@ const TICK: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 名乗るときの版。catapult は版を見ないが、ノードの一覧に出るので、互換にしている catapult の版に合わせる
 const ANNOUNCED_VERSION: NodeVersion = NodeVersion(0x0100_0309);
-/// catapult の `NodeRoles::IPv4`
-const NODE_ROLE_IPV4: u32 = 0x40;
-/// `roles` の API のビット。REST の口を立てるときに名乗る
-const NODE_ROLE_API: u32 = 0x02;
 
 /// ノードを動かせなかったわけ
 pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
@@ -384,7 +380,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     let announce = spec
         .listen
         .as_ref()
-        .map(|listen| local_node(identity, listen, parameters))
+        .map(|listen| local_node(identity, listen, spec.roles(), parameters))
         .transpose()?
         .map(Arc::new);
     let status = Arc::new(RwLock::new(chain.status()));
@@ -846,7 +842,7 @@ fn read_harvesters(spec: &NodeConfig) -> Result<Vec<KeyPair>, NodeError> {
     Ok(keys)
 }
 
-/// API の `/node/info`。役割は、ピアと API と IPv4
+/// API の `/node/info`。ロールは、P2P で名乗るのと同じ
 fn api_node(
     identity: &Identity,
     spec: &NodeConfig,
@@ -858,7 +854,7 @@ fn api_node(
         version: ANNOUNCED_VERSION.0,
         public_key: identity.key().to_string(),
         network_generation_hash_seed: parameters.generation_hash_seed.to_string(),
-        roles: NodeRoles::PEER.0 | NODE_ROLE_API | NODE_ROLE_IPV4,
+        roles: spec.roles().0,
         port: listen
             .and_then(|listen| listen.address.rsplit_once(':'))
             .and_then(|(_, port)| port.parse().ok())
@@ -968,6 +964,7 @@ fn combined(own: &[KeyPair], delegated: Option<&Delegated>) -> Arc<Vec<KeyPair>>
 fn local_node(
     identity: &Identity,
     listen: &crate::config::Listen,
+    roles: NodeRoles,
     parameters: &NetworkParameters,
 ) -> Result<Vec<u8>, NodeError> {
     let port = listen
@@ -979,7 +976,7 @@ fn local_node(
         version: ANNOUNCED_VERSION,
         identity_key: *identity.key(),
         network_generation_hash_seed: parameters.generation_hash_seed,
-        roles: NodeRoles(NodeRoles::PEER.0 | NODE_ROLE_IPV4),
+        roles,
         port,
         network_identifier: parameters.identifier,
         host: listen.public_host.clone().unwrap_or_default(),

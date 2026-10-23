@@ -106,6 +106,34 @@ pub struct NodeConfig {
     /// ハーベストする鍵の組。空ならしない
     #[serde(default)]
     pub harvesters: Vec<Harvester>,
+    /// 作るブロックの受取先のアドレス。なければ、ハーベストした鍵のアドレス
+    #[serde(default)]
+    pub beneficiary: Option<String>,
+    /// ほかの人の委任ハーベストを引き受ける。なければ引き受けない
+    #[serde(default)]
+    pub delegations: Option<Delegations>,
+}
+
+/// 委任ハーベストの引き受け方
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Delegations {
+    /// 引き受ける数の上限。超えたら重要度の大きい順に選ぶ
+    #[serde(default = "default_max_delegations")]
+    pub max: usize,
+    /// 委任の鍵のファイル。委任の要求はこの鍵のアドレスに届き、この鍵で復号する。委任する人は NodeKeyLink を
+    /// この鍵に向ける。なければ TLS のノードの鍵（`certificates` の `tls.key`。catapult と同じ）
+    #[serde(default)]
+    pub key: Option<PathBuf>,
+}
+
+impl Default for Delegations {
+    fn default() -> Self {
+        Self {
+            max: default_max_delegations(),
+            key: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -239,6 +267,11 @@ pub struct Harvester {
     pub signer: PathBuf,
     /// リンクした VRF の鍵のファイル
     pub vrf: PathBuf,
+}
+
+/// catapult の `maxUnlockedAccounts` の既定と同じ
+fn default_max_delegations() -> usize {
+    5
 }
 
 fn default_peers() -> usize {

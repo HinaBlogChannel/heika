@@ -3,6 +3,7 @@
 
 pub mod catch_up;
 pub mod config;
+pub mod delegated;
 pub mod driver;
 pub mod harvesters;
 pub mod identity;

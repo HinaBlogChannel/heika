@@ -214,10 +214,12 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             .pending
             .as_ref()
             .map_or_else(Vec::new, |pending| pending.candidates(timestamp));
-        let beneficiary = Address::from_public_key(
-            &PublicKey::from_private_key(signing),
-            self.parameters.identifier,
-        );
+        let beneficiary = self.beneficiary.unwrap_or_else(|| {
+            Address::from_public_key(
+                &PublicKey::from_private_key(signing),
+                self.parameters.identifier,
+            )
+        });
         let mut drops = 0;
         loop {
             // 手数料の下限は、置き場が受け付けるときに絞っている

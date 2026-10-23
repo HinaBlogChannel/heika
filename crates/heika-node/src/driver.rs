@@ -476,6 +476,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         });
         let mut senders: BTreeMap<PeerId, Sender<Request>> = BTreeMap::new();
         let (registrations, registered) = mpsc::channel::<(PeerId, Sender<Request>)>();
+        // 次に未承認のトランザクションを頼むピアを選ぶための、前に頼んだピア
+        let mut pull_from: Option<PeerId> = None;
         println!("高さ {} から先端を追います", chain.height());
         let result = (|| -> Result<Outcome, NodeError> {
             for event in &inbox {
@@ -495,6 +497,19 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 chain.set_harvesters(combined(&own, delegated.as_ref()));
                             }
                             mempool.lock().prune(network_now(parameters));
+                            // catapult と同じく、ピアを順に1つずつ選んで、知らない未承認のトランザクションを頼む
+                            pull_from = next_peer(&senders, pull_from);
+                            if let Some(peer) = pull_from {
+                                let request = {
+                                    let mempool = mempool.lock();
+                                    Request::PullTransactions {
+                                        min_deadline: network_now(parameters),
+                                        min_fee_multiplier: mempool.min_fee_multiplier(),
+                                        known: mempool.short_hashes(),
+                                    }
+                                };
+                                let _ = senders[&peer].send(request);
+                            }
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
                                 return Ok(outcome);
                             }
@@ -502,6 +517,20 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                         NodeEvent::Chain(event) => {
                             if let Some(outcome) = now_or_never(chain.handle(event))? {
                                 return Ok(outcome);
+                            }
+                        }
+                        NodeEvent::Pulled { peer, transactions } => {
+                            let (now, height) = (network_now(parameters), chain.height() + 1);
+                            let mut mempool = mempool.lock();
+                            let added = transactions
+                                .into_iter()
+                                .filter(|bytes| mempool.add(bytes.clone(), now, height).is_ok())
+                                .count();
+                            if added > 0 {
+                                println!(
+                                    "ピア {} から、未承認のトランザクション {added} 件を受け付けました",
+                                    peer.0
+                                );
                             }
                         }
                         NodeEvent::Relay(bytes) => {
@@ -922,6 +951,24 @@ fn submit(
             Err(error) => Err(error.to_string()),
         }
     })
+}
+
+/// `previous` の次のピア。最後まで来たら最初に戻る
+fn next_peer(
+    senders: &BTreeMap<PeerId, Sender<Request>>,
+    previous: Option<PeerId>,
+) -> Option<PeerId> {
+    let after = previous.and_then(|previous| {
+        senders
+            .range((
+                std::ops::Bound::Excluded(previous),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+    });
+    after
+        .or_else(|| senders.iter().next())
+        .map(|(peer, _)| *peer)
 }
 
 /// 書く側の鍵。読む側（API）が落ちていても書き続ける

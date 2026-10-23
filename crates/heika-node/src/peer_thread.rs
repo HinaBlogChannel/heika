@@ -20,6 +20,13 @@ pub enum Request {
     Peer(Ask),
     /// 受け付けたトランザクションを押し付ける。返事はなく、失敗したときだけ `ChainEvent::Failed` を返す
     Transactions(Arc<Vec<u8>>),
+    /// 未承認のトランザクションを頼む。期限が `min_deadline` 以降で、手数料の倍率が `min_fee_multiplier` 以上のもののうち、
+    /// `known`（短いハッシュ）にないもの。[`NodeEvent::Pulled`] で返す
+    PullTransactions {
+        min_deadline: u64,
+        min_fee_multiplier: u32,
+        known: Vec<u32>,
+    },
 }
 
 /// 駆動役の受信箱に入れる出来事。どちらの状態機械あてか
@@ -28,6 +35,11 @@ pub enum NodeEvent {
     Peer(PeerEvent),
     /// REST で受け付けたトランザクション（1件のバイト列）。つないでいるピアのみなに押し付ける
     Relay(Arc<Vec<u8>>),
+    /// ピアに頼んだ未承認のトランザクション（1件ずつのバイト列）
+    Pulled {
+        peer: PeerId,
+        transactions: Vec<Vec<u8>>,
+    },
 }
 
 /// ピア `peer` のスレッドを立て、命令の口を返す。`announce`（自分の `NetworkNode`）があれば、始めにピアに押し付けて
@@ -60,6 +72,14 @@ pub fn spawn(
                 },
                 Request::Peer(Ask::Peers) => match connection.peers() {
                     Ok(nodes) => NodeEvent::Peer(PeerEvent::Nodes { id: peer, nodes }),
+                    Err(error) => failed(peer, error, false),
+                },
+                Request::PullTransactions {
+                    min_deadline,
+                    min_fee_multiplier,
+                    known,
+                } => match connection.pull_transactions(min_deadline, min_fee_multiplier, &known) {
+                    Ok(transactions) => NodeEvent::Pulled { peer, transactions },
                     Err(error) => failed(peer, error, false),
                 },
                 Request::Transactions(bytes) => {

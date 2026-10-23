@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use heika_block::Block;
@@ -40,7 +40,7 @@ use heika_transaction::{Body, DetachedCosignature, Transaction};
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
 use crate::delegated::{Delegated, DelegationState};
-use crate::finalization::Observer;
+use crate::finalization::{Observer, Voting};
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::partials::{self, Incoming};
@@ -49,6 +49,7 @@ use crate::reader::DbReader;
 use crate::recent::RecentTransactions;
 use crate::serve::{DbSource, Gate, Responder, serve};
 use crate::store::CachedStore;
+use crate::voting::{KeyFiles, read_status};
 
 /// 中核とピアの意思決定に `Tick` を入れる間隔
 const TICK: Duration = Duration::from_secs(5);
@@ -379,23 +380,43 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         parameters,
         PartialConfig::default(),
     )));
-    // 投票を見る。投票するピアからメッセージを引いて数え、届いた証明と比べる
-    let mut observer = spec
+    // 投票を数える。投票するピアからメッセージを引いて数え、届いた証明と比べる。鍵があれば投票もする
+    let observer = match spec
         .finalization
         .as_ref()
-        .filter(|finalization| finalization.observe)
-        .map(|_| {
+        .filter(|finalization| finalization.counts())
+    {
+        Some(config) => {
+            let (voting, status) = match &config.voting_keys {
+                Some(directory) => {
+                    let keys = KeyFiles::open(directory)?;
+                    if let Some(description) = keys.describe() {
+                        println!("{description}");
+                    }
+                    let voting = Voting {
+                        keys: Box::new(keys),
+                        data_directory: spec.data_directory.clone(),
+                    };
+                    (Some(voting), read_status(&spec.data_directory)?)
+                }
+                None => (None, None),
+            };
             let finalization = &setup.config.finalization;
-            Observer::new(
+            Some(Mutex::new(Observer::new(
                 &chain.status().finalized,
                 finalization.proof_parameters(),
                 heika_finalization::Settings {
+                    step_duration: finalization.step_duration,
+                    prevote_blocks_multiple: finalization.prevote_blocks_multiple,
                     max_hashes_per_point: finalization.max_hashes_per_point,
                     voting_set_grouping: finalization.voting_set_grouping,
-                    ..heika_finalization::Settings::MAINNET
                 },
-            )
-        });
+                voting,
+                status,
+            )))
+        }
+        None => None,
+    };
     // 次に投票のメッセージを頼むピアを選ぶための、前に頼んだピア
     let mut votes_from: Option<PeerId> = None;
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
@@ -474,7 +495,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
             let (status, reply, gate, done) = (&*status, &reply, &gate, &done);
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
-            let (mempool, partials) = (&*mempool, &*partials);
+            let (mempool, partials, votes) = (&*mempool, &*partials, observer.as_ref());
             let server_config = Arc::new(heika_tls::server_config(identity));
             scope.spawn(move || {
                 let source = DbSource {
@@ -490,6 +511,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     pushes: Some(pushes),
                     mempool: Some(mempool),
                     partials: Some(partials),
+                    votes,
                 };
                 let stop = || stopping() || done.load(std::sync::atomic::Ordering::SeqCst);
                 if let Err(error) = serve(listener, server_config, &responder, gate, &stop) {
@@ -548,13 +570,14 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     known,
                                 });
                             }
-                            if let Some(observer) = observer.as_mut() {
+                            if let Some(observer) = &observer {
                                 let voting = peers.with_roles(NodeRoles::VOTING);
                                 votes_from = voting
                                     .iter()
                                     .find(|id| Some(**id) > votes_from)
                                     .or(voting.first())
                                     .copied();
+                                let mut observer = observer.lock().expect("not poisoned");
                                 if let Some(peer) = votes_from
                                     && let Some(sender) = senders.get(&peer)
                                 {
@@ -562,33 +585,73 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     let _ = sender.send(Request::PullVotes { min, max, known });
                                 }
                                 let db = store.db();
-                                for notice in observer.tick(
-                                    network_now(parameters),
-                                    &chain.status().finalized,
-                                    |epoch| {
-                                        db.voters(epoch)
-                                            .ok()
-                                            .flatten()
-                                            .and_then(|bytes| VotingSet::decode(&bytes))
+                                let status = chain.status();
+                                let voters = |epoch| {
+                                    db.voters(epoch)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|bytes| VotingSet::decode(&bytes))
+                                };
+                                let block_hash = |height| {
+                                    db.block(height)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|bytes| Block::from_bytes(&bytes).ok())
+                                        .map(|block| block.hash())
+                                };
+                                let hashes = |from: u64, count: u64| -> Vec<Hash256> {
+                                    (from..from.saturating_add(count))
+                                        .map_while(block_hash)
+                                        .collect()
+                                };
+                                let ticked = observer.tick(
+                                    &crate::finalization::View {
+                                        now: network_now(parameters),
+                                        finalized: status.finalized,
+                                        chain_height: status.height,
+                                        voters: &voters,
+                                        hashes: &hashes,
                                     },
-                                    |height| {
-                                        db.block(height)
-                                            .ok()
-                                            .flatten()
-                                            .and_then(|bytes| Block::from_bytes(&bytes).ok())
-                                            .map(|block| block.hash())
-                                    },
-                                ) {
+                                    block_hash,
+                                );
+                                for notice in ticked.notices {
                                     println!("{notice}");
+                                }
+                                if !ticked.outgoing.is_empty() {
+                                    pending.push(NodeEvent::VotesToRelay {
+                                        messages: ticked.outgoing,
+                                        except: None,
+                                    });
                                 }
                             }
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
                                 return Ok(outcome);
                             }
                         }
-                        NodeEvent::PulledVotes { messages, .. } => {
-                            if let Some(observer) = observer.as_mut() {
-                                observer.add(messages);
+                        NodeEvent::Votes { messages, from } => {
+                            if let Some(observer) = &observer {
+                                let mut observer = observer.lock().expect("not poisoned");
+                                let added = observer.add(messages);
+                                // 投票するなら、catapult の投票ノードと同じく、新しく足せたものをほかの投票するピアにも配る
+                                if observer.is_voting() && !added.is_empty() {
+                                    pending.push(NodeEvent::VotesToRelay {
+                                        messages: added,
+                                        except: from,
+                                    });
+                                }
+                            }
+                        }
+                        NodeEvent::VotesToRelay { messages, except } => {
+                            let body = Arc::new(messages.concat());
+                            for id in peers.with_roles(NodeRoles::VOTING) {
+                                if Some(id) != except
+                                    && let Some(sender) = senders.get(&id)
+                                {
+                                    let _ = sender.send(Request::Push {
+                                        packet_type: packet_type::PUSH_FINALIZATION_MESSAGES,
+                                        body: Arc::clone(&body),
+                                    });
+                                }
                             }
                         }
                         NodeEvent::Chain(event) => {

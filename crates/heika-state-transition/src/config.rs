@@ -168,6 +168,10 @@ pub struct FinalizationConfig {
     pub size: u64,
     pub threshold: u64,
     pub max_hashes_per_point: u64,
+    /// `stepDuration`（ミリ秒）。投票の段取りで、prevote と precommit を待つ長さの単位
+    pub step_duration: u64,
+    /// `prevoteBlocksMultiple`。prevote の最後の高さを、この倍数にそろえる
+    pub prevote_blocks_multiple: u64,
     /// このエポックから、`ineligible_voters` を投票者から外す
     pub treasury_reissuance_epoch: u32,
     pub ineligible_voters: Vec<[u8; 24]>,
@@ -453,6 +457,9 @@ impl ChainConfig {
                 size: finalization.number("finalization", "size")?,
                 threshold: finalization.number("finalization", "threshold")?,
                 max_hashes_per_point: finalization.number("finalization", "maxHashesPerPoint")?,
+                step_duration: finalization.milliseconds("finalization", "stepDuration")?,
+                prevote_blocks_multiple: finalization
+                    .number("finalization", "prevoteBlocksMultiple")?,
                 treasury_reissuance_epoch: finalization
                     .number("finalization", "treasuryReissuanceEpoch")?
                     .try_into()

@@ -1057,6 +1057,8 @@ mod tests {
                 size: 1,
                 threshold: 1,
                 max_hashes_per_point: 1,
+                step_duration: 1,
+                prevote_blocks_multiple: 1,
                 treasury_reissuance_epoch: 0,
                 ineligible_voters: Vec::new(),
             },

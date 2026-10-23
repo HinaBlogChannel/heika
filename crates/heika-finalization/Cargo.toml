@@ -9,3 +9,7 @@ description = "Symbol のファイナライズの投票の段取り。ラウン�
 [dependencies]
 heika-block = { path = "../heika-block" }
 heika-core = { path = "../heika-core", default-features = false }
+
+[dev-dependencies]
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+rand_core = "0.10.1"

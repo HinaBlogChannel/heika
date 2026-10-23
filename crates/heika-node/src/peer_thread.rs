@@ -76,10 +76,15 @@ pub enum NodeEvent {
         peer: PeerId,
         transactions: Vec<Vec<u8>>,
     },
-    /// ピアに頼んだ投票のメッセージ（1つずつのバイト列）
-    PulledVotes {
-        peer: PeerId,
+    /// ピアに頼んだか、押し付けられた投票のメッセージ（1つずつのバイト列）。`from` は頼んだピア
+    Votes {
         messages: Vec<Vec<u8>>,
+        from: Option<PeerId>,
+    },
+    /// 投票するピアみなに配る投票のメッセージ。`except` は、それをくれたピア（送り返さない）
+    VotesToRelay {
+        messages: Vec<Vec<u8>>,
+        except: Option<PeerId>,
     },
 }
 
@@ -125,7 +130,10 @@ pub fn spawn(
                 },
                 Request::PullVotes { min, max, known } => {
                     match connection.pull_finalization_messages(min, max, &known) {
-                        Ok(messages) => NodeEvent::PulledVotes { peer, messages },
+                        Ok(messages) => NodeEvent::Votes {
+                            messages,
+                            from: Some(peer),
+                        },
                         Err(error) => failed(peer, error, false),
                     }
                 }

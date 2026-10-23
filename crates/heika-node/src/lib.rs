@@ -16,5 +16,6 @@ pub mod reader;
 pub mod recent;
 pub mod serve;
 pub mod store;
+pub mod voting;
 
 pub use heika_api::offer_source;

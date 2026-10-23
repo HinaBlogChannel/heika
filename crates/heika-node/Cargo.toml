@@ -31,4 +31,5 @@ zeroize = "1.9.1"
 
 
 [dev-dependencies]
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
 rand_core = { version = "0.10.1", default-features = false }

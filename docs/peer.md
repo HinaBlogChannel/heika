@@ -107,6 +107,7 @@ spec:
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
 | `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
+| `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロックに入っていれば `confirmed` と高さ |
 | `/transactions/confirmed/{hash}` | 直近のブロックに入ったトランザクションと、入った高さ |
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |

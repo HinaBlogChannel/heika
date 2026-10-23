@@ -20,6 +20,7 @@ use heika_core::patricia::{SubCache, TreeNode};
 use heika_mempool::SharedMempool;
 use heika_rest::block::{BlockHeader, BlockInfo, BlockMeta};
 use heika_rest::merkle::{MerklePathItem, MerkleProofInfo, MerkleStateInfo};
+use heika_rest::node::TransactionFeesJson;
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountJson, MosaicStateJson};
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
@@ -29,6 +30,9 @@ use heika_store_redb::{Db, DbError};
 use heika_transaction::Transaction;
 
 use crate::recent::SharedRecent;
+
+/// 手数料の倍率を見る、直近のブロックの数。catapult の REST の `numBlocksTransactionFeeStats` の既定値
+const FEE_STATS_BLOCKS: u64 = 300;
 
 /// アグリゲートのトランザクションの種類（完了と保留）
 const AGGREGATE_TYPES: [u16; 2] = [0x4141, 0x4241];
@@ -280,6 +284,18 @@ impl heika_api::Reader for DbReader {
                 })
                 .collect(),
         }))
+    }
+
+    fn transaction_fees(&self) -> Result<TransactionFeesJson, String> {
+        let tip = self.db.blocks_tip().map_err(|error| error.to_string())?;
+        let mut multipliers = Vec::new();
+        for height in tip.saturating_sub(FEE_STATS_BLOCKS - 1).max(1)..=tip {
+            if let Some(block) = self.read_block(height)? {
+                multipliers.push(block.fee_multiplier);
+            }
+        }
+        let min_fee_multiplier = self.mempool.lock().min_fee_multiplier();
+        Ok(TransactionFeesJson::new(multipliers, min_fee_multiplier))
     }
 
     fn network(&self) -> NetworkIdentifier {

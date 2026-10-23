@@ -7,6 +7,7 @@
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
+//! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/transactionStatus/{hash}`、`/transactions/confirmed/{hash}`、`/blocks/{height}/transactions/{hash}/merkle`:
 //!   送ったトランザクションの行方と、入ったブロックへの Merkle の経路
 //!
@@ -37,7 +38,7 @@ use heika_rest::block::BlockInfo;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
     AnnounceJson, AnnounceResultJson, ChainInfoJson, DelegationJson, ErrorJson, NodeInfoJson,
-    UnlockedAccountJson,
+    TransactionFeesJson, UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
@@ -79,6 +80,8 @@ pub trait Reader: Send + Sync {
         height: u64,
         hash: &Hash256,
     ) -> Result<Option<MerkleProofInfo>, String>;
+    /// 直近のブロックの手数料の倍率と、ノードが受け付ける下限
+    fn transaction_fees(&self) -> Result<TransactionFeesJson, String>;
     /// 公開鍵からアドレスを出すときのネットワーク
     fn network(&self) -> NetworkIdentifier;
 }
@@ -243,6 +246,10 @@ fn transaction_hash(hash: &str) -> Option<Hash256> {
     Some(Hash256(bytes))
 }
 
+async fn transaction_fees(State(api): State<Api>) -> Response {
+    found("transaction", api.node.reader.transaction_fees().map(Some))
+}
+
 async fn transaction_status(State(api): State<Api>, Path(hash): Path<String>) -> Response {
     let Some(key) = transaction_hash(&hash) else {
         return invalid("hash has an invalid format".to_owned());
@@ -309,6 +316,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
         .route("/blocks/{height}", get(block))
+        .route("/network/fees/transaction", get(transaction_fees))
         .route("/transactionStatus/{hash}", get(transaction_status))
         .route("/transactions/confirmed/{hash}", get(confirmed_transaction))
         .route(
@@ -504,6 +512,10 @@ mod tests {
             )
         }
 
+        fn transaction_fees(&self) -> Result<TransactionFeesJson, String> {
+            Ok(TransactionFeesJson::new(vec![10, 30], 10))
+        }
+
         fn network(&self) -> NetworkIdentifier {
             NetworkIdentifier::TESTNET
         }
@@ -574,6 +586,11 @@ mod tests {
         );
 
         assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+
+        let (status, body) = get_status("/network/fees/transaction").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["medianFeeMultiplier"], 20);
+        assert_eq!(body["minFeeMultiplier"], 10);
 
         let known = "AA".repeat(32);
         let (status, body) = get_status(&format!("/transactionStatus/{known}")).await;

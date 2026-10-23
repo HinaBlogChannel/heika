@@ -100,6 +100,46 @@ pub struct DelegationJson {
     pub reason: Option<String>,
 }
 
+/// `/network/fees/transaction` が返す `TransactionFeesDTO`。直近のブロックの手数料の倍率と、ノードが受け付ける下限
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionFeesJson {
+    pub average_fee_multiplier: u32,
+    pub median_fee_multiplier: u32,
+    pub highest_fee_multiplier: u32,
+    pub lowest_fee_multiplier: u32,
+    pub min_fee_multiplier: u32,
+}
+
+impl TransactionFeesJson {
+    /// 直近のブロックの倍率 `multipliers`（並びは問わない）と、ノードの下限から作る。中央値は catapult の REST と同じく、
+    /// 数が偶数なら真ん中の2つの平均（切り捨て）。ブロックがなければ倍率は0
+    pub fn new(mut multipliers: Vec<u32>, min_fee_multiplier: u32) -> Self {
+        multipliers.sort_unstable();
+        let count = multipliers.len();
+        let median = match count {
+            0 => 0,
+            _ if count % 2 == 1 => multipliers[count / 2],
+            _ => {
+                ((u64::from(multipliers[count / 2 - 1]) + u64::from(multipliers[count / 2])) / 2)
+                    as u32
+            }
+        };
+        let sum: u64 = multipliers.iter().map(|&value| u64::from(value)).sum();
+        Self {
+            average_fee_multiplier: if count == 0 {
+                0
+            } else {
+                (sum / count as u64) as u32
+            },
+            median_fee_multiplier: median,
+            highest_fee_multiplier: multipliers.last().copied().unwrap_or(0),
+            lowest_fee_multiplier: multipliers.first().copied().unwrap_or(0),
+            min_fee_multiplier,
+        }
+    }
+}
+
 /// `PUT /transactions` の本文。署名したトランザクション（16進）
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct AnnounceJson {
@@ -141,6 +181,23 @@ mod tests {
             ChainInfoJson::new(5887045, score, 4090, 14, 5887020, "AB".to_owned())
         );
         assert_eq!(serde_json::to_string(&info).unwrap(), text);
+    }
+
+    #[test]
+    fn summarizes_fee_multipliers() {
+        let fees = TransactionFeesJson::new(vec![100, 0, 30, 10], 10);
+        assert_eq!(
+            serde_json::to_string(&fees).unwrap(),
+            r#"{"averageFeeMultiplier":35,"medianFeeMultiplier":20,"highestFeeMultiplier":100,"lowestFeeMultiplier":0,"minFeeMultiplier":10}"#
+        );
+        assert_eq!(
+            TransactionFeesJson::new(vec![5, 1, 3], 0).median_fee_multiplier,
+            3
+        );
+        assert_eq!(
+            TransactionFeesJson::new(Vec::new(), 7).median_fee_multiplier,
+            0
+        );
     }
 
     #[test]

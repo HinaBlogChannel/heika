@@ -11,11 +11,13 @@ heika-block = { path = "../heika-block" }
 heika-chain = { path = "../heika-chain" }
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core" }
+heika-api = { path = "../heika-api" }
 heika-harvesting = { path = "../heika-harvesting" }
 heika-mempool = { path = "../heika-mempool" }
 heika-packet = { path = "../heika-packet" }
 heika-peer = { path = "../heika-peer" }
 heika-peer-protocol = { path = "../heika-peer-protocol" }
+heika-rest = { path = "../heika-rest" }
 heika-state-transition = { path = "../heika-state-transition" }
 heika-store-redb = { path = "../heika-store-redb" }
 heika-tls = { path = "../heika-tls" }

@@ -112,6 +112,17 @@ pub struct NodeConfig {
     /// ほかの人の委任ハーベストを引き受ける。なければ引き受けない
     #[serde(default)]
     pub delegations: Option<Delegations>,
+    /// REST の口で待ち受ける。空なら立てない。手元用と公開用のように、いくつでも書ける
+    #[serde(default)]
+    pub rest: Vec<Rest>,
+}
+
+/// REST の口
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rest {
+    /// 待ち受けるアドレス（`127.0.0.1:3000` など）
+    pub address: String,
 }
 
 /// 委任ハーベストの引き受け方

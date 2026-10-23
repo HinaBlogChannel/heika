@@ -1,0 +1,18 @@
+[package]
+name = "heika-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "heika のノードの REST。catapult の REST のうち、ウォレットが委任に使う口と、heika だけの口"
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+heika-rest = { path = "../heika-rest" }
+tokio = { version = "1.53.3", features = ["net", "rt", "time"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+serde_json = "1.0.154"
+tower = { version = "0.5.3", features = ["util"] }
+tokio = { version = "1.53.3", features = ["macros", "rt"] }

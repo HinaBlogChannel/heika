@@ -1,9 +1,10 @@
 //! ファイナライズ。catbuffer の `finalization/`。
 //!
 //! 投票でファイナライズされたブロックを、ラウンド（エポックとポイント）、高さ、ハッシュで示す。
-//! 証明を投票者で確かめるのは [`proof`]。
+//! 証明を投票者で確かめるのは [`proof`]、1つのラウンドの投票の数え方は [`round`]。
 
 pub mod proof;
+pub mod round;
 
 use std::fmt;
 

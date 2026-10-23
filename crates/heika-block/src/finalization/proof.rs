@@ -19,6 +19,7 @@ use heika_core::key::PublicKey;
 use heika_core::signature::Signature;
 use sha3::{Digest, Sha3_256};
 
+use super::round::RoundContext;
 use super::{FinalizationRound, FinalizedBlockHeader};
 
 /// 証明を確かめるのに要る、ネットワークの設定（config-network.properties の `[chain]` と `[finalization]`）
@@ -414,7 +415,7 @@ impl<'a> Aggregator<'a> {
             parameters,
             voting_set_height: parameters.voting_set_end_height(epoch.saturating_sub(1).max(1)),
             messages: HashMap::new(),
-            round: RoundContext::new(threshold),
+            round: RoundContext::new(total, threshold),
         }
     }
 
@@ -477,92 +478,6 @@ impl<'a> Aggregator<'a> {
                 .accept_precommit(message.height, hashes[0], weight);
         }
         Ok(())
-    }
-}
-
-type Candidate = (u64, Hash256);
-
-#[derive(Clone, Copy, Default, Debug)]
-struct Weights {
-    prevote: u64,
-    precommit: u64,
-}
-
-/// catapult の `RoundContext` と `FinalizationHashTree`
-struct RoundContext {
-    threshold: u64,
-    /// （高さ、ハッシュ）の順。いちばん高いものから探す
-    candidates: BTreeMap<(u64, [u8; 32]), Weights>,
-    /// 子 → 親。最初に足した枝のつながりを使う
-    parents: HashMap<Candidate, Option<Candidate>>,
-    /// 先に届いた precommit で、まだその prevote がないもの
-    pending_precommits: HashMap<Candidate, u64>,
-}
-
-impl RoundContext {
-    fn new(threshold: u64) -> Self {
-        Self {
-            threshold,
-            candidates: BTreeMap::new(),
-            parents: HashMap::new(),
-            pending_precommits: HashMap::new(),
-        }
-    }
-
-    fn best_precommit(&self) -> Option<Candidate> {
-        self.candidates
-            .iter()
-            .rev()
-            .find(|(_, weights)| {
-                weights.prevote >= self.threshold && weights.precommit >= self.threshold
-            })
-            .map(|((height, hash), _)| (*height, Hash256(*hash)))
-    }
-
-    /// 自分を含めて、根へたどる
-    fn ancestors(&self, key: Candidate) -> Vec<Candidate> {
-        let mut out = Vec::new();
-        let mut current = self.parents.contains_key(&key).then_some(key);
-        while let Some(node) = current {
-            out.push(node);
-            current = self.parents[&node];
-        }
-        out
-    }
-
-    fn accept_prevote(&mut self, height: u64, hashes: &[Hash256], weight: u64) {
-        let mut parent = None;
-        for (index, hash) in hashes.iter().enumerate() {
-            let key = (height + index as u64, *hash);
-            self.parents.entry(key).or_insert(parent);
-            parent = Some(key);
-        }
-        for (index, hash) in hashes.iter().enumerate() {
-            let key = (height + index as u64, *hash);
-            self.candidates.entry((key.0, key.1.0)).or_default().prevote += weight;
-            if let Some(pending) = self.pending_precommits.remove(&key) {
-                for ancestor in self.ancestors(key) {
-                    self.candidates
-                        .get_mut(&(ancestor.0, ancestor.1.0))
-                        .expect("ancestors are candidates")
-                        .precommit += pending;
-                }
-            }
-        }
-    }
-
-    fn accept_precommit(&mut self, height: u64, hash: Hash256, weight: u64) {
-        let ancestors = self.ancestors((height, hash));
-        if ancestors.is_empty() {
-            *self.pending_precommits.entry((height, hash)).or_default() += weight;
-            return;
-        }
-        for ancestor in ancestors {
-            self.candidates
-                .get_mut(&(ancestor.0, ancestor.1.0))
-                .expect("ancestors are candidates")
-                .precommit += weight;
-        }
     }
 }
 

@@ -39,6 +39,7 @@ use crate::delegated::{Delegated, DelegationState};
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
+use crate::reader::DbReader;
 use crate::serve::{DbSource, Gate, Responder, serve};
 use crate::store::CachedStore;
 
@@ -407,15 +408,22 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         if let Some(shared) = &api {
             let addresses: Vec<String> =
                 spec.rest.iter().map(|rest| rest.address.clone()).collect();
-            let submit = submit(
-                parameters,
-                Arc::clone(&mempool),
-                Arc::clone(&status),
-                events.clone(),
-            );
+            let node = heika_api::Node {
+                submit: submit(
+                    parameters,
+                    Arc::clone(&mempool),
+                    Arc::clone(&status),
+                    events.clone(),
+                ),
+                reader: Arc::new(DbReader::new(
+                    store.shared_db(),
+                    parameters.identifier,
+                    setup.config.currency_mosaic_id,
+                )),
+            };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {
-                if let Err(error) = heika_api::serve(&addresses, shared, submit, stop) {
+                if let Err(error) = heika_api::serve(&addresses, shared, node, stop) {
                     eprintln!("{error}");
                 }
             });

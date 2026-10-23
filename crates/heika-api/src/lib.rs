@@ -5,16 +5,19 @@
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
+//! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
+//! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //!
 //! ノードの駆動役が [`Snapshot`] を書き換え、ここは読んで返すだけにする。チェーンの本体には触らない。
-//! 受け付けたトランザクションは、駆動役から渡された [`Submit`] に渡す。
+//! 受け付けたトランザクションは、駆動役から渡された [`Submit`] に渡し、状態とブロックは [`Reader`] で読む。
+//! ID の読み方と、答えの形（見つからなければ 404 など）はここで決め、何をどう読むかは [`Reader`] に任せる。
 //! catapult の REST と同じく、どこのページからでも読めるようにする（CORS）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
 };
@@ -23,10 +26,18 @@ use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
+use heika_core::address::Address;
+use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
+use heika_core::network::NetworkIdentifier;
+use heika_core::patricia::{self, SubCache};
+use heika_rest::block::BlockInfo;
+use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::node::{
     AnnounceJson, AnnounceResultJson, ChainInfoJson, DelegationJson, ErrorJson, NodeInfoJson,
     UnlockedAccountJson,
 };
+use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
 
 /// API が返す、ノードの今の様子
 #[derive(Clone, Debug)]
@@ -44,10 +55,31 @@ pub type Shared = Arc<RwLock<Snapshot>>;
 /// わけを返す。ネットワークに流すのも、この口の仕事
 pub type Submit = Arc<dyn Fn(Vec<u8>) -> Result<(), String> + Send + Sync>;
 
+/// チェーンの中身を読む口。エラーはわけの文（500 で返す）
+pub trait Reader: Send + Sync {
+    /// アカウントの今の状態。なければ `None`
+    fn account(&self, address: &Address) -> Result<Option<AccountJson>, String>;
+    /// モザイクの定義の今の状態。なければ `None`
+    fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String>;
+    /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
+    fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String>;
+    /// `height` のブロック。なければ（まだないか、刈り込んだか、その高さの根がもうなければ）`None`
+    fn block(&self, height: u64) -> Result<Option<BlockInfo>, String>;
+    /// 公開鍵からアドレスを出すときのネットワーク
+    fn network(&self) -> NetworkIdentifier;
+}
+
+/// API がノードに頼む口
+#[derive(Clone)]
+pub struct Node {
+    pub submit: Submit,
+    pub reader: Arc<dyn Reader>,
+}
+
 #[derive(Clone)]
 struct Api {
     shared: Shared,
-    submit: Submit,
+    node: Node,
 }
 
 /// 止める合図を見に行く間隔
@@ -80,20 +112,107 @@ async fn delegations(State(api): State<Api>) -> Json<Vec<DelegationJson>> {
 /// 16進のトランザクションを受け付ける。catapult の REST と同じく、受け付けたら 202、受け付けなければ 409
 async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
     let result = match decode_hex(&body.payload) {
-        Some(bytes) => (api.submit)(bytes),
+        Some(bytes) => (api.node.submit)(bytes),
         None => Err("payload が16進ではありません".to_owned()),
     };
     match result {
         Ok(()) => (StatusCode::ACCEPTED, Json(AnnounceResultJson::pushed())).into_response(),
-        Err(message) => (
-            StatusCode::CONFLICT,
-            Json(ErrorJson {
-                code: "InvalidArgument".to_owned(),
-                message,
-            }),
-        )
-            .into_response(),
+        Err(message) => invalid(message),
     }
+}
+
+/// catapult の REST と同じ形のエラー
+fn error(status: StatusCode, code: &str, message: String) -> Response {
+    let code = code.to_owned();
+    (status, Json(ErrorJson { code, message })).into_response()
+}
+
+fn invalid(message: String) -> Response {
+    error(StatusCode::CONFLICT, "InvalidArgument", message)
+}
+
+/// 読んだものを返す。なければ 404、読めなければ 500
+fn found<T: serde::Serialize>(id: &str, read: Result<Option<T>, String>) -> Response {
+    match read {
+        Ok(Some(value)) => Json(value).into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            format!("no resource exists with id '{id}'"),
+        ),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+    }
+}
+
+/// アカウントの ID。catapult の REST と同じく、アドレス（Base32 か16進）か公開鍵（16進）
+fn account_address(id: &str, network: NetworkIdentifier) -> Option<Address> {
+    if id.len() == 64 {
+        let key: PublicKey = id.parse().ok()?;
+        return Some(Address::from_public_key(&key, network));
+    }
+    let address = id.parse().or_else(|_| Address::from_hex(id)).ok()?;
+    (address.network() == network).then_some(address)
+}
+
+/// モザイクの ID。上位から16進
+fn mosaic_id(id: &str) -> Option<u64> {
+    (id.len() == 16)
+        .then(|| u64::from_str_radix(id, 16).ok())
+        .flatten()
+}
+
+async fn account(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(address) = account_address(&id, api.node.reader.network()) else {
+        return invalid("accountId has an invalid format".to_owned());
+    };
+    let read = api.node.reader.account(&address);
+    found(
+        &id,
+        read.map(|account| account.map(|account| AccountInfo { account })),
+    )
+}
+
+async fn account_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(address) = account_address(&id, api.node.reader.network()) else {
+        return invalid("accountId has an invalid format".to_owned());
+    };
+    let key = patricia::address_key(&address);
+    found(
+        &id,
+        api.node
+            .reader
+            .state_path(SubCache::AccountState, &key)
+            .map(Some),
+    )
+}
+
+async fn mosaic(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(mosaic_id) = mosaic_id(&id) else {
+        return invalid("mosaicId has an invalid format".to_owned());
+    };
+    let read = api.node.reader.mosaic(mosaic_id);
+    found(
+        &id,
+        read.map(|mosaic| mosaic.map(|mosaic| MosaicInfo { mosaic })),
+    )
+}
+
+async fn mosaic_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(mosaic_id) = mosaic_id(&id) else {
+        return invalid("mosaicId has an invalid format".to_owned());
+    };
+    let key = patricia::id_key(mosaic_id);
+    found(
+        &id,
+        api.node.reader.state_path(SubCache::Mosaic, &key).map(Some),
+    )
+}
+
+async fn block(State(api): State<Api>, Path(height): Path<String>) -> Response {
+    let Some(number) = height.parse::<u64>().ok().filter(|&height| height > 0) else {
+        return invalid("height has an invalid format".to_owned());
+    };
+    found(&height, api.node.reader.block(number))
 }
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
@@ -126,22 +245,27 @@ async fn allow_any_origin(mut response: Response) -> Response {
 }
 
 /// 口の並び
-pub fn router(shared: Shared, submit: Submit) -> Router {
+pub fn router(shared: Shared, node: Node) -> Router {
     Router::new()
         .route("/node/info", get(node_info))
         .route("/chain/info", get(chain_info))
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
         .route("/transactions", put(announce).options(preflight))
+        .route("/accounts/{id}", get(account))
+        .route("/accounts/{id}/merkle", get(account_merkle))
+        .route("/mosaics/{id}", get(mosaic))
+        .route("/mosaics/{id}/merkle", get(mosaic_merkle))
+        .route("/blocks/{height}", get(block))
         .layer(map_response(allow_any_origin))
-        .with_state(Api { shared, submit })
+        .with_state(Api { shared, node })
 }
 
 /// `addresses` のそれぞれで待ち受け、`stop` が立つまで答える。呼んだスレッドで tokio を回す
 pub fn serve(
     addresses: &[String],
     shared: Shared,
-    submit: Submit,
+    node: Node,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -156,7 +280,7 @@ pub fn serve(
                 .await
                 .map_err(|error| format!("API を {address} で待ち受けられません: {error}"))?;
             println!("API を {address} で待ち受けます");
-            let app = router(Arc::clone(&shared), Arc::clone(&submit));
+            let app = router(Arc::clone(&shared), node.clone());
             let stop = Arc::clone(&stop);
             tasks.spawn(async move {
                 axum::serve(listener, app)
@@ -217,7 +341,7 @@ mod tests {
     }
 
     async fn get(shared: Shared, path: &str) -> (Option<HeaderValue>, serde_json::Value) {
-        let response = router(shared, submit(Arc::default()))
+        let response = router(shared, node(submit(Arc::default())))
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -249,6 +373,128 @@ mod tests {
         assert_eq!(chain["height"], "11");
     }
 
+    /// 公開鍵 [0x11; 32] のアカウントと、通貨のモザイクだけがある読み役
+    struct FakeReader;
+
+    const CURRENCY: u64 = 0x6BED_913F_A202_23F8;
+
+    fn known() -> Address {
+        Address::from_public_key(&PublicKey([0x11; 32]), NetworkIdentifier::TESTNET)
+    }
+
+    impl Reader for FakeReader {
+        fn account(&self, address: &Address) -> Result<Option<AccountJson>, String> {
+            if *address != known() {
+                return Ok(None);
+            }
+            let mut bytes = vec![1, 0];
+            bytes.extend_from_slice(&address.0);
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.extend_from_slice(&[0x11; 32]);
+            bytes.extend_from_slice(&2u64.to_le_bytes());
+            bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            Ok(Some(AccountJson::from_state_bytes(&bytes).unwrap()))
+        }
+
+        fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String> {
+            if id != CURRENCY {
+                return Ok(None);
+            }
+            let mut bytes = vec![1, 0];
+            bytes.extend_from_slice(&id.to_le_bytes());
+            bytes.extend_from_slice(&[0; 54]);
+            Ok(Some(MosaicStateJson::from_state_bytes(&bytes).unwrap()))
+        }
+
+        fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String> {
+            // 問い合わせた木とキーを、そのまま返して確かめる
+            Ok(MerkleStateInfo {
+                raw: format!("{:02X}{key}", cache.index()),
+            })
+        }
+
+        fn block(&self, _height: u64) -> Result<Option<BlockInfo>, String> {
+            Ok(None)
+        }
+
+        fn network(&self) -> NetworkIdentifier {
+            NetworkIdentifier::TESTNET
+        }
+    }
+
+    fn node(submit: Submit) -> Node {
+        Node {
+            submit,
+            reader: Arc::new(FakeReader),
+        }
+    }
+
+    async fn get_status(path: &str) -> (StatusCode, serde_json::Value) {
+        let response = router(snapshot(), node(submit(Arc::default())))
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn reads_accounts_mosaics_and_blocks() {
+        let address = known();
+        let hex_address = address.to_hex();
+        // アドレス（Base32 と16進）でも公開鍵でも引ける
+        for id in [address.to_string(), hex_address.clone(), "11".repeat(32)] {
+            let (status, body) = get_status(&format!("/accounts/{id}")).await;
+            assert_eq!(status, StatusCode::OK, "{id}");
+            assert_eq!(body["account"]["address"], hex_address.as_str());
+        }
+        let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
+        let (status, body) = get_status(&format!("/accounts/{other}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "ResourceNotFound");
+        // 読めない形と、ほかのネットワークのアドレスは 409
+        let mainnet = Address::from_public_key(&PublicKey([0x11; 32]), NetworkIdentifier::MAINNET);
+        for id in ["zzz".to_owned(), mainnet.to_string()] {
+            let (status, body) = get_status(&format!("/accounts/{id}")).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{id}");
+            assert_eq!(body["code"], "InvalidArgument");
+        }
+        let (status, body) = get_status(&format!("/accounts/{address}/merkle")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["raw"],
+            format!("00{}", patricia::address_key(&address)).as_str()
+        );
+
+        let (status, body) = get_status("/mosaics/6BED913FA20223F8").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mosaic"]["id"], "6BED913FA20223F8");
+        assert_eq!(
+            get_status("/mosaics/0000000000000001").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(get_status("/mosaics/6BED").await.0, StatusCode::CONFLICT);
+        let (_, body) = get_status("/mosaics/6BED913FA20223F8/merkle").await;
+        assert_eq!(
+            body["raw"],
+            format!(
+                "{:02X}{}",
+                SubCache::Mosaic.index(),
+                patricia::id_key(CURRENCY)
+            )
+            .as_str()
+        );
+
+        assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+        for height in ["0", "abc"] {
+            assert_eq!(
+                get_status(&format!("/blocks/{height}")).await.0,
+                StatusCode::CONFLICT
+            );
+        }
+    }
+
     /// 受け付けの口。`[1, 2]` だけを受け付け、受け取ったものを `received` に残す
     fn submit(received: Arc<std::sync::Mutex<Vec<Vec<u8>>>>) -> Submit {
         Arc::new(move |bytes: Vec<u8>| {
@@ -265,7 +511,7 @@ mod tests {
         received: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         body: &str,
     ) -> (StatusCode, serde_json::Value) {
-        let response = router(snapshot(), submit(Arc::clone(received)))
+        let response = router(snapshot(), node(submit(Arc::clone(received))))
             .oneshot(
                 Request::put("/transactions")
                     .header("Content-Type", "application/json")
@@ -303,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn answers_the_preflight_for_put() {
-        let response = router(snapshot(), submit(Arc::default()))
+        let response = router(snapshot(), node(submit(Arc::default())))
             .oneshot(
                 Request::options("/transactions")
                     .body(Body::empty())

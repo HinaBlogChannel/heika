@@ -668,6 +668,7 @@ dependencies = [
  "heika-core",
  "heika-packet",
  "heika-transaction",
+ "sha3",
 ]
 
 [[package]]

@@ -4,8 +4,10 @@
 //! 残高が足りるかなど状態に依ることは確かめず、ブロックを作ってみて弾かれたものを [`Mempool::remove`] で外す。
 //! 状態の写しは持たない。
 //!
-//! 連署を待つアグリゲートボンデッド（catapult の PT キャッシュ）は扱わない。ハッシュロックがあるかを確かめるのに
-//! 状態が要るので、受け付けない。
+//! 連署を待つアグリゲートボンデッド（catapult の PT キャッシュ）は、別の置き場（[`partial`]）で待たせ、連署が
+//! 揃ってからここに移す。ここに直接来たものは受け付けない。
+
+pub mod partial;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;

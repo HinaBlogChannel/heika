@@ -416,6 +416,16 @@ impl Transaction {
         Ok(())
     }
 
+    /// 連署を外して返す。アグリゲートでなければ空
+    pub fn take_cosignatures(&mut self) -> Vec<Cosignature> {
+        match &mut self.body {
+            Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+                aggregate.take_cosignatures()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// 連署をすべて検証する。アグリゲートでなければ連署はないので `true`。
     pub fn verify_cosignatures(&self, generation_hash_seed: &GenerationHashSeed) -> bool {
         let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) = &self.body

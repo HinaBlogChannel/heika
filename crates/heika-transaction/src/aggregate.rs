@@ -128,6 +128,26 @@ impl Cosignature {
         self.signer_public_key
             .verify(&[&transaction_hash.0], &self.signature)
     }
+
+    /// アグリゲートの中と同じ形のバイト列。バージョン（予約で0）、署名者の公開鍵、署名
+    pub fn to_bytes(&self) -> [u8; COSIGNATURE_SIZE] {
+        let mut bytes = [0; COSIGNATURE_SIZE];
+        bytes[8..40].copy_from_slice(&self.signer_public_key.0);
+        bytes[40..].copy_from_slice(&self.signature.0);
+        bytes
+    }
+
+    /// [`Cosignature::to_bytes`] の形を読む。バージョンは0でなければならない
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::exact(bytes, COSIGNATURE_SIZE)?;
+        if reader.u64() != 0 {
+            return Err(DecodeError::NonZeroReserved);
+        }
+        Ok(Self {
+            signer_public_key: PublicKey(reader.array()),
+            signature: Signature(reader.array()),
+        })
+    }
 }
 
 /// アグリゲートから切り離して受け渡す連署。catbuffer の `DetachedCosignature`。
@@ -273,6 +293,11 @@ impl Aggregate {
 
     pub fn add_cosignature(&mut self, cosignature: Cosignature) {
         self.cosignatures.push(cosignature);
+    }
+
+    /// 連署を外して返す。ハッシュと外側の署名は連署を含まないので、外しても変わらない
+    pub fn take_cosignatures(&mut self) -> Vec<Cosignature> {
+        std::mem::take(&mut self.cosignatures)
     }
 
     /// 中のトランザクションのハッシュ。署名はこれに掛かる。

@@ -11,3 +11,4 @@ heika-chain = { path = "../heika-chain" }
 heika-core = { path = "../heika-core", default-features = false }
 heika-packet = { path = "../heika-packet" }
 heika-transaction = { path = "../heika-transaction" }
+sha3 = "0.12.0"

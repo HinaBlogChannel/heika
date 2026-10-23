@@ -237,6 +237,14 @@ impl PartialPool {
             .is_some_and(|entry| entry.cosignatures.remove(&signer.0).is_some())
     }
 
+    /// 持っているもののハッシュ。期限の早い順
+    pub fn hashes(&self) -> Vec<Hash256> {
+        self.by_deadline
+            .iter()
+            .map(|(_, hash)| Hash256(*hash))
+            .collect()
+    }
+
     /// 持っていれば、その期限（Nemesis からのミリ秒）
     pub fn deadline(&self, hash: &Hash256) -> Option<u64> {
         self.entries.get(hash).map(|entry| entry.deadline)

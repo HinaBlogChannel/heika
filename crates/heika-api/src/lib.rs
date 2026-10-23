@@ -7,6 +7,7 @@
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
+//! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
@@ -22,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
 };
@@ -86,8 +87,46 @@ pub trait Reader: Send + Sync {
     ) -> Result<Option<MerkleProofInfo>, String>;
     /// 直近のブロックの手数料の倍率と、ノードが受け付ける下限
     fn transaction_fees(&self) -> Result<TransactionFeesJson, String>;
+    /// 連署を待つアグリゲートボンデッド（集まった連署付き）。知らなければ `None`
+    fn partial_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
+    /// 連署を待つものの一覧。`filter` に合うものを、期限の早い順に
+    fn partial_transactions(&self, filter: &PartialFilter) -> Result<Vec<TransactionInfo>, String>;
     /// 公開鍵からアドレスを出すときのネットワーク
     fn network(&self) -> NetworkIdentifier;
+}
+
+/// 連署を待つものの一覧の絞り込み（catapult の REST と同じ意味）
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartialFilter {
+    /// 関わるアカウント（外側の署名者、中のトランザクションの署名者、連署者、送金の宛先）
+    pub address: Option<Address>,
+    /// 外側の署名者
+    pub signer: Option<PublicKey>,
+}
+
+/// `/transactions/partial` のクエリ文字列
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialQuery {
+    address: Option<String>,
+    signer_public_key: Option<String>,
+    page_size: Option<usize>,
+    page_number: Option<usize>,
+}
+
+/// 一覧の1ページ（catapult の REST の `data` と `pagination`）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Page<T> {
+    data: Vec<T>,
+    pagination: Pagination,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Pagination {
+    page_number: usize,
+    page_size: usize,
 }
 
 /// API がノードに頼む口
@@ -308,6 +347,60 @@ fn transaction_hash(hash: &str) -> Option<Hash256> {
     Some(Hash256(bytes))
 }
 
+async fn partial_transaction(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(key) = transaction_hash(&hash) else {
+        return invalid("transactionId has an invalid format".to_owned());
+    };
+    found(&hash, api.node.reader.partial_transaction(&key))
+}
+
+/// 連署を待つものの一覧。ページの大きさは catapult と同じく 10 から 100（既定 10）、ページは 1 から
+async fn partial_transactions(
+    State(api): State<Api>,
+    Query(query): Query<PartialQuery>,
+) -> Response {
+    let network = api.node.reader.network();
+    let address = match query
+        .address
+        .as_deref()
+        .map(|id| account_address(id, network))
+    {
+        None => None,
+        Some(Some(address)) => Some(address),
+        Some(None) => return invalid("address has an invalid format".to_owned()),
+    };
+    let signer = match query
+        .signer_public_key
+        .as_deref()
+        .map(str::parse::<PublicKey>)
+    {
+        None => None,
+        Some(Ok(key)) => Some(key),
+        Some(Err(_)) => return invalid("signerPublicKey has an invalid format".to_owned()),
+    };
+    let page_size = query.page_size.unwrap_or(10).clamp(10, 100);
+    let page_number = query.page_number.unwrap_or(1).max(1);
+    match api
+        .node
+        .reader
+        .partial_transactions(&PartialFilter { address, signer })
+    {
+        Ok(all) => Json(Page {
+            data: all
+                .into_iter()
+                .skip((page_number - 1) * page_size)
+                .take(page_size)
+                .collect(),
+            pagination: Pagination {
+                page_number,
+                page_size,
+            },
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+    }
+}
+
 async fn transaction_fees(State(api): State<Api>) -> Response {
     found("transaction", api.node.reader.transaction_fees().map(Some))
 }
@@ -376,8 +469,11 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/transactions", put(announce).options(preflight))
         .route(
             "/transactions/partial",
-            put(announce_partial).options(preflight),
+            put(announce_partial)
+                .get(partial_transactions)
+                .options(preflight),
         )
+        .route("/transactions/partial/{hash}", get(partial_transaction))
         .route(
             "/transactions/cosignature",
             put(announce_cosignature).options(preflight),
@@ -594,6 +690,28 @@ mod tests {
             )
         }
 
+        fn partial_transaction(&self, _hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
+            Ok(None)
+        }
+
+        fn partial_transactions(
+            &self,
+            filter: &PartialFilter,
+        ) -> Result<Vec<TransactionInfo>, String> {
+            // 絞り込みが届いたことを、件数で返す（署名者を指定したら 0 件、宛先なら 25 件、なしなら 3 件）
+            let count = match (filter.signer, filter.address) {
+                (Some(_), _) => 0,
+                (None, Some(_)) => 25,
+                (None, None) => 3,
+            };
+            let info: TransactionInfo = serde_json::from_value(serde_json::json!({
+                "meta": {"height": "0"},
+                "transaction": {"signerPublicKey": "AA", "version": 1, "network": 152, "type": 16961}
+            }))
+            .unwrap();
+            Ok(vec![info; count])
+        }
+
         fn transaction_fees(&self) -> Result<TransactionFeesJson, String> {
             Ok(TransactionFeesJson::new(vec![10, 30], 10))
         }
@@ -670,6 +788,35 @@ mod tests {
         );
 
         assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+
+        // 連署を待つものの一覧は、絞り込みとページを読む
+        let (status, body) = get_status("/transactions/partial").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 3);
+        assert_eq!(body["pagination"]["pageSize"], 10);
+        let (_, body) = get_status(&format!(
+            "/transactions/partial?address={}&pageSize=20&pageNumber=2",
+            known()
+        ))
+        .await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 5);
+        assert_eq!(body["pagination"]["pageNumber"], 2);
+        let (_, body) = get_status(&format!(
+            "/transactions/partial?signerPublicKey={}",
+            "11".repeat(32)
+        ))
+        .await;
+        assert!(body["data"].as_array().unwrap().is_empty());
+        assert_eq!(
+            get_status("/transactions/partial?address=zzz").await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            get_status(&format!("/transactions/partial/{}", "AA".repeat(32)))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
 
         let (status, body) = get_status("/network/fees/transaction").await;
         assert_eq!(status, StatusCode::OK);

@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use heika_api::PartialFilter;
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
 use heika_core::address::Address;
@@ -28,7 +29,7 @@ use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta}
 use heika_state_transition::executor::persist::{decode_account_row, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
 use heika_store_redb::{Db, DbError};
-use heika_transaction::Transaction;
+use heika_transaction::{Body, Transaction};
 
 use crate::recent::SharedRecent;
 
@@ -93,6 +94,46 @@ impl DbReader {
             .and_then(|bytes| Transaction::from_bytes(bytes).ok())
             .filter(|transaction| transaction.hash(&self.seed) == *hash);
         Ok(transaction.map(|transaction| (transaction, height, index)))
+    }
+
+    /// 連署を待つものを、集まった連署を付けて REST の形にする。承認されていないので高さは "0"
+    fn partial_info(&self, hash: &Hash256) -> Option<TransactionInfo> {
+        let bytes = self.partials.lock().stitched(hash)?;
+        let transaction = Transaction::from_bytes(&bytes).ok()?;
+        Some(TransactionInfo {
+            meta: TransactionMeta {
+                height: Some("0".to_owned()),
+                hash: Some(hash.to_string()),
+                merkle_component_hash: Some(
+                    transaction.merkle_component_hash(&self.seed).to_string(),
+                ),
+                index: Some(0),
+                aggregate_hash: None,
+            },
+            transaction: TransactionJson::from(&transaction),
+        })
+    }
+
+    /// `transaction` に `address` が関わるか。外側の署名者、中のトランザクションの署名者、連署者、送金の宛先
+    fn involves(&self, transaction: &Transaction, address: &Address) -> bool {
+        let of = |key: &heika_core::key::PublicKey| Address::from_public_key(key, self.network);
+        if of(&transaction.signer_public_key) == *address {
+            return true;
+        }
+        let (Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) =
+            &transaction.body
+        else {
+            return false;
+        };
+        aggregate
+            .cosignatures()
+            .iter()
+            .any(|cosignature| of(&cosignature.signer_public_key) == *address)
+            || aggregate.transactions().iter().any(|inner| {
+                of(&inner.signer_public_key) == *address
+                    || matches!(&inner.body, Body::Transfer(transfer)
+                        if transfer.recipient_address().0 == address.0)
+            })
     }
 
     fn read_block(&self, height: u64) -> Result<Option<Block>, String> {
@@ -303,6 +344,30 @@ impl heika_api::Reader for DbReader {
         }
         let min_fee_multiplier = self.mempool.lock().min_fee_multiplier();
         Ok(TransactionFeesJson::new(multipliers, min_fee_multiplier))
+    }
+
+    fn partial_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
+        Ok(self.partial_info(hash))
+    }
+
+    fn partial_transactions(&self, filter: &PartialFilter) -> Result<Vec<TransactionInfo>, String> {
+        let hashes = self.partials.lock().hashes();
+        Ok(hashes
+            .iter()
+            .filter_map(|hash| {
+                let bytes = self.partials.lock().stitched(hash)?;
+                let transaction = Transaction::from_bytes(&bytes).ok()?;
+                let signer_ok = filter
+                    .signer
+                    .is_none_or(|signer| transaction.signer_public_key == signer);
+                let address_ok = filter
+                    .address
+                    .is_none_or(|address| self.involves(&transaction, &address));
+                (signer_ok && address_ok)
+                    .then(|| self.partial_info(hash))
+                    .flatten()
+            })
+            .collect())
     }
 
     fn network(&self) -> NetworkIdentifier {

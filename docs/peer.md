@@ -114,6 +114,7 @@ spec:
 | `/transactions/confirmed/{hash}` | 直近のブロックに入ったトランザクションと、入った高さ |
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |
 | `PUT /transactions/partial`、`PUT /transactions/cosignature` | 連署を待つアグリゲートボンデッドと、その連署（catapult の `CosignatureDTO`）を受け付ける。受け付けたら 202。ハッシュロックや連署できる人かは、そのあとノードで確かめる。連署を待っているものは、行方（`/transactionStatus`）で `partial` になる |
+| `/transactions/partial/{hash}`、`/transactions/partial` | 連署を待っているもの（集まった連署付き、高さは "0"）と、その一覧。一覧は `address`（外側の署名者、中のトランザクションの署名者、連署者、送金の宛先のどれか）と `signerPublicKey`（外側の署名者）で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る |
 | `PUT /transactions` | 署名したトランザクション（`{"payload":"16進"}`）を受け付けて、つないでいるピアに流す。catapult の REST と同じく、受け付けたら 202。heika は先にメモリプールで確かめるので、受け付けなかったら 409 で `message` にわけを返す |
 
 - トランザクションの行方は、トランザクションの期限（`maxTransactionLifetime`、メインネットで 6 時間）の分の直近のブロックだけから答える。送ったばかりのものは、その間に入るか二度と入らないかなので、送金のあとの確かめには足りる。索引はメモリにだけ持ち、起動したら直近のブロックを読んで作り直す（ライトの残し方でもブロックはその分ある）。それより古いトランザクションは 404

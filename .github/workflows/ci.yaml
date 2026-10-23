@@ -113,17 +113,51 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: examples/web-vanitygen
+          workspaces: |
+            examples/web-vanitygen
+            examples/sunboru-kusa
+            examples/sunboru-kusa/discover
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
       - run: cargo test --lib --locked
       - uses: ./.github/actions/trunk
       - run: trunk build --release --locked
+      - name: すんぼる草不可避を確かめる
+        working-directory: examples/sunboru-kusa
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo test --locked
+          cd discover
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      # 公開ノードの一覧は、リポジトリに入れずにここで作る。Secrets を読めない実行では一覧なしで作り、遊ぶ人が REST を入れる
+      - name: すんぼる草不可避に埋め込む公開ノードを探す
+        working-directory: examples/sunboru-kusa/discover
+        env:
+          KUSA_SEED_MAINNET: ${{ secrets.KUSA_SEED_MAINNET }}
+          KUSA_SEED_TESTNET: ${{ secrets.KUSA_SEED_TESTNET }}
+          KUSA_EXCLUDE: ${{ secrets.KUSA_EXCLUDE }}
+        run: |
+          if [ -z "$KUSA_SEED_MAINNET$KUSA_SEED_TESTNET" ]; then
+            echo "種のノードがないので、公開ノードの一覧なしで作ります"
+            exit 0
+          fi
+          cargo run --release --locked -- "$RUNNER_TEMP/nodes.json"
+          echo "KUSA_NODES=$RUNNER_TEMP/nodes.json" >> "$GITHUB_ENV"
+      - name: すんぼる草不可避をビルドする
+        working-directory: examples/sunboru-kusa
+        env:
+          KUSA_TARGET: ${{ vars.KUSA_TARGET }}
+          KUSA_MIN_XYM: ${{ vars.KUSA_MIN_XYM }}
+        run: trunk build --release --locked
       - name: サイトの形に並べる
         working-directory: .
         run: |
           mkdir -p site/examples
           cp -r examples/web-vanitygen/dist site/examples/web-vanitygen
+          cp -r examples/sunboru-kusa/dist site/examples/sunboru-kusa
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site

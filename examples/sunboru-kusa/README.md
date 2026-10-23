@@ -25,6 +25,6 @@ KUSA_NODES=/tmp/nodes.json KUSA_TARGET=N… KUSA_MIN_XYM=100 trunk build --relea
 - 遊ぶときは、アドレスの1文字目（N か T）で一覧を選び、いくつかのノードの確定した高さを比べて、いちばん進んだものを使う
 - `KUSA_MIN_XYM` は数える最低額で、小数は6桁まで。なければ 10。遊ぶ人もくわしい設定で変えられ、覚えておく数えたところは最低額ごとに分ける
 - `KUSA_NODES` も `KUSA_TARGET` もなければ、遊ぶ人が「くわしい設定」で REST と送り先を決める
-- GitHub Actions の `.github/workflows/kusa.yaml` を手で動かすと、同じことをして `dist` を Artifact に上げる
+- CI の examples のジョブでも同じことをして、リリースのときに Pages の `examples/sunboru-kusa/` に出る。公開ノードの一覧は、Secrets の `KUSA_SEED_MAINNET`、`KUSA_SEED_TESTNET`、`KUSA_EXCLUDE` があるときだけ作る。受け取り用のアドレスと最低額は、変数の `KUSA_TARGET`、`KUSA_MIN_XYM` で渡す
 
 `dist` を静的なファイルとして、どこにでも置ける。URL に `?me=…`（と、送り先や最低額を変えるなら `&to=…`、`&min=…`）を付けると、開いたときにその畑を見る。

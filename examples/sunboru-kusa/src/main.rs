@@ -21,9 +21,10 @@ const DEFAULT_TARGET: &str = match option_env!("KUSA_TARGET") {
     None => "",
 };
 /// 数える最低額（XYM）。ビルドするときに環境変数 `KUSA_MIN_XYM` で決める。遊ぶ人もくわしい設定で変えられる
+/// CI でリポジトリの変数がないときは空で渡ってくるので、空も「指定なし」とみなす
 const DEFAULT_MIN: &str = match option_env!("KUSA_MIN_XYM") {
-    Some(min) => min,
-    None => "10",
+    Some(min) if !min.is_empty() => min,
+    _ => "10",
 };
 /// ブラウザから読める公開ノードの一覧（`discover` で作り、ビルドするときに `KUSA_NODES` で渡す）。
 /// `{"mainnet": [URL…], "testnet": [URL…]}`。渡さなければ空で、遊ぶ人が REST を決める

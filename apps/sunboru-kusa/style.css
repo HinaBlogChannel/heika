@@ -74,3 +74,22 @@ input {
 }
 
 footer { margin-top: 32px; font-size: 0.85rem; color: var(--ink-soft); }
+
+.send {
+  margin: 0 auto 16px;
+  padding: 10px 12px;
+  max-width: 576px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.send .hint { margin: 0 0 6px; font-size: 0.9rem; }
+.address { display: flex; gap: 8px; align-items: center; }
+.address code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.address button { flex: none; padding: 4px 12px; }

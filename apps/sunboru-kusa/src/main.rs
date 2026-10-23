@@ -84,6 +84,14 @@ export async function share_png(svg, text, url) {
   download(blob);
   window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(url), '_blank', 'noopener');
 }
+export async function copy_text(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(catch)]
@@ -91,6 +99,7 @@ extern "C" {
     async fn sleep(ms: u32) -> JsValue;
     async fn save_png(svg: &str) -> JsValue;
     async fn share_png(svg: &str, text: &str, url: &str) -> JsValue;
+    async fn copy_text(text: &str) -> JsValue;
 }
 
 fn storage() -> Option<web_sys::Storage> {
@@ -447,12 +456,47 @@ fn App() -> impl IntoView {
         });
     };
 
+    let copied = RwSignal::new(false);
+    let copy = move |_| {
+        let text: String = target
+            .get_untracked()
+            .trim()
+            .chars()
+            .filter(|c| *c != '-')
+            .collect();
+        spawn_local(async move {
+            if copy_text(&text).await.as_bool() == Some(true) {
+                copied.set(true);
+                sleep(2000).await;
+                copied.set(false);
+            }
+        });
+    };
+    let min_label = move || {
+        rest::parse_xym(&min.get())
+            .map(rest::format_xym)
+            .unwrap_or_else(|| min.get())
+    };
+
     view! {
         <main>
             <header>
                 <h1>"すんぼる草不可避"</h1>
                 <p class="tagline">"送金で生えます"</p>
             </header>
+            <section class="send">
+                {move || if target.with(|t| t.trim().is_empty()) {
+                    view! { <p class="hint">"送り先が決まっていません。くわしい設定で、送り先のアドレスを入れてください"</p> }.into_any()
+                } else {
+                    view! {
+                        <p class="hint">{move || format!("ここへ {} XYM 以上を送るたびに、1つ生えます", min_label())}</p>
+                        <div class="address">
+                            <code>{move || target.get().trim().to_owned()}</code>
+                            <button type="button" on:click=copy>{move || if copied.get() { "コピーしました" } else { "コピー" }}</button>
+                        </div>
+                    }.into_any()
+                }}
+            </section>
             <section class="field" inner_html=move || plants.with(|p| field::svg(p, false))></section>
             <p class="count">{move || if plants.with(Vec::is_empty) { String::new() } else { format!("{} 本 ・ {}", count(), plants.with(|p| tally(p))) }}</p>
             <p class="status">{move || status.get()}</p>
@@ -481,7 +525,7 @@ fn App() -> impl IntoView {
             <footer>
                 <p>{move || format!(
                     "自分のアドレスから送り先へ {} XYM 以上を送るたびに、畑に何かが1つ生えます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。",
-                    rest::parse_xym(&min.get()).map(rest::format_xym).unwrap_or_else(|| min.get()),
+                    min_label(),
                 )}</p>
                 <p>"払う義務はありません。送り先は自由に変えられて、テストネットや自分のプライベートネットでも遊べます。鍵は使わず、REST から送金の履歴を読むだけです。"</p>
                 <p>"シェアする画像と文には、アドレスを入れません。"</p>

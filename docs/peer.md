@@ -104,6 +104,7 @@ spec:
 | `/node/peers` | 知っているピア（ピアの名簿の問い合わせに答えるものと同じ）。GUI のノードは、ここから最初のつなぎ先を選ぶ |
 | `/chain/info` | 高さ、スコア、確定したブロック |
 | `/node/unlockedaccount` | 引き受けて、ハーベストしている委任のリモートの鍵 |
+| `/heika/sourcecode.zip` | このノードのソース（`heika legal source` と同じ、バイナリに入れた ZIP）。手を入れてビルドしたなら、そのソースが返る。AGPL-3.0 の 13 条のため。ソースの入っていないバイナリなら 404 |
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |
 | `/accounts/{accountId}` | アカウントの今の状態。ID はアドレス（Base32 か16進）か公開鍵 |
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |

@@ -27,7 +27,8 @@ const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD-PARTY-LICENSES");
     unsafe(link_section = "__TEXT,__heika_source")
 )]
 #[cfg_attr(windows, unsafe(link_section = ".hksrc"))]
-static SOURCE: [u8; SOURCE_LEN] = *include_bytes!(concat!(env!("OUT_DIR"), "/source.zip"));
+pub(crate) static SOURCE: [u8; SOURCE_LEN] =
+    *include_bytes!(concat!(env!("OUT_DIR"), "/source.zip"));
 const SOURCE_LEN: usize = include_bytes!(concat!(env!("OUT_DIR"), "/source.zip")).len();
 /// SOURCE をどのコミットから作ったか
 const SOURCE_DESCRIPTION: &str = env!("HEIKA_SOURCE_DESCRIPTION");

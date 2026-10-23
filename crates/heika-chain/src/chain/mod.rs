@@ -281,6 +281,8 @@ pub enum Notice {
         peer: PeerId,
         checkpoints: usize,
         rows: Option<u64>,
+        /// 刈り込みに消し残しがあり、次の確定で続きを消す
+        remaining: bool,
     },
     /// 抜けていたか、途中のポイントのままだった前のエポックの証明をしまった
     EarlierProof {
@@ -373,6 +375,7 @@ impl fmt::Display for Notice {
                 peer,
                 checkpoints,
                 rows,
+                remaining,
             } => {
                 write!(
                     f,
@@ -381,6 +384,9 @@ impl fmt::Display for Notice {
                 )?;
                 if let Some(rows) = rows {
                     write!(f, "、消した差分 {rows} 行")?;
+                }
+                if *remaining {
+                    write!(f, "、残りは次の確定で消します")?;
                 }
                 write!(f, "）")
             }
@@ -930,6 +936,7 @@ mod tests {
             peer: PeerId(2),
             checkpoints: 0,
             rows,
+            remaining: false,
         };
         assert_eq!(
             finalized(Some(524)).to_string(),

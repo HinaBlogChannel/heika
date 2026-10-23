@@ -134,6 +134,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             peer,
             checkpoints: pruned.checkpoints,
             rows: self.keep.map(|_| pruned.rows),
+            remaining: pruned.remaining,
         });
         Ok(())
     }

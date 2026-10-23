@@ -1036,6 +1036,17 @@ impl Db {
     /// 高さ `through` 以下のブロックとステートメント、エポック `before_epoch` より前のファイナライズの証明を消す。
     /// 状態と巻き戻しに要るもの（差分、チェックポイント、投票者）は消さない。消した行の数
     pub fn prune_history(&self, through: u64, before_epoch: u32) -> Result<u64, DbError> {
+        self.prune_history_while(through, before_epoch, || true)
+            .map(|pruned| pruned.rows)
+    }
+
+    /// [`Db::prune_history`] を、まとまりごとのコミットのあとで `keep_going` が偽を返したら止める。もう一度呼べば続きを消す
+    pub fn prune_history_while(
+        &self,
+        through: u64,
+        before_epoch: u32,
+        mut keep_going: impl FnMut() -> bool,
+    ) -> Result<Pruned, DbError> {
         let Handle::Write(database) = &self.handle else {
             return Err(DbError::ReadOnly);
         };
@@ -1046,8 +1057,8 @@ impl Db {
                 prune_history_in(&transaction, through, before_epoch, HISTORY_CHUNK)?;
             transaction.commit().map_err(db_error)?;
             rows += pruned;
-            if done {
-                return Ok(rows);
+            if done || !keep_going() {
+                return Ok(Pruned { rows, done });
             }
         }
     }

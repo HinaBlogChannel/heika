@@ -1,0 +1,8 @@
+[build]
+# どこに置いても動くように、パスは相対にする
+public_url = "./"
+
+[tools]
+# wasm-bindgen は Cargo.lock の版に合わせる
+wasm_bindgen = "0.2.129"
+wasm_opt = "version_133"

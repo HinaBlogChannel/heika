@@ -1,0 +1,75 @@
+/*
+ * ゆるい畑。ドット絵がくっきり見えるように、絵は整数倍で拡大する。
+ * 外のフォントは読まない。
+ */
+:root {
+  color-scheme: light;
+  --paper: #fbf8f1;
+  --ink: #3b3226;
+  --ink-soft: #7a6c5a;
+  --soil: #7b5d52;
+  --leaf: #2e7d32;
+  --line: rgba(59, 50, 38, 0.18);
+  --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.6;
+}
+
+main {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+header { text-align: center; }
+h1 { margin: 0; font-size: 1.6rem; letter-spacing: 0.04em; }
+.tagline { margin: 4px 0 16px; color: var(--leaf); font-weight: bold; }
+
+.field {
+  width: min(100%, 576px);
+  margin: 0 auto;
+  aspect-ratio: 192 / 196;
+  image-rendering: pixelated;
+  border: 1px solid var(--line);
+}
+.field svg { display: block; width: 100%; height: 100%; }
+
+.count { text-align: center; margin: 8px 0 0; }
+.status { text-align: center; min-height: 1.6em; margin: 4px 0; color: var(--ink-soft); }
+
+.buttons { display: flex; gap: 8px; justify-content: center; margin: 8px 0 24px; }
+
+button {
+  font: inherit;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink);
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--leaf); border-color: var(--leaf); color: white; }
+
+form { display: grid; gap: 12px; }
+label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--ink-soft); }
+input {
+  font: inherit;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+footer { margin-top: 32px; font-size: 0.85rem; color: var(--ink-soft); }

@@ -145,6 +145,11 @@ impl Mempool {
         self.entries.contains_key(hash)
     }
 
+    /// 持っていれば、その期限（Nemesis からのミリ秒）
+    pub fn deadline(&self, hash: &Hash256) -> Option<u64> {
+        self.entries.get(hash).map(|entry| entry.deadline)
+    }
+
     /// 署名したトランザクション `bytes` を、今（Nemesis からのミリ秒 `now`）、高さ `height` のブロックに入れる
     /// つもりで受け付ける。いっぱいなら、手数料の倍率がこれより低いものを追い出して空ける。受け付けたらハッシュを返す
     pub fn add(&mut self, bytes: Vec<u8>, now: u64, height: u64) -> Result<Hash256, Rejected> {

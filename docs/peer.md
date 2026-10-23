@@ -95,7 +95,7 @@ spec:
 
 ## REST
 
-`rest` を書くと、ノードと同じプロセスで REST の口を立てる。catapult の REST のうち、ウォレットが委任に使う口、トランザクションを送る口、heika のウォレットが残高を確かめるのに使う口に同じ形で答え、heika だけの口も足す。`heika account show --rest` をこのノードに向ければ、残高を状態の木の根まで確かめられる。どこのページからでも読めるように、CORS は開けてある。
+`rest` を書くと、ノードと同じプロセスで REST の口を立てる。catapult の REST のうち、ウォレットが委任に使う口、トランザクションを送る口、heika のウォレットが残高と送金を確かめるのに使う口に同じ形で答え、heika だけの口も足す。`heika account show --rest` をこのノードに向ければ、残高を状態の木の根まで確かめられる。どこのページからでも読めるように、CORS は開けてある。
 
 | 口 | 返すもの |
 |---|---|
@@ -107,8 +107,12 @@ spec:
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
 | `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
+| `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロックに入っていれば `confirmed` と高さ |
+| `/transactions/confirmed/{hash}` | 直近のブロックに入ったトランザクションと、入った高さ |
+| `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |
 | `PUT /transactions` | 署名したトランザクション（`{"payload":"16進"}`）を受け付けて、つないでいるピアに流す。catapult の REST と同じく、受け付けたら 202。heika は先にメモリプールで確かめるので、受け付けなかったら 409 で `message` にわけを返す |
 
+- トランザクションの行方は、トランザクションの期限（`maxTransactionLifetime`、メインネットで 6 時間）の分の直近のブロックだけから答える。送ったばかりのものは、その間に入るか二度と入らないかなので、送金のあとの確かめには足りる。索引はメモリにだけ持ち、起動したら直近のブロックを読んで作り直す（ライトの残し方でもブロックはその分ある）。それより古いトランザクションは 404
 - 話すのは HTTP だけ。HTTPS で外に出すなら、手前に Nginx や Caddy を置き、そこで TLS を終わらせる
 
 ## GUI

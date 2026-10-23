@@ -15,16 +15,16 @@ heika-node = { path = "../heika-node" }
 clap = { version = "4.6.7", features = ["derive"] }
 der = "0.8.2"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
-heika-block = { version = "0.9.0", path = "../heika-block" }
-heika-cert = { version = "0.9.0", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
-heika-core = { version = "0.9.0", path = "../heika-core" }
-heika-harvesting = { version = "0.9.0", path = "../heika-harvesting" }
-heika-peer-protocol = { version = "0.9.0", path = "../heika-peer-protocol" }
-heika-packet = { version = "0.9.0", path = "../heika-packet" }
-heika-rest = { version = "0.9.0", path = "../heika-rest" }
-heika-tls = { version = "0.9.0", path = "../heika-tls" }
-heika-transaction = { version = "0.9.0", path = "../heika-transaction" }
-heika-wallet = { version = "0.9.0", path = "../heika-wallet" }
+heika-block = { version = "0.10.0", path = "../heika-block" }
+heika-cert = { version = "0.10.0", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
+heika-core = { version = "0.10.0", path = "../heika-core" }
+heika-harvesting = { version = "0.10.0", path = "../heika-harvesting" }
+heika-peer-protocol = { version = "0.10.0", path = "../heika-peer-protocol" }
+heika-packet = { version = "0.10.0", path = "../heika-packet" }
+heika-rest = { version = "0.10.0", path = "../heika-rest" }
+heika-tls = { version = "0.10.0", path = "../heika-tls" }
+heika-transaction = { version = "0.10.0", path = "../heika-transaction" }
+heika-wallet = { version = "0.10.0", path = "../heika-wallet" }
 rand_core = "0.10.1"
 # REST に HTTPS でつなぐ。ルート証明書は、同梱の一覧ではなく OS のものを使う
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }

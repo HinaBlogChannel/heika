@@ -13,8 +13,16 @@ use leptos::task::spawn_local;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 
-/// 公開するときに、作者の受け取り用の新しいアドレスを入れる。空なら、遊ぶ人が自分で決める
-const DEFAULT_TARGET: &str = "";
+/// 作者の受け取り用のアドレス。ビルドするときに環境変数 `KUSA_TARGET` で入れる。なければ、遊ぶ人が自分で決める
+const DEFAULT_TARGET: &str = match option_env!("KUSA_TARGET") {
+    Some(target) => target,
+    None => "",
+};
+/// ブラウザから読める公開ノードの一覧（`discover` で作り、ビルドするときに `KUSA_NODES` で渡す）。
+/// `{"mainnet": [URL…], "testnet": [URL…]}`。渡さなければ空で、遊ぶ人が REST を決める
+const NODES: &str = include_str!(concat!(env!("OUT_DIR"), "/nodes.json"));
+/// 公開ノードから選ぶときに、確定した高さを比べる数
+const CANDIDATES: usize = 3;
 /// キャッシュの形や生え方を変えたら上げる。古いキャッシュは使わない
 const RULES: u32 = 1;
 /// 1ページに取る件数
@@ -22,7 +30,7 @@ const PAGE_SIZE: u32 = 100;
 
 #[wasm_bindgen(inline_js = r#"
 export async function fetch_text(url) {
-  const response = await fetch(url, { headers: { accept: 'application/json' } });
+  const response = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return await response.text();
@@ -152,16 +160,69 @@ struct Loaded {
     message: Option<String>,
 }
 
-async fn load(rest_url: &str, target: &str, player: &str) -> Result<Loaded, String> {
-    let rest_url = rest_url.trim().trim_end_matches('/');
-    if rest_url.is_empty() {
-        return Err("REST の URL を入れてください".into());
+/// 埋め込んだ一覧から、そのネットワークのノードをいくつか選び、確定した高さがいちばん進んだものを使う。
+/// 1か所が止まっていたり遅れていたりしても困らないようにする
+async fn pick_node(network: u8) -> Result<String, String> {
+    let name = match network {
+        0x68 => "mainnet",
+        0x98 => "testnet",
+        _ => return Err(
+            "このネットワークの公開ノードは知りません。くわしい設定で REST の URL を入れてください"
+                .into(),
+        ),
+    };
+    let nodes: Value = serde_json::from_str(NODES).unwrap_or(Value::Null);
+    let mut urls: Vec<String> = nodes[name]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u.as_str().map(str::to_owned))
+        .collect();
+    if urls.is_empty() {
+        return Err(
+            "公開ノードの一覧がありません。くわしい設定で REST の URL を入れてください".into(),
+        );
     }
+    // 毎回ちがうノードに分散させる
+    for index in (1..urls.len()).rev() {
+        let other = (js_sys::Math::random() * (index + 1) as f64) as usize;
+        urls.swap(index, other.min(index));
+    }
+    let mut best: Option<(u64, String)> = None;
+    let mut answered = 0;
+    // 答えたノードが CANDIDATES に届くか、試すのが多くなりすぎたらやめる
+    for url in urls.into_iter().take(CANDIDATES * 3) {
+        if answered >= CANDIDATES {
+            break;
+        }
+        if let Ok(Some(info)) = get(&format!("{url}/chain/info")).await
+            && let Some(height) = rest::finalized_height(&info)
+        {
+            answered += 1;
+            if best.as_ref().is_none_or(|(best, _)| height > *best) {
+                best = Some((height, url));
+            }
+        }
+    }
+    best.map(|(_, url)| url).ok_or_else(|| {
+        "公開ノードにつながりません。少し待つか、くわしい設定で REST の URL を入れてください".into()
+    })
+}
+
+async fn load(rest_url: &str, target: &str, player: &str) -> Result<Loaded, String> {
     let target = parse_address(target, "送り先")?;
     let player = parse_address(player, "自分のアドレス")?;
     if target.network() != player.network() {
         return Err("送り先と自分のアドレスのネットワークが違います".into());
     }
+    let chosen;
+    let rest_url = match rest_url.trim().trim_end_matches('/') {
+        "" => {
+            chosen = pick_node(player.network().0).await?;
+            chosen.as_str()
+        }
+        given => given,
+    };
     let properties = get(&format!("{rest_url}/network/properties"))
         .await?
         .ok_or("ネットワークの設定が見つかりません")?;
@@ -260,6 +321,8 @@ fn tally(plants: &[Plant]) -> String {
             None => counts.push((plant.kind, 1)),
         }
     }
+    // 草の仲間から順に、いつも同じ並びで出す
+    counts.sort_by_key(|(kind, _)| *kind as u8);
     counts
         .iter()
         .map(|(kind, count)| format!("{} {count}", kind.name()))
@@ -343,11 +406,8 @@ fn App() -> impl IntoView {
         });
     };
 
-    // URL に3つともそろっていれば、すぐに畑を見る（自分のブックマーク用）
-    if ["rest", "to", "me"]
-        .iter()
-        .all(|name| query(name).is_some())
-    {
+    // URL に自分のアドレスがあって、送り先も決まっていれば、すぐに畑を見る（自分のブックマーク用）
+    if query("me").is_some() && !target.get_untracked().trim().is_empty() {
         look(());
     }
 
@@ -389,13 +449,16 @@ fn App() -> impl IntoView {
                 <label>"自分のアドレス"
                     <input prop:value=move || player.get() on:input=move |e| player.set(event_target_value(&e)) placeholder="N… または T…" spellcheck="false"/>
                 </label>
-                <label>"送り先のアドレス"
-                    <input prop:value=move || target.get() on:input=move |e| target.set(event_target_value(&e)) placeholder="N… または T…" spellcheck="false"/>
-                </label>
-                <label>"REST の URL"
-                    <input prop:value=move || rest_url.get() on:input=move |e| rest_url.set(event_target_value(&e)) placeholder="https://…:3001" spellcheck="false"/>
-                </label>
                 <button class="primary" type="submit" disabled=move || busy.get()>"畑を見る"</button>
+                <details>
+                    <summary>"くわしい設定"</summary>
+                    <label>"送り先のアドレス"
+                        <input prop:value=move || target.get() on:input=move |e| target.set(event_target_value(&e)) placeholder="N… または T…" spellcheck="false"/>
+                    </label>
+                    <label>"REST の URL（空なら公開ノードから選びます）"
+                        <input prop:value=move || rest_url.get() on:input=move |e| rest_url.set(event_target_value(&e)) placeholder="https://…:3001" spellcheck="false"/>
+                    </label>
+                </details>
             </form>
             <footer>
                 <p>"自分のアドレスから送り先へ 1 XYM 以上を送るたびに、畑に何かが1つ生えます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。"</p>

@@ -14,7 +14,15 @@
 ## ビルド
 
 ```sh
-trunk build --release
+# ブラウザから読める公開ノード（HTTPS で CORS が開いているもの）を、種のノードから全部辿って探す
+(cd discover && KUSA_SEED_MAINNET=https://… KUSA_SEED_TESTNET=https://… KUSA_EXCLUDE=自分のホスト,… cargo run --release -- /tmp/nodes.json)
+# 一覧と、作者の受け取り用のアドレスを埋め込んで作る
+KUSA_NODES=/tmp/nodes.json KUSA_TARGET=N… trunk build --release
 ```
 
-`dist` を静的なファイルとして、どこにでも置けます。URL に `?rest=…&to=…&me=…` を付けると、開いたときにその畑を見ます。
+- 公開ノードの一覧はリポジトリに入れず、ビルドするたびに作る。種のノードと `KUSA_EXCLUDE` のホストには問い合わせず、一覧にも入れない
+- 遊ぶときは、アドレスの1文字目（N か T）で一覧を選び、いくつかのノードの確定した高さを比べて、いちばん進んだものを使う
+- `KUSA_NODES` も `KUSA_TARGET` もなければ、遊ぶ人が「くわしい設定」で REST と送り先を決める
+- GitHub Actions の `.github/workflows/kusa.yaml` を手で動かすと、同じことをして `dist` を Artifact に上げる
+
+`dist` を静的なファイルとして、どこにでも置ける。URL に `?me=…`（と、送り先を変えるなら `&to=…`）を付けると、開いたときにその畑を見る。

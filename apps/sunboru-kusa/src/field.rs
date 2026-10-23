@@ -11,6 +11,12 @@ const SKY: u32 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Grass,
+    Susuki,
+    Foxtail,
+    Clover,
+    Fern,
+    Moss,
+    Horsetail,
     Birch,
     Yakusugi,
     Hinoki,
@@ -27,6 +33,12 @@ impl Kind {
     pub fn name(self) -> &'static str {
         match self {
             Kind::Grass => "草",
+            Kind::Susuki => "ススキ",
+            Kind::Foxtail => "ねこじゃらし",
+            Kind::Clover => "クローバー",
+            Kind::Fern => "シダ",
+            Kind::Moss => "コケ",
+            Kind::Horsetail => "つくし",
             Kind::Birch => "白樺",
             Kind::Yakusugi => "屋久杉",
             Kind::Hinoki => "ヒノキ",
@@ -40,10 +52,16 @@ impl Kind {
         }
     }
 
-    /// 種の1バイトで選ぶ。草が多めで、あとはだいたい同じくらい
+    /// 種の1バイトで選ぶ。草不可避なので草の仲間が半分を超え、あとはだいたい同じくらい
     fn choose(byte: u8) -> Self {
-        const TABLE: [(Kind, u16); 11] = [
-            (Kind::Grass, 140),
+        const TABLE: [(Kind, u16); 17] = [
+            (Kind::Grass, 50),
+            (Kind::Susuki, 15),
+            (Kind::Foxtail, 15),
+            (Kind::Clover, 15),
+            (Kind::Fern, 15),
+            (Kind::Moss, 15),
+            (Kind::Horsetail, 15),
             (Kind::Birch, 12),
             (Kind::Yakusugi, 10),
             (Kind::Hinoki, 12),
@@ -74,6 +92,71 @@ impl Kind {
                 "..gG.gG.g.gG.gG.",
                 ".gGg.gGggGgGgGg.",
                 ".gGgGgGgGgGgGgG.",
+            ],
+            Kind::Susuki => &[
+                "..e.....e...e...",
+                "..ee...ee..ee...",
+                "...e...e...e....",
+                "...ee.ee..ee....",
+                "....g.g...g.....",
+                "....g.g..g......",
+                "....gg.g.g......",
+                ".....g.gg.......",
+                "...g.gggg.g.....",
+                "....gggggg......",
+            ],
+            Kind::Foxtail => &[
+                "....ll......ll..",
+                "...llll....lll..",
+                "...lll....lll...",
+                "....g....g......",
+                "....g...g.......",
+                ".....g.g...ll...",
+                ".....g.g..lll...",
+                "......gg.g......",
+                "......ggg.......",
+                ".....ggggg......",
+            ],
+            Kind::Clover => &[
+                "..........w.....",
+                ".........www....",
+                ".GG.GG....w.....",
+                "GGGGGGG...g.....",
+                ".GGgGG....g.GG..",
+                "..GGG.....gGGGG.",
+                "...g.....g..GG..",
+                "...g....g...g...",
+                "....g..g...g....",
+                ".....gg..gg.....",
+            ],
+            Kind::Fern => &[
+                "..........g.....",
+                ".........gGg....",
+                "........gGgGg...",
+                "...g...gGg.Gg...",
+                "..gGg.gGg...g...",
+                ".gGgGgGg........",
+                "..gGgGg.........",
+                "...gGg..........",
+                "....gg..........",
+                ".....gg.........",
+            ],
+            Kind::Moss => &[
+                "....llll........",
+                "..llGlllGl..ll..",
+                ".lGllllGlllllGl.",
+                "llllGllllGllllll",
+            ],
+            Kind::Horsetail => &[
+                "..t.......t.....",
+                ".ttt.....ttt....",
+                ".ttt.....ttt....",
+                "..t...t...t.....",
+                "..T..ttt..T.....",
+                "..t..ttt..t.....",
+                "..T...t...T.....",
+                "..t...T...t.....",
+                "..t...t...t.....",
             ],
             Kind::Birch => &[
                 ".....GGlGG......",
@@ -232,6 +315,9 @@ fn color(code: u8) -> Option<&'static str> {
         b'p' => "#f8bbd0",
         b'c' => "#43a047",
         b'm' => "#e53935",
+        b'e' => "#e8dcc0",
+        b't' => "#c8a165",
+        b'T' => "#8d6e3f",
         _ => return None,
     })
 }
@@ -339,8 +425,14 @@ pub fn svg(plants: &[Plant]) -> String {
 mod tests {
     use super::*;
 
-    const ALL: [Kind; 11] = [
+    const ALL: [Kind; 17] = [
         Kind::Grass,
+        Kind::Susuki,
+        Kind::Foxtail,
+        Kind::Clover,
+        Kind::Fern,
+        Kind::Moss,
+        Kind::Horsetail,
         Kind::Birch,
         Kind::Yakusugi,
         Kind::Hinoki,
@@ -381,7 +473,7 @@ mod tests {
         for kind in ALL {
             assert!(chosen.contains(&kind), "{} が出ない", kind.name());
         }
-        assert_eq!(chosen.iter().filter(|k| **k == Kind::Grass).count(), 140);
+        assert_eq!(chosen.iter().filter(|k| **k == Kind::Grass).count(), 50);
     }
 
     #[test]

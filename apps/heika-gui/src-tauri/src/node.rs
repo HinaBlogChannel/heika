@@ -12,6 +12,7 @@
 //! 設定ファイル（YAML）は使う人には見せずに、ここで書く。ネットワークとシードは、設定した REST の
 //! `/node/info`（そのノードを最初のつなぎ先にする）と `/node/peers`（つながらなければ代わりに使う）から決める。
 //! ノードの鍵と証明書は、最初に起動したときに作って使い続ける。待ち受けるのは、この PC の中（127.0.0.1:7900）だけ。
+//! REST も、この PC の中（[`rest::OWN_REST`]）だけで立て、設定で選べば、ウォレットが残高や送金をそこで確かめる。
 //!
 //! ノードの出力は、設定ファイルの隣の `node.log` に書かせ、それを読んで進み具合を出す。デスクトップで管に
 //! すると、親が落ちたときに子が書けなくなって（EPIPE）、止める合図より先に落ちてしまう。Android では、
@@ -466,12 +467,13 @@ fn manifest(
     format!(
         "apiVersion: {api}\nkind: Peer\nmetadata:\n  name: heika-gui\nspec:\n  network:\n    type: {network}\n  \
          dataDirectory: {data}\n  certificates:\n    directory: {certificates}\n  seed: {seed}\n  \
-         listen:\n    address: {listen}\n  storage:\n    mode: {mode}\n",
+         listen:\n    address: {listen}\n  storage:\n    mode: {mode}\n  rest:\n    - address: {rest}\n",
         api = heika_node::config::API_VERSION,
         data = path(&directory.join("data")),
         certificates = path(certificates),
         seed = quote(&format!("{host}:{}", seed.1)),
         listen = quote(LISTEN),
+        rest = quote(rest::OWN_REST),
         mode = mode.as_str(),
     )
 }
@@ -721,5 +723,6 @@ mod tests {
         assert_eq!(manifest.spec.seed.as_deref(), Some("node.example:7900"));
         assert_eq!(manifest.spec.network.resources, None);
         assert_eq!(manifest.spec.listen.unwrap().address, LISTEN);
+        assert_eq!(manifest.spec.rest[0].address, rest::OWN_REST);
     }
 }

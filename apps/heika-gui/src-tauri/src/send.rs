@@ -92,7 +92,7 @@ async fn fee_multipliers_of(client: &Client) -> Result<FeeMultipliers, String> {
 /// 設定した REST のノードの、手数料の倍率の様子。画面で、受け付けない速さを選べなくするのに使う
 #[tauri::command]
 pub async fn fee_multipliers(config: tauri::State<'_, Config>) -> Result<FeeMultipliers, String> {
-    let client = config.client().map_err(|failure| failure.detail)?;
+    let client = config.wallet_client().map_err(|failure| failure.detail)?;
     fee_multipliers_of(&client).await
 }
 
@@ -176,7 +176,7 @@ pub fn prepare_send(
     speed: Speed,
     custom_multiplier: Option<u32>,
 ) -> Result<DraftView, String> {
-    let client = config.client().map_err(|failure| failure.detail)?;
+    let client = config.wallet_client().map_err(|failure| failure.detail)?;
     let from: Address = from.parse().map_err(|error| format!("{error}"))?;
     let (label, signer) = crate::find_account(&wallet.lock(), &from)?;
     let network = NetworkParameters::from_identifier(from.network())
@@ -277,7 +277,7 @@ pub async fn send(
     config: tauri::State<'_, Config>,
     outbox: tauri::State<'_, Outbox>,
 ) -> Result<String, String> {
-    let client = config.client().map_err(|failure| failure.detail)?;
+    let client = config.wallet_client().map_err(|failure| failure.detail)?;
     let Draft {
         label,
         mut transaction,

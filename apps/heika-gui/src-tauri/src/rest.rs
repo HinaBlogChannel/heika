@@ -25,12 +25,22 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// 根が合わなかったときに、取り直すまでにおく間。REST の DB がノードに追いつくのを待つ
 const RETRY_PAUSE: Duration = Duration::from_secs(3);
 
+/// 自分のノード（ノードのタブで動かすもの）の REST が待ち受けるアドレス。ノードの設定ファイルにも書く
+pub const OWN_REST: &str = "127.0.0.1:7910";
+/// 自分のノードの REST のオリジン
+const OWN_ORIGIN: &str = "http://127.0.0.1:7910";
+/// 自分のノードの REST が待ち受けているかを確かめるのに待つ長さ。同じマシンの中なので短くてよい
+const OWN_PROBE: Duration = Duration::from_millis(300);
+
 /// 覚えておく設定。秘密は入れない。前の版で書いたファイルに項目がなくても読めるようにする
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// 残高を問い合わせる REST のオリジン（`https://ホスト:3001`）
+    /// 残高を問い合わせる REST のオリジン（`https://ホスト:3001`）。自分のノードを起動するときも、ここから
+    /// ネットワークと最初のつなぎ先を決める
     pub rest: Option<String>,
+    /// 自分のノードが先端を追っているあいだは、残高や送金をそのノードで確かめる
+    pub use_own_node: bool,
     /// 金額を隠す（人前で開くとき）
     pub hide_amounts: bool,
     /// ホームに出すアカウントの、キーストアの中での位置。最後に選んだもの。
@@ -68,7 +78,16 @@ impl Config {
         config
     }
 
-    /// 問い合わせる REST。決めていなければエラー
+    /// 残高、送金、ハーベストで問い合わせる REST。自分のノードを使う設定で、その REST が待ち受けていれば
+    /// （先端を追う段階に入っていれば）自分のノード。そうでなければ、設定した REST
+    pub fn wallet_client(&self) -> Result<Client, Failure> {
+        if self.get().use_own_node && own_rest_listening() {
+            return Ok(Client::new(OWN_ORIGIN));
+        }
+        self.client()
+    }
+
+    /// 設定した REST。決めていなければエラー。自分のノードを起動するときは、こちらを使う
     pub fn client(&self) -> Result<Client, Failure> {
         self.get()
             .rest
@@ -226,13 +245,20 @@ impl From<BalanceError<String>> for Failure {
     }
 }
 
-/// `address` の残高を、設定した REST から取って確かめる
+/// 自分のノードの REST が待ち受けているか。ノードは先端を追い始めてから REST を立てる
+fn own_rest_listening() -> bool {
+    OWN_REST
+        .parse()
+        .is_ok_and(|address| std::net::TcpStream::connect_timeout(&address, OWN_PROBE).is_ok())
+}
+
+/// `address` の残高を、設定した REST か自分のノードから取って確かめる
 #[tauri::command]
 pub async fn balance(
     config: tauri::State<'_, Config>,
     address: String,
 ) -> Result<BalanceView, Failure> {
-    let client = config.client()?;
+    let client = config.wallet_client()?;
     let address: Address = address
         .trim()
         .parse()

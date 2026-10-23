@@ -112,6 +112,8 @@ struct SettingsArgs {
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Settings {
     rest: Option<String>,
+    /// 自分のノードが先端を追っているあいだは、そこで確かめる
+    use_own_node: bool,
     hide_amounts: bool,
     account_index: Option<usize>,
 }
@@ -556,6 +558,18 @@ fn menu(ctx: Ctx) -> impl IntoView {
 }
 
 // メニューのアイコン。24 の枠に、線だけで描く
+/// 自分のノード（ノードのタブで動かすもの）の REST。本体の `rest::OWN_REST` と同じ
+const OWN_ORIGIN: &str = "http://127.0.0.1:7910";
+
+/// 問い合わせた REST の、画面での名前
+fn rest_label(rest: &str) -> String {
+    if rest == OWN_ORIGIN {
+        "自分のノード".to_owned()
+    } else {
+        rest.to_owned()
+    }
+}
+
 const ICON_HOME: &str = "M4 11 12 4l8 7M6 9.5V20h12V9.5M10 20v-5h4v5";
 const ICON_SEND: &str = "M4 12 20 4l-4 16-4-7-8-1zM12 13l8-9";
 const ICON_ACCOUNTS: &str = "M5 6h14v12H5zM5 10h14M8 14h4";
@@ -1109,13 +1123,7 @@ fn send_view(ctx: Ctx) -> impl IntoView {
         })
         .collect_view();
     let custom_low = move || {
-        form.speed.get() == "custom"
-            && form
-                .custom
-                .get()
-                .trim()
-                .parse::<u32>()
-                .is_ok_and(rejected)
+        form.speed.get() == "custom" && form.custom.get().trim().parse::<u32>().is_ok_and(rejected)
     };
     view! {
         <div class="row heading">
@@ -1209,7 +1217,7 @@ fn approve(ctx: Ctx, draft: DraftView) -> impl IntoView {
             <dt>"期限"</dt>
             <dd>{format!("{} まで", Date::new(draft.deadline).to_locale_string("ja-JP"))}</dd>
             <dt>"渡す REST"</dt>
-            <dd>{draft.rest.clone()}</dd>
+            <dd>{rest_label(&draft.rest)}</dd>
         </dl>
         {(!draft.message.is_empty()).then(|| view! {
             <p class="label">"メッセージ（暗号化しません。誰でも読めます）"</p>
@@ -1357,7 +1365,11 @@ fn verified(balance: BalanceView, hidden: bool) -> impl IntoView {
                 </ul>
                 <p class="label">"信じていること"</p>
                 <ul class="notes">
-                    <li>{format!("このブロックが正しいチェーンのものであること。そこは {} を信じています", balance.rest)}</li>
+                    <li>{if balance.rest == OWN_ORIGIN {
+                        "このブロックが正しいチェーンのものであること。そこは、ブロックを全部確かめてきた自分のノードを信じています".to_owned()
+                    } else {
+                        format!("このブロックが正しいチェーンのものであること。そこは {} を信じています", balance.rest)
+                    }}</li>
                 </ul>
                 <p class="label">"ブロックのハッシュ"</p>
                 <p class="address small">{balance.block_hash}</p>
@@ -1426,6 +1438,20 @@ fn settings_view(ctx: Ctx) -> impl IntoView {
                 {move || (saved.get() && !ctx.busy.get() && ctx.error.get().is_none()).then(|| view! { <span class="hint">"覚えました"</span> })}
             </div>
         </form>
+        <p class="lead section">"自分のノードで確かめる"</p>
+        <p class="hint">
+            "ノードのタブで動かしているノードが先端を追っているあいだは、残高や送金を、上の REST ではなくそのノードで確かめます。"
+            "ノードが止まっているときや、まだ追いついていないときは、上の REST に聞きます。どちらに聞いたかは、残高の「信じていること」に出ます。"
+        </p>
+        <label class="check">
+            <input
+                type="checkbox"
+                prop:checked=move || ctx.settings.get().use_own_node
+                on:change=move |_| ctx.save(|settings| settings.use_own_node = !settings.use_own_node)
+                disabled=move || ctx.busy.get()
+            />
+            "自分のノードで確かめる"
+        </label>
         <p class="lead section">"キーストア"</p>
         <p class="hint">"閉じると、もう一度パスフレーズを聞きます。"</p>
         <div class="row">
@@ -1749,7 +1775,7 @@ fn approve_link(ctx: Ctx, draft: LinkDraftView) -> impl IntoView {
             <dt>"期限"</dt>
             <dd>{format!("{} まで", Date::new(draft.deadline).to_locale_string("ja-JP"))}</dd>
             <dt>"渡す REST"</dt>
-            <dd>{draft.rest.clone()}</dd>
+            <dd>{rest_label(&draft.rest)}</dd>
         </dl>
         <p class="hint">
             "リンクする鍵は、キーストアから導出したこのノード用のものです。ディスクには書かず、ブロックに入ったら、ノードのメモリにだけ渡します。"

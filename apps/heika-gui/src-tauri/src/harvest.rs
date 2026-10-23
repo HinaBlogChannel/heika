@@ -101,7 +101,7 @@ pub async fn harvest_check(
 }
 
 async fn check(wallet: &Wallet, config: &Config, address: &str) -> Result<Checked, Failure> {
-    let client = config.client()?;
+    let client = config.wallet_client()?;
     let address: Address = address
         .parse()
         .map_err(|error| Failure::other(format!("アドレスを読めません: {error}")))?;
@@ -247,7 +247,7 @@ pub async fn prepare_harvest_link(
         Body::AggregateComplete(aggregate),
     );
     // 急ぐものではないので、REST のノードが受け付けるいちばん安いものにする
-    let client = config.client().map_err(|failure| failure.detail)?;
+    let client = config.wallet_client().map_err(|failure| failure.detail)?;
     let speed = Speed::cheapest_accepted(&client).await?;
     transaction.fee = transaction.fee_for(
         speed.multiplier(None).expect("a preset has a multiplier"),
@@ -275,7 +275,7 @@ pub async fn send_harvest_link(
     config: tauri::State<'_, Config>,
     drafts: tauri::State<'_, LinkDraft>,
 ) -> Result<String, String> {
-    let client: Client = config.client().map_err(|failure| failure.detail)?;
+    let client: Client = config.wallet_client().map_err(|failure| failure.detail)?;
     let Draft {
         label,
         mut transaction,

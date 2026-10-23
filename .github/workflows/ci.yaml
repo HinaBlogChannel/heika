@@ -117,11 +117,14 @@ jobs:
             examples/web-vanitygen
             examples/sunboru-kusa
             examples/sunboru-kusa/discover
-      - run: cargo fmt --check
-      - run: cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
-      - run: cargo test --lib --locked
+      - name: web-vanitygen を確かめる
+        run: |
+          cargo fmt --check
+          cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+          cargo test --lib --locked
       - uses: ./.github/actions/trunk
-      - run: trunk build --release --locked
+      - name: web-vanitygen をビルドする
+        run: trunk build --release --locked
       - name: すんぼる草不可避を確かめる
         working-directory: examples/sunboru-kusa
         run: |

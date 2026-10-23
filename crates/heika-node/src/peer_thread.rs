@@ -33,8 +33,13 @@ pub enum Request {
 pub enum NodeEvent {
     Chain(ChainEvent),
     Peer(PeerEvent),
-    /// REST で受け付けたトランザクション（1件のバイト列）。つないでいるピアのみなに押し付ける
-    Relay(Arc<Vec<u8>>),
+    /// 新しく受け付けたトランザクション（1件以上を隙間なく並べたもの。`Push_Transactions` の本体）。つないでいるピアの
+    /// みなに押し付ける。`except` は、それを渡してきたピア（送り返さない）。受け付けるのは初めて見たときだけなので、
+    /// ピアのあいだを回り続けることはない
+    Relay {
+        transactions: Arc<Vec<u8>>,
+        except: Option<PeerId>,
+    },
     /// ピアに頼んだ未承認のトランザクション（1件ずつのバイト列）
     Pulled {
         peer: PeerId,

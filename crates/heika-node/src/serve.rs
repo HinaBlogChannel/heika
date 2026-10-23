@@ -236,11 +236,24 @@ impl Responder<'_> {
                 if let Some(mempool) = self.mempool {
                     // 次のブロックに入れるつもりで確かめる。受け付けなかったものは、わけを返さずに捨てる（catapult と同じ）
                     let height = self.source.status().height + 1;
-                    let mut mempool = mempool.lock();
-                    for bytes in transactions {
-                        if let Ok(hash) = mempool.add(bytes.to_vec(), received, height) {
-                            println!("未承認のトランザクション {hash} を受け付けました");
+                    let mut added = Vec::new();
+                    {
+                        let mut mempool = mempool.lock();
+                        for bytes in transactions {
+                            if let Ok(hash) = mempool.add(bytes.to_vec(), received, height) {
+                                println!("未承認のトランザクション {hash} を受け付けました");
+                                added.extend_from_slice(bytes);
+                            }
                         }
+                    }
+                    // 初めて受け付けたものは、駆動役に頼んでほかのピアにも流す
+                    if !added.is_empty()
+                        && let Some(pushes) = &self.pushes
+                    {
+                        let _ = pushes.send(NodeEvent::Relay {
+                            transactions: Arc::new(added),
+                            except: None,
+                        });
                     }
                 }
                 Ok(Answer::Nothing)
@@ -876,6 +889,17 @@ mod tests {
         request_type: u32,
         body: &[u8],
     ) -> Answer {
+        answer_pushing(source, mempool, None, request_type, body)
+    }
+
+    /// [`answer_with`] に、駆動役への口 `pushes` も持たせる
+    fn answer_pushing(
+        source: &Memory,
+        mempool: Option<&SharedMempool>,
+        pushes: Option<Sender<NodeEvent>>,
+        request_type: u32,
+        body: &[u8],
+    ) -> Answer {
         let parameters = &NetworkParameters::TESTNET;
         let env = FixedEnv(parameters.epoch() + Duration::from_millis(1234));
         Responder {
@@ -883,7 +907,7 @@ mod tests {
             env: &env,
             parameters,
             node: b"node".to_vec(),
-            pushes: None,
+            pushes,
             mempool,
         }
         .answer(request_type, body)
@@ -1319,16 +1343,40 @@ mod tests {
             SharedMempool::new(Mempool::new(parameters, heika_mempool::Config::default()));
         let (first, second) = (signed_transfer(1), signed_transfer(2));
         let pushed = [first.clone(), second.clone()].concat();
-        assert_eq!(
-            answer_with(
+        let (pushes, events) = std::sync::mpsc::channel();
+        let push = |body: &[u8]| {
+            answer_pushing(
                 &source,
                 Some(&mempool),
+                Some(pushes.clone()),
                 packet_type::PUSH_TRANSACTIONS,
-                &pushed
-            ),
+                body,
+            )
+        };
+        assert_eq!(push(&pushed), Answer::Nothing);
+        assert_eq!(mempool.lock().len(), 2);
+        // 初めて受け付けたものだけを、ほかのピアに流すよう駆動役に頼む
+        let relayed = |events: &std::sync::mpsc::Receiver<NodeEvent>| -> Vec<Vec<u8>> {
+            events
+                .try_iter()
+                .map(|event| match event {
+                    NodeEvent::Relay {
+                        transactions,
+                        except: None,
+                    } => transactions.to_vec(),
+                    _ => panic!("流す頼み以外が来ました"),
+                })
+                .collect()
+        };
+        assert_eq!(relayed(&events), std::slice::from_ref(&pushed));
+        let third = signed_transfer(3);
+        assert_eq!(
+            push(&[second.clone(), third.clone()].concat()),
             Answer::Nothing
         );
-        assert_eq!(mempool.lock().len(), 2);
+        assert_eq!(relayed(&events), std::slice::from_ref(&third));
+        assert_eq!(push(&first), Answer::Nothing);
+        assert!(relayed(&events).is_empty());
         let pull = |known: &[u32]| {
             reply(answer_with(
                 &source,
@@ -1337,13 +1385,13 @@ mod tests {
                 &pull_transactions_request(0, 0, known),
             ))
         };
-        assert_eq!(pull(&[]), pushed);
+        assert_eq!(pull(&[]), [pushed.as_slice(), &third].concat());
         let known = short_hash(
             &Transaction::from_bytes(&first)
                 .unwrap()
                 .hash(&parameters.generation_hash_seed),
         );
-        assert_eq!(pull(&[known]), second);
+        assert_eq!(pull(&[known]), [second.as_slice(), &third].concat());
         // 読めない要求なら切る
         assert!(matches!(
             answer_with(

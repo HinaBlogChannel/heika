@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use heika_block::Block;
+use heika_block::finalization::FinalizationRound;
 use heika_chain::event::{ChainEvent, PULL_BYTES, PeerCommand, PeerId};
 use heika_chain::verify::verify_alone;
 use heika_core::network::NetworkParameters;
@@ -40,6 +41,13 @@ pub enum Request {
         min_fee_multiplier: u32,
         known: Vec<u32>,
     },
+    /// ラウンド `min` から `max` までの投票のメッセージのうち、`known`（短いハッシュ）にないものを頼む。
+    /// [`NodeEvent::PulledVotes`] で返す
+    PullVotes {
+        min: FinalizationRound,
+        max: FinalizationRound,
+        known: Vec<u32>,
+    },
 }
 
 /// 駆動役の受信箱に入れる出来事。どちらの状態機械あてか
@@ -67,6 +75,11 @@ pub enum NodeEvent {
     Pulled {
         peer: PeerId,
         transactions: Vec<Vec<u8>>,
+    },
+    /// ピアに頼んだ投票のメッセージ（1つずつのバイト列）
+    PulledVotes {
+        peer: PeerId,
+        messages: Vec<Vec<u8>>,
     },
 }
 
@@ -110,6 +123,12 @@ pub fn spawn(
                     Ok(transactions) => NodeEvent::Pulled { peer, transactions },
                     Err(error) => failed(peer, error, false),
                 },
+                Request::PullVotes { min, max, known } => {
+                    match connection.pull_finalization_messages(min, max, &known) {
+                        Ok(messages) => NodeEvent::PulledVotes { peer, messages },
+                        Err(error) => failed(peer, error, false),
+                    }
+                }
                 Request::Push { packet_type, body } => match connection.push(packet_type, &body) {
                     Ok(()) => continue,
                     Err(error) => failed(peer, error, false),

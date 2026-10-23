@@ -139,6 +139,19 @@ impl Peers {
         self.connected.is_empty()
     }
 
+    /// つないでいるピアのうち、名乗ったロールに `roles` がすべてあるもの
+    pub fn with_roles(&self, roles: NodeRoles) -> Vec<PeerId> {
+        self.connected
+            .iter()
+            .filter(|(_, peer)| {
+                peer.node
+                    .as_ref()
+                    .is_some_and(|node| node.roles.contains(roles))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// ほかのノードに `Node_Discovery_Pull_Peers` で答えるもの
     pub fn reply(&self) -> Arc<Vec<u8>> {
         Arc::clone(&self.reply)

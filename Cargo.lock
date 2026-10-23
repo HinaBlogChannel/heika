@@ -699,6 +699,7 @@ dependencies = [
  "heika-cert",
  "heika-chain",
  "heika-core",
+ "heika-finalization",
  "heika-harvesting",
  "heika-mempool",
  "heika-packet",

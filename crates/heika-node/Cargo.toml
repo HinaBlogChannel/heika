@@ -11,6 +11,7 @@ heika-block = { path = "../heika-block" }
 heika-chain = { path = "../heika-chain" }
 heika-cert = { path = "../heika-cert" }
 heika-core = { path = "../heika-core" }
+heika-finalization = { path = "../heika-finalization" }
 heika-api = { path = "../heika-api" }
 heika-harvesting = { path = "../heika-harvesting" }
 heika-mempool = { path = "../heika-mempool" }

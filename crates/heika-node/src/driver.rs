@@ -8,6 +8,8 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use heika_block::Block;
+use heika_block::finalization::proof::VotingSet;
 use heika_cert::certificate::Certificate;
 use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
@@ -38,6 +40,7 @@ use heika_transaction::{Body, DetachedCosignature, Transaction};
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
 use crate::delegated::{Delegated, DelegationState};
+use crate::finalization::Observer;
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::partials::{self, Incoming};
@@ -376,6 +379,25 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         parameters,
         PartialConfig::default(),
     )));
+    // 投票を見る。投票するピアからメッセージを引いて数え、届いた証明と比べる
+    let mut observer = spec
+        .finalization
+        .as_ref()
+        .filter(|finalization| finalization.observe)
+        .map(|_| {
+            let finalization = &setup.config.finalization;
+            Observer::new(
+                &chain.status().finalized,
+                finalization.proof_parameters(),
+                heika_finalization::Settings {
+                    max_hashes_per_point: finalization.max_hashes_per_point,
+                    voting_set_grouping: finalization.voting_set_grouping,
+                    ..heika_finalization::Settings::MAINNET
+                },
+            )
+        });
+    // 次に投票のメッセージを頼むピアを選ぶための、前に頼んだピア
+    let mut votes_from: Option<PeerId> = None;
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
@@ -526,8 +548,47 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     known,
                                 });
                             }
+                            if let Some(observer) = observer.as_mut() {
+                                let voting = peers.with_roles(NodeRoles::VOTING);
+                                votes_from = voting
+                                    .iter()
+                                    .find(|id| Some(**id) > votes_from)
+                                    .or(voting.first())
+                                    .copied();
+                                if let Some(peer) = votes_from
+                                    && let Some(sender) = senders.get(&peer)
+                                {
+                                    let (min, max, known) = observer.request();
+                                    let _ = sender.send(Request::PullVotes { min, max, known });
+                                }
+                                let db = store.db();
+                                for notice in observer.tick(
+                                    network_now(parameters),
+                                    &chain.status().finalized,
+                                    |epoch| {
+                                        db.voters(epoch)
+                                            .ok()
+                                            .flatten()
+                                            .and_then(|bytes| VotingSet::decode(&bytes))
+                                    },
+                                    |height| {
+                                        db.block(height)
+                                            .ok()
+                                            .flatten()
+                                            .and_then(|bytes| Block::from_bytes(&bytes).ok())
+                                            .map(|block| block.hash())
+                                    },
+                                ) {
+                                    println!("{notice}");
+                                }
+                            }
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
                                 return Ok(outcome);
+                            }
+                        }
+                        NodeEvent::PulledVotes { messages, .. } => {
+                            if let Some(observer) = observer.as_mut() {
+                                observer.add(messages);
                             }
                         }
                         NodeEvent::Chain(event) => {

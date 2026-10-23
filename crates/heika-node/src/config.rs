@@ -116,6 +116,19 @@ pub struct NodeConfig {
     /// REST の口で待ち受ける。空なら立てない。手元用と公開用のように、いくつでも書ける
     #[serde(default)]
     pub rest: Vec<Rest>,
+    /// ファイナライズの投票。なければ何もしない
+    #[serde(default)]
+    pub finalization: Option<Finalization>,
+}
+
+/// ファイナライズの投票の扱い
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Finalization {
+    /// 投票するピア（Voting のロール）から投票のメッセージを引いて数え、自分で確定を出して、届いた証明と比べる。
+    /// 投票はしない
+    #[serde(default)]
+    pub observe: bool,
 }
 
 impl NodeConfig {
@@ -476,6 +489,16 @@ spec:
             }
         );
         assert_eq!(spec.peers, 4);
+    }
+
+    #[test]
+    fn reads_whether_to_observe_finalization() {
+        assert_eq!(Manifest::parse(MINIMAL).unwrap().spec.finalization, None);
+        let spec = Manifest::parse(&format!("{MINIMAL}  finalization:\n    observe: true\n"))
+            .unwrap()
+            .spec;
+        assert_eq!(spec.finalization, Some(Finalization { observe: true }));
+        assert!(Manifest::parse(&format!("{MINIMAL}  finalization:\n    vote: true\n")).is_err());
     }
 
     #[test]

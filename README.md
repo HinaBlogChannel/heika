@@ -135,6 +135,8 @@ heika legal third-party
 heika legal source --out heika-source.zip
 ```
 
+ノードの REST を立てると、同じ ZIP を `GET /heika/sourcecode.zip` でも返す（[docs/peer.md](docs/peer.md)）。
+
 バイナリに入れたソースは、実行しなくても取り出せる。動かせないアーキテクチャのバイナリや、実行したくないバイナリからでも取り出せるように、決まった名前のセクションに置いている。
 
 ```sh

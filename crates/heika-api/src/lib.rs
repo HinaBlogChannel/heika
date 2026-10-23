@@ -20,12 +20,13 @@
 //! catapult の REST と同じく、どこのページからでも読めるようにする（CORS）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    CONTENT_DISPOSITION, CONTENT_TYPE,
 };
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::map_response;
@@ -140,6 +141,15 @@ pub struct Node {
     pub reader: Arc<dyn Reader>,
 }
 
+/// バイナリに埋め込んだソースの ZIP。`GET /heika/sourcecode.zip` で返す
+static SOURCE: OnceLock<&'static [u8]> = OnceLock::new();
+
+/// バイナリに埋め込んだソースの ZIP を、REST で返せるようにする。AGPL-3.0 の 13 条（ネットワーク越しに使う人に
+/// ソースを渡す）のため。heika に手を入れてビルドしても、そのソースが埋め込まれて返る。最初の1回だけが効く
+pub fn offer_source(zip: &'static [u8]) {
+    let _ = SOURCE.set(zip);
+}
+
 #[derive(Clone)]
 struct Api {
     shared: Shared,
@@ -236,6 +246,32 @@ async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Res
     match result {
         Ok(()) => (StatusCode::ACCEPTED, Json(AnnounceResultJson::pushed())).into_response(),
         Err(message) => invalid(message),
+    }
+}
+
+/// このノードのソース（[`offer_source`]）
+async fn source_code() -> Response {
+    match SOURCE.get().filter(|zip| !zip.is_empty()) {
+        Some(zip) => (
+            [
+                (CONTENT_TYPE, "application/zip"),
+                (
+                    CONTENT_DISPOSITION,
+                    concat!(
+                        "attachment; filename=\"heika-",
+                        env!("CARGO_PKG_VERSION"),
+                        ".zip\""
+                    ),
+                ),
+            ],
+            *zip,
+        )
+            .into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            "このノードのバイナリには、ソースが入っていません".to_owned(),
+        ),
     }
 }
 
@@ -466,6 +502,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/chain/info", get(chain_info))
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
+        .route("/heika/sourcecode.zip", get(source_code))
         .route("/transactions", put(announce).options(preflight))
         .route(
             "/transactions/partial",
@@ -738,6 +775,27 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn returns_the_offered_source() {
+        // 渡す前は、入っていないと答える
+        let (status, body) = get_status("/heika/sourcecode.zip").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "ResourceNotFound");
+        offer_source(b"PK\x05\x06");
+        let response = router(snapshot(), node(submit(Arc::default())))
+            .oneshot(
+                Request::get("/heika/sourcecode.zip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/zip");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"PK\x05\x06");
     }
 
     #[tokio::test]

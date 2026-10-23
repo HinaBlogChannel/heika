@@ -73,6 +73,7 @@ pub fn run(command: ExperimentalCommand) -> Result<(), String> {
                 println!("{} を動かします", manifest.metadata.name);
             }
             watch_signals();
+            heika_node::offer_source(&crate::legal::SOURCE);
             heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &memory)
                 .map_err(|error| error.to_string())
         }

@@ -1978,7 +1978,9 @@ version = "0.9.0"
 dependencies = [
  "axum",
  "base16ct",
+ "heika-core",
  "heika-rest",
+ "serde",
  "tokio",
 ]
 

@@ -95,7 +95,7 @@ spec:
 
 ## REST
 
-`rest` を書くと、ノードと同じプロセスで REST の口を立てる。catapult の REST のうち、ウォレットが委任に使う口とトランザクションを送る口に同じ形で答え、heika だけの口も足す。どこのページからでも読めるように、CORS は開けてある。
+`rest` を書くと、ノードと同じプロセスで REST の口を立てる。catapult の REST のうち、ウォレットが委任に使う口、トランザクションを送る口、heika のウォレットが残高を確かめるのに使う口に同じ形で答え、heika だけの口も足す。`heika account show --rest` をこのノードに向ければ、残高を状態の木の根まで確かめられる。どこのページからでも読めるように、CORS は開けてある。
 
 | 口 | 返すもの |
 |---|---|
@@ -103,6 +103,10 @@ spec:
 | `/chain/info` | 高さ、スコア、確定したブロック |
 | `/node/unlockedaccount` | 引き受けて、ハーベストしている委任のリモートの鍵 |
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |
+| `/accounts/{accountId}` | アカウントの今の状態。ID はアドレス（Base32 か16進）か公開鍵 |
+| `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
+| `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す |
+| `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `PUT /transactions` | 署名したトランザクション（`{"payload":"16進"}`）を受け付けて、つないでいるピアに流す。catapult の REST と同じく、受け付けたら 202。heika は先にメモリプールで確かめるので、受け付けなかったら 409 で `message` にわけを返す |
 
 - 話すのは HTTP だけ。HTTPS で外に出すなら、手前に Nginx や Caddy を置き、そこで TLS を終わらせる

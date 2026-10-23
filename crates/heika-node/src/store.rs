@@ -1,5 +1,8 @@
 //! 中核に渡す保存。[`Db`] を、読んだ状態を覚えておく [`CachedSource`] で包む。コミットで変わった行とノードは
-//! キャッシュにも伝え、巻き戻したら空にする。
+//! キャッシュにも伝え、巻き戻したら空にする。[`Db`] は `Arc` で持ち、API などほかのスレッドとも分け合う
+//! （redb は、書いている最中でも読むトランザクションを並べて開ける）。
+
+use std::sync::Arc;
 
 use heika_chain::ChainError;
 use heika_chain::store::{BlockWrite, ChainStore, Change, Prune, Pruned, StateRow};
@@ -8,12 +11,12 @@ use heika_state_transition::executor::source::{CachedSource, StateSource};
 use heika_store_redb::Db;
 
 pub struct CachedStore {
-    source: CachedSource<Db>,
+    source: CachedSource<Arc<Db>>,
 }
 
 impl CachedStore {
     /// `db` を包み、読んだ状態を `capacity` バイトまで覚える
-    pub fn new(db: Db, capacity: usize) -> Self {
+    pub fn new(db: Arc<Db>, capacity: usize) -> Self {
         Self {
             source: CachedSource::new(db, capacity),
         }
@@ -23,8 +26,9 @@ impl CachedStore {
         self.source.inner()
     }
 
-    pub fn into_db(self) -> Db {
-        self.source.into_inner()
+    /// ほかのスレッドに渡す、同じ DB
+    pub fn shared_db(&self) -> Arc<Db> {
+        Arc::clone(self.source.inner())
     }
 }
 

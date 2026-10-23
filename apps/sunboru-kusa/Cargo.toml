@@ -17,7 +17,7 @@ sha3 = "0.12.0"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 js-sys = "0.3.106"
-web-sys = { version = "0.3.106", features = ["Window", "Storage", "Response", "Location", "UrlSearchParams", "Navigator"] }
+web-sys = { version = "0.3.106", features = ["Window", "Document", "Storage", "Response", "Location", "UrlSearchParams", "Navigator"] }
 
 [profile.release]
 lto = "fat"

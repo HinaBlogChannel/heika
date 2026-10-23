@@ -6,8 +6,10 @@ mod rest;
 
 use std::str::FromStr;
 
-use field::{Kind, Plant};
+use field::{Kind, Plant, Stage};
 use heika_core::address::Address;
+use heika_core::key::PublicKey;
+use heika_core::network::NetworkIdentifier;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::{Value, json};
@@ -32,6 +34,8 @@ const CANDIDATES: usize = 3;
 const RULES: u32 = 1;
 /// 1ページに取る件数
 const PAGE_SIZE: u32 = 100;
+/// 読み直す間隔（ミリ秒）。ブロックは30秒ごとだが、送ったばかりの芽を早く見せる
+const POLL_MS: u32 = 5000;
 
 #[wasm_bindgen(inline_js = r#"
 export async function fetch_text(url) {
@@ -163,17 +167,6 @@ fn parse_address(text: &str, what: &str) -> Result<Address, String> {
     Address::from_str(&cleaned).map_err(|_| format!("{what}が、正しいアドレスではありません"))
 }
 
-/// 読んできた結果
-struct Loaded {
-    /// キャッシュにあった、前に数えた分
-    known: Vec<[u8; 32]>,
-    /// 今回新しく数えた、確定した分
-    new: Vec<[u8; 32]>,
-    /// まだ確定していない分
-    growing: Vec<[u8; 32]>,
-    message: Option<String>,
-}
-
 /// 埋め込んだ一覧から、そのネットワークのノードをいくつか選び、確定した高さがいちばん進んだものを使う。
 /// 1か所が止まっていたり遅れていたりしても困らないようにする
 async fn pick_node(network: u8) -> Result<String, String> {
@@ -223,98 +216,196 @@ async fn pick_node(network: u8) -> Result<String, String> {
     })
 }
 
-async fn load(rest_url: &str, target: &str, player: &str, min: &str) -> Result<Loaded, String> {
-    let min = rest::parse_xym(min)
+/// 開いている畑。入力が変わるまで使い回して、問い合わせを減らす
+#[derive(Clone)]
+struct Session {
+    /// 開いたときの入力。変わったら開き直す
+    inputs: String,
+    rest: String,
+    currency: u64,
+    target: Address,
+    player: Address,
+    min: u64,
+    /// ブラウザに覚えておくときのキー
+    key: String,
+    /// 自分の公開鍵。まだ一度も署名していなければ None
+    signer: Option<String>,
+    /// 最後に送金の履歴を読んだときの、チェーンの高さ
+    height: u64,
+    /// ブロックに入ったが、まだ確定していない分。高さが変わらなければ使い回す
+    growing: Vec<[u8; 32]>,
+}
+
+/// 読んだ結果
+struct Update {
+    /// 前に数えた、確定した分
+    known: Vec<[u8; 32]>,
+    /// 今回新しく確定した分
+    new: Vec<[u8; 32]>,
+    growing: Vec<[u8; 32]>,
+    /// 送ったばかりで、まだブロックに入っていない分
+    sprouts: Vec<[u8; 32]>,
+    note: Option<String>,
+}
+
+fn inputs_key(rest: &str, target: &str, player: &str, min: &str) -> String {
+    [rest, target, player, min].map(str::trim).join("\n")
+}
+
+async fn open(
+    rest_url: &str,
+    target: &str,
+    player: &str,
+    min_text: &str,
+) -> Result<Session, String> {
+    let min = rest::parse_xym(min_text)
         .filter(|min| *min > 0)
         .ok_or("数える最低額は、0 より大きい XYM の額（小数は6桁まで）にしてください")?;
-    let target = parse_address(target, "送り先")?;
-    let player = parse_address(player, "自分のアドレス")?;
-    if target.network() != player.network() {
+    let target_address = parse_address(target, "送り先")?;
+    let player_address = parse_address(player, "自分のアドレス")?;
+    if target_address.network() != player_address.network() {
         return Err("送り先と自分のアドレスのネットワークが違います".into());
     }
-    let chosen;
-    let rest_url = match rest_url.trim().trim_end_matches('/') {
-        "" => {
-            chosen = pick_node(player.network().0).await?;
-            chosen.as_str()
-        }
-        given => given,
+    let rest = match rest_url.trim().trim_end_matches('/') {
+        "" => pick_node(player_address.network().0).await?,
+        given => given.to_owned(),
     };
-    let properties = get(&format!("{rest_url}/network/properties"))
+    let properties = get(&format!("{rest}/network/properties"))
         .await?
         .ok_or("ネットワークの設定が見つかりません")?;
     let currency = rest::currency_mosaic_id(&properties).ok_or("通貨のモザイクが分かりません")?;
-    let network = rest::generation_hash_seed(&properties).unwrap_or_else(|| rest_url.to_owned());
-    let info = get(&format!("{rest_url}/chain/info"))
-        .await?
-        .ok_or("チェーンの高さが分かりません")?;
-    let finalized = rest::finalized_height(&info).ok_or("確定した高さが分かりません")?;
+    let network = rest::generation_hash_seed(&properties).unwrap_or_else(|| rest.clone());
+    Ok(Session {
+        inputs: inputs_key(rest_url, target, player, min_text),
+        key: format!(
+            "kusa:{RULES}:{network}:{}:{}:{min}",
+            target_address.to_hex(),
+            player_address.to_hex()
+        ),
+        rest,
+        currency,
+        target: target_address,
+        player: player_address,
+        min,
+        signer: None,
+        height: 0,
+        growing: Vec::new(),
+    })
+}
 
-    let key = format!(
-        "kusa:{RULES}:{network}:{}:{}:{min}",
-        target.to_hex(),
-        player.to_hex()
-    );
-    let cached = load_item(&key).and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let known: Vec<[u8; 32]> = cached
+/// ブラウザに覚えておいた、確定した分と、どの高さまで数えたか
+fn cached(key: &str) -> (Vec<[u8; 32]>, u64) {
+    let cache = load_item(key).and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let seeds = cache
         .as_ref()
         .and_then(|cache| cache["seeds"].as_array())
         .into_iter()
         .flatten()
         .filter_map(|seed| seed.as_str().and_then(hex32))
         .collect();
-    let counted = cached
+    let counted = cache
         .as_ref()
         .and_then(|cache| cache["height"].as_u64())
         .unwrap_or(0);
+    (seeds, counted)
+}
 
-    let Some(account) = get(&format!("{rest_url}/accounts/{player}")).await? else {
-        return Ok(Loaded {
-            known,
-            new: Vec::new(),
-            growing: Vec::new(),
-            message: Some("このアカウントは、まだチェーンに載っていません".into()),
-        });
-    };
-    let Some(signer) = rest::public_key(&account) else {
-        return Ok(Loaded {
-            known,
-            new: Vec::new(),
-            growing: Vec::new(),
-            message: Some("このアカウントは、まだ一度も送金していません".into()),
-        });
-    };
+/// 公開鍵（16進）のアドレス
+fn address_of(key: &str, network: NetworkIdentifier) -> Option<Address> {
+    Some(Address::from_public_key(&PublicKey(hex32(key)?), network))
+}
 
-    let mut new = Vec::new();
-    let mut growing = Vec::new();
-    for page in 1.. {
-        let url = format!(
-            "{rest_url}/transactions/confirmed?recipientAddress={target}&signerPublicKey={signer}&embedded=true&order=asc&pageSize={PAGE_SIZE}&pageNumber={page}&fromHeight={}",
-            counted + 1
-        );
-        let body = get(&url).await?.unwrap_or(Value::Null);
-        let (sends, entries) = rest::sends(&body, &target.to_hex(), &signer, currency, min);
-        for send in sends {
-            if send.height <= finalized {
-                new.push(send.seed)
-            } else {
-                growing.push(send.seed)
-            }
+/// 畑を読み直す。チェーンの高さが変わったときだけ送金の履歴を読み、送ったばかりの分は毎回見る
+async fn refresh(session: &mut Session) -> Result<Update, String> {
+    let rest = session.rest.clone();
+    let target_hex = session.target.to_hex();
+    let info = get(&format!("{rest}/chain/info"))
+        .await?
+        .ok_or("チェーンの高さが分かりません")?;
+    let finalized = rest::finalized_height(&info).ok_or("確定した高さが分かりません")?;
+    let height = rest::chain_height(&info).unwrap_or(finalized);
+    let (known, counted) = cached(&session.key);
+
+    let mut note = None;
+    if session.signer.is_none() {
+        match get(&format!("{rest}/accounts/{}", session.player)).await? {
+            None => note = Some("このアカウントは、まだチェーンに載っていません".to_owned()),
+            Some(account) => session.signer = rest::public_key(&account),
         }
-        if entries == 0 || page >= 1000 {
-            break;
+        if note.is_none() && session.signer.is_none() {
+            note = Some("このアカウントは、まだ一度も送金していません".to_owned());
         }
     }
-    let all: Vec<String> = known.iter().chain(&new).map(hex).collect();
-    save_item(
-        &key,
-        &json!({ "height": finalized.max(counted), "seeds": all }).to_string(),
+
+    let mut new = Vec::new();
+    if let Some(signer) = session.signer.clone()
+        && (height != session.height || counted < finalized)
+    {
+        let mut growing = Vec::new();
+        for page in 1.. {
+            let url = format!(
+                "{rest}/transactions/confirmed?recipientAddress={}&signerPublicKey={signer}&embedded=true&order=asc&pageSize={PAGE_SIZE}&pageNumber={page}&fromHeight={}",
+                session.target,
+                counted + 1
+            );
+            let body = get(&url).await?.unwrap_or(Value::Null);
+            let (sends, entries) = rest::sends(
+                &body,
+                &target_hex,
+                |key: &str| key.eq_ignore_ascii_case(&signer),
+                session.currency,
+                session.min,
+            );
+            for send in sends {
+                if send.height <= finalized {
+                    new.push(send.seed)
+                } else {
+                    growing.push(send.seed)
+                }
+            }
+            if entries == 0 || page >= 1000 {
+                break;
+            }
+        }
+        let all: Vec<String> = known.iter().chain(&new).map(hex).collect();
+        save_item(
+            &session.key,
+            &json!({ "height": finalized.max(counted), "seeds": all }).to_string(),
+        );
+        session.growing = growing;
+        session.height = height;
+    }
+
+    // 送ったばかりの分。初めての送金ではまだ公開鍵が分からないので、署名者の公開鍵からアドレスを作って自分か確かめる
+    let (network, player) = (session.player.network(), session.player);
+    let url = format!(
+        "{rest}/transactions/unconfirmed?recipientAddress={}&embedded=true&pageSize={PAGE_SIZE}",
+        session.target
     );
-    Ok(Loaded {
+    let body = get(&url).await?.unwrap_or(Value::Null);
+    let (pending, _) = rest::sends(
+        &body,
+        &target_hex,
+        |key: &str| address_of(key, network) == Some(player),
+        session.currency,
+        session.min,
+    );
+    let sprouts: Vec<[u8; 32]> = pending
+        .into_iter()
+        .map(|send| send.seed)
+        .filter(|seed| {
+            !session.growing.contains(seed) && !known.contains(seed) && !new.contains(seed)
+        })
+        .collect();
+    if !sprouts.is_empty() {
+        note = None;
+    }
+    Ok(Update {
         known,
         new,
-        growing,
-        message: None,
+        growing: session.growing.clone(),
+        sprouts,
+        note,
     })
 }
 
@@ -352,90 +443,144 @@ fn App() -> impl IntoView {
     let saved = load_item("kusa:inputs")
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .unwrap_or(Value::Null);
-    let initial = |name: &str| {
+    let initial = |name: &str, default: &str| {
         query(name)
             .or_else(|| saved[name].as_str().map(str::to_owned))
-            .unwrap_or_default()
+            .unwrap_or_else(|| default.to_owned())
     };
-    let rest_url = RwSignal::new(initial("rest"));
-    let target = RwSignal::new(
-        query("to")
-            .or_else(|| saved["to"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| DEFAULT_TARGET.into()),
-    );
-    let player = RwSignal::new(initial("me"));
-    let min = RwSignal::new(
-        query("min")
-            .or_else(|| saved["min"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| DEFAULT_MIN.into()),
-    );
+    let rest_url = RwSignal::new(initial("rest", ""));
+    let target = RwSignal::new(initial("to", DEFAULT_TARGET));
+    let player = RwSignal::new(initial("me", ""));
+    let min = RwSignal::new(initial("min", DEFAULT_MIN));
     let plants = RwSignal::new(Vec::<Plant>::new());
     let status = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
+    let busy = StoredValue::new(false);
+    let session = StoredValue::new_local(None::<Session>);
 
-    let look = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        status.set("読んでいます…".into());
+    // 畑を読み直す。quiet なら「読んでいます」を出さない（5秒ごとの読み直し）
+    let run = move |quiet: bool| {
         let (rest_text, target_text, player_text, min_text) = (
             rest_url.get_untracked(),
             target.get_untracked(),
             player.get_untracked(),
             min.get_untracked(),
         );
+        if busy.get_value() || player_text.trim().is_empty() || target_text.trim().is_empty() {
+            return;
+        }
+        busy.set_value(true);
+        if !quiet {
+            status.set("読んでいます…".into());
+        }
         save_item(
             "kusa:inputs",
             &json!({ "rest": rest_text, "to": target_text, "me": player_text, "min": min_text })
                 .to_string(),
         );
         spawn_local(async move {
-            match load(&rest_text, &target_text, &player_text, &min_text).await {
-                Err(message) => status.set(message),
-                Ok(loaded) => {
-                    let mut shown: Vec<Plant> = loaded
+            let inputs = inputs_key(&rest_text, &target_text, &player_text, &min_text);
+            let reused = session
+                .get_value()
+                .filter(|session| session.inputs == inputs);
+            let opened = match reused {
+                Some(session) => Ok(session),
+                None => open(&rest_text, &target_text, &player_text, &min_text).await,
+            };
+            let result = match opened {
+                Ok(mut opened) => refresh(&mut opened).await.map(|update| (opened, update)),
+                Err(message) => Err(message),
+            };
+            match result {
+                Err(message) => {
+                    // 次の読み直しで、ノードを選ぶところからやり直す
+                    session.set_value(None);
+                    status.set(message);
+                }
+                Ok((opened, update)) => {
+                    session.set_value(Some(opened));
+                    let mut shown: Vec<Plant> = update
                         .known
                         .iter()
-                        .map(|seed| Plant::new(seed, false))
+                        .map(|seed| Plant::new(seed, Stage::Grown))
                         .collect();
-                    // キャッシュがなければ、最初から順に生やして振り返る。あれば新しい分だけ
-                    let replay = loaded.known.is_empty();
-                    plants.set(shown.clone());
-                    let fresh = loaded.new.len();
-                    status.set(if replay && fresh > 0 {
-                        "思い出しています…".into()
-                    } else {
-                        String::new()
-                    });
-                    let pause = (6000 / fresh.max(1) as u32).clamp(20, 150);
-                    for seed in &loaded.new {
-                        shown.push(Plant::new(seed, false));
+                    if !update.new.is_empty() {
+                        // 覚えていなければ、最初から順に生やして振り返る。覚えていれば新しい分だけ
+                        if update.known.is_empty() {
+                            status.set("思い出しています…".into());
+                        }
                         plants.set(shown.clone());
-                        sleep(pause).await;
+                        let pause = (6000 / update.new.len() as u32).clamp(20, 150);
+                        for seed in &update.new {
+                            shown.push(Plant::new(seed, Stage::Grown));
+                            plants.set(shown.clone());
+                            sleep(pause).await;
+                        }
                     }
-                    shown.extend(loaded.growing.iter().map(|seed| Plant::new(seed, true)));
+                    shown.extend(
+                        update
+                            .growing
+                            .iter()
+                            .map(|seed| Plant::new(seed, Stage::Growing)),
+                    );
+                    shown.extend(
+                        update
+                            .sprouts
+                            .iter()
+                            .map(|seed| Plant::new(seed, Stage::Sprout)),
+                    );
                     plants.set(shown);
-                    status.set(match loaded.message {
-                        Some(message) => message,
-                        None if !loaded.growing.is_empty() => format!(
-                            "{} つは、まだ育ちかけです（確定待ち）",
-                            loaded.growing.len()
-                        ),
-                        None => String::new(),
-                    });
+                    let mut notes = Vec::new();
+                    if !update.sprouts.is_empty() {
+                        notes.push(format!(
+                            "芽が {} つ出ました（ブロック待ち）",
+                            update.sprouts.len()
+                        ));
+                    }
+                    if !update.growing.is_empty() {
+                        notes.push(format!(
+                            "{} つ育ちかけです（確定待ち）",
+                            update.growing.len()
+                        ));
+                    }
+                    notes.extend(update.note);
+                    status.set(notes.join("。"));
                 }
             }
-            busy.set(false);
+            busy.set_value(false);
         });
     };
 
-    // URL に自分のアドレスがあって、送り先も決まっていれば、すぐに畑を見る（自分のブックマーク用）
-    if query("me").is_some() && !target.get_untracked().trim().is_empty() {
-        look(());
-    }
+    // 入力が変わったら、打ち終わるのを少し待ってから読む。開いたときに覚えていた入力があれば、すぐ読む
+    let typed = StoredValue::new(0u64);
+    Effect::new(move |_| {
+        player.track();
+        target.track();
+        min.track();
+        rest_url.track();
+        let id = typed.get_value() + 1;
+        typed.set_value(id);
+        spawn_local(async move {
+            sleep(if id == 1 { 0 } else { 700 }).await;
+            if typed.get_value() == id {
+                run(false);
+            }
+        });
+    });
+    // 開いているあいだは、ときどき読み直して、送ったばかりの芽や、育った分を出す
+    spawn_local(async move {
+        loop {
+            sleep(POLL_MS).await;
+            let hidden = web_sys::window()
+                .and_then(|window| window.document())
+                .is_some_and(|document| document.hidden());
+            if !hidden {
+                run(true);
+            }
+        }
+    });
 
-    let count = move || plants.with(|p| p.iter().filter(|plant| !plant.growing).count());
+    let count =
+        move || plants.with(|p| p.iter().filter(|plant| plant.stage == Stage::Grown).count());
     let share_text = move || {
         format!(
             "すんぼる草不可避で {} 本生えました #すんぼる草不可避",
@@ -477,6 +622,14 @@ fn App() -> impl IntoView {
             .map(rest::format_xym)
             .unwrap_or_else(|| min.get())
     };
+    let grown = move || {
+        plants.with(|p| {
+            p.iter()
+                .filter(|plant| plant.stage == Stage::Grown)
+                .copied()
+                .collect::<Vec<_>>()
+        })
+    };
 
     view! {
         <main>
@@ -498,17 +651,16 @@ fn App() -> impl IntoView {
                 }}
             </section>
             <section class="field" inner_html=move || plants.with(|p| field::svg(p, false))></section>
-            <p class="count">{move || if plants.with(Vec::is_empty) { String::new() } else { format!("{} 本 ・ {}", count(), plants.with(|p| tally(p))) }}</p>
+            <p class="count">{move || if count() == 0 { String::new() } else { format!("{} 本 ・ {}", count(), tally(&grown())) }}</p>
             <p class="status">{move || status.get()}</p>
             <div class="buttons">
-                <button on:click=save disabled=move || plants.with(Vec::is_empty)>"画像を保存"</button>
-                <button on:click=share disabled=move || plants.with(Vec::is_empty)>"シェア"</button>
+                <button on:click=save disabled=move || count() == 0>"画像を保存"</button>
+                <button on:click=share disabled=move || count() == 0>"シェア"</button>
             </div>
-            <form on:submit=move |event| { event.prevent_default(); look(()); }>
-                <label>"自分のアドレス"
+            <form on:submit=move |event| { event.prevent_default(); run(false); }>
+                <label>"自分のアドレス（入れると畑が出ます）"
                     <input prop:value=move || player.get() on:input=move |e| player.set(event_target_value(&e)) placeholder="N… または T…" spellcheck="false"/>
                 </label>
-                <button class="primary" type="submit" disabled=move || busy.get()>"畑を見る"</button>
                 <details>
                     <summary>"くわしい設定"</summary>
                     <label>"送り先のアドレス"
@@ -524,7 +676,7 @@ fn App() -> impl IntoView {
             </form>
             <footer>
                 <p>{move || format!(
-                    "自分のアドレスから送り先へ {} XYM 以上を送るたびに、畑に何かが1つ生えます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。",
+                    "自分のアドレスから送り先へ {} XYM 以上を送るたびに、畑に何かが1つ生えます。送ってすぐに芽が出て、ブロックに入ると育ち、確定すると生えそろいます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。",
                     min_label(),
                 )}</p>
                 <p>"払う義務はありません。送り先は自由に変えられて、テストネットや自分のプライベートネットでも遊べます。鍵は使わず、REST から送金の履歴を読むだけです。"</p>

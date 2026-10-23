@@ -335,6 +335,26 @@ fn color(code: u8) -> Option<&'static str> {
     })
 }
 
+/// 育ち具合
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// 送ったばかりで、まだブロックに入っていない。何が生えるかはまだ見せず、芽だけ描く
+    Sprout,
+    /// ブロックに入ったが、まだ確定していない。薄く描く
+    Growing,
+    /// 確定した
+    Grown,
+}
+
+/// 芽。何が生えるかの前の姿
+const SPROUT: &[&str] = &[
+    "......G..G......",
+    ".....GGggGG.....",
+    "......GggG......",
+    ".......gg.......",
+    ".......gg.......",
+];
+
 /// 生えた1つ
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plant {
@@ -344,12 +364,11 @@ pub struct Plant {
     /// 地面に着く下端（ドット）
     ground: u32,
     flip: bool,
-    /// まだ確定していない送金で生えたもの。薄く描く
-    pub growing: bool,
+    pub stage: Stage,
 }
 
 impl Plant {
-    pub fn new(seed: &[u8; 32], growing: bool) -> Self {
+    pub fn new(seed: &[u8; 32], stage: Stage) -> Self {
         let tile = (seed[0] & 15) as u32;
         let (column, row) = (tile % 4, tile / 4);
         Self {
@@ -357,7 +376,7 @@ impl Plant {
             x: column * TILE + seed[2] as u32 % (TILE - 15),
             ground: row * TILE + 16 + seed[3] as u32 % (TILE - 15),
             flip: seed[4] & 1 == 1,
-            growing,
+            stage,
         }
     }
 }
@@ -506,8 +525,12 @@ pub fn svg(plants: &[Plant], sky: bool) -> String {
     let mut order: Vec<&Plant> = plants.iter().collect();
     order.sort_by_key(|plant| (plant.ground, plant.x));
     for plant in order {
-        let sprite = plant.kind.sprite();
-        if plant.growing {
+        let sprite = if plant.stage == Stage::Sprout {
+            SPROUT
+        } else {
+            plant.kind.sprite()
+        };
+        if plant.stage == Stage::Growing {
             out.push_str(r#"<g opacity="0.45">"#);
         }
         // 背の高い木は、いちばん上の段で島の上の空（負の y）にはみ出す
@@ -519,7 +542,7 @@ pub fn svg(plants: &[Plant], sky: bool) -> String {
             plant.flip,
             color,
         );
-        if plant.growing {
+        if plant.stage == Stage::Growing {
             out.push_str("</g>");
         }
     }
@@ -585,7 +608,7 @@ mod tests {
     #[test]
     fn plants_stay_inside_the_field() {
         for byte in 0..=255u8 {
-            let plant = Plant::new(&[byte; 32], false);
+            let plant = Plant::new(&[byte; 32], Stage::Grown);
             assert!(plant.x + 16 <= SIZE);
             assert!(plant.ground <= SIZE);
             assert!(plant.ground as i64 - plant.kind.sprite().len() as i64 >= -(TOP as i64));
@@ -595,7 +618,12 @@ mod tests {
     #[test]
     fn same_seeds_draw_the_same_field() {
         let plants: Vec<Plant> = (0..40u8)
-            .map(|i| Plant::new(&[i.wrapping_mul(37); 32], i % 7 == 0))
+            .map(|i| {
+                Plant::new(
+                    &[i.wrapping_mul(37); 32],
+                    [Stage::Grown, Stage::Growing, Stage::Sprout][i as usize % 3],
+                )
+            })
             .collect();
         assert_eq!(svg(&plants, true), svg(&plants.clone(), true));
         assert!(svg(&plants, false).contains(r#"opacity="0.45""#));

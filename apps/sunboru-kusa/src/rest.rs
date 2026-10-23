@@ -76,6 +76,11 @@ pub fn finalized_height(info: &Value) -> Option<u64> {
     number(&info["latestFinalizedBlock"]["height"])
 }
 
+/// `/chain/info` から、チェーンの高さ
+pub fn chain_height(info: &Value) -> Option<u64> {
+    number(&info["height"])
+}
+
 /// `/network/properties` から、通貨のモザイクの ID（`0x6BED'913F'A202'23F8` の形）
 pub fn currency_mosaic_id(properties: &Value) -> Option<u64> {
     let text = properties["chain"]["currencyMosaicId"].as_str()?;
@@ -103,10 +108,11 @@ pub fn public_key(account: &Value) -> Option<String> {
 /// `/transactions/confirmed` の1ページから、数える送金を取り出す。
 /// REST の絞り込みを信じきらずに、送り先、署名者、通貨、額をもう一度確かめる。
 /// `min` より少ない送金は数えない。2つ目の値は、ページに入っていた件数（0 なら、もう続きがない）
+/// 署名者は `signer`（公開鍵の16進を受け取り、自分なら真）で確かめる。
 pub fn sends(
     page: &Value,
     target_hex: &str,
-    signer: &str,
+    signer: impl Fn(&str) -> bool,
     currency: u64,
     min: u64,
 ) -> (Vec<Send>, usize) {
@@ -121,9 +127,7 @@ pub fn sends(
             || !transaction["recipientAddress"]
                 .as_str()
                 .is_some_and(|a| a.eq_ignore_ascii_case(target_hex))
-            || !transaction["signerPublicKey"]
-                .as_str()
-                .is_some_and(|k| k.eq_ignore_ascii_case(signer))
+            || !transaction["signerPublicKey"].as_str().is_some_and(&signer)
         {
             continue;
         }
@@ -230,7 +234,13 @@ mod tests {
             // 数えない: XYM ではないモザイク
             transfer(json!({"height": "15", "hash": hash}), TARGET, SIGNER, json!([{"id": "6787EB27D79D2B23", "amount": "1000000"}])),
         ]});
-        let (found, entries) = sends(&page, TARGET, SIGNER, CURRENCY, MICROS);
+        let (found, entries) = sends(
+            &page,
+            TARGET,
+            |key: &str| key.eq_ignore_ascii_case(SIGNER),
+            CURRENCY,
+            MICROS,
+        );
         assert_eq!(entries, 6);
         assert_eq!(found.len(), 2);
         assert_eq!(

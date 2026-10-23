@@ -9,7 +9,8 @@
 //! - 取り込める委任は、暗号化したまま `harvesters.dat`（catapult と同じ形）に、どこまで読んだかは `harvesters.height`
 //!   にしまう。上限を超えた分も残しておき、空きができたら重要度の大きい順に使う。初めて動かしたときは、
 //!   それより前の要求は読まない
-//! - 届いた要求ごとに、引き受けたか、なぜ引き受けなかったかを覚えておき、API で委任した人に見せる
+//! - 届いた要求ごとに、引き受けたか、なぜ引き受けなかったかを覚えておき、API で委任した人に見せる。止めても消えないように
+//!   `delegations.yaml` にしまい、起動したら読み戻す
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,7 @@ use heika_state_transition::account::AccountType;
 use heika_state_transition::executor::persist::{decode_account_row, row_key};
 use heika_store_redb::Db;
 use heika_wallet::harvest_request;
+use serde::{Deserialize, Serialize};
 
 use crate::driver::NodeError;
 use crate::harvesters::KeyPair;
@@ -65,6 +67,62 @@ pub struct DelegationStatus {
     pub state: DelegationState,
 }
 
+/// `delegations.yaml` の1件。[`DelegationStatus`] を、鍵を16進にして書く
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedStatus {
+    main_account: Option<String>,
+    remote: String,
+    height: Option<u64>,
+    state: SavedState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SavedState {
+    Accepted,
+    Waiting,
+    Rejected,
+}
+
+impl From<&DelegationStatus> for SavedStatus {
+    fn from(status: &DelegationStatus) -> Self {
+        let (state, reason) = match &status.state {
+            DelegationState::Accepted => (SavedState::Accepted, None),
+            DelegationState::Waiting => (SavedState::Waiting, None),
+            DelegationState::Rejected(reason) => (SavedState::Rejected, Some(reason.clone())),
+        };
+        Self {
+            main_account: status.main_account.map(|key| key.to_string()),
+            remote: status.remote.to_string(),
+            height: status.height,
+            state,
+            reason,
+        }
+    }
+}
+
+impl SavedStatus {
+    fn restore(self) -> Option<DelegationStatus> {
+        let main_account = match self.main_account {
+            Some(text) => Some(text.parse().ok()?),
+            None => None,
+        };
+        Some(DelegationStatus {
+            main_account,
+            remote: self.remote.parse().ok()?,
+            height: self.height,
+            state: match self.state {
+                SavedState::Accepted => DelegationState::Accepted,
+                SavedState::Waiting => DelegationState::Waiting,
+                SavedState::Rejected => DelegationState::Rejected(self.reason.unwrap_or_default()),
+            },
+        })
+    }
+}
+
 /// 委任の引き受け
 pub struct Delegated {
     key: PrivateKey,
@@ -73,6 +131,7 @@ pub struct Delegated {
     max: usize,
     file: PathBuf,
     height_file: PathBuf,
+    status_file: PathBuf,
     /// 取り込める委任。重要度の大きい順で、先頭の `max` 件でハーベストする
     candidates: Vec<Candidate>,
     /// 届いた要求ごとの様子。取り込めるものと、最近の引き受けなかったもの
@@ -123,7 +182,8 @@ fn reason(rejection: &Rejection) -> String {
 }
 
 impl Delegated {
-    /// `data_directory` の `harvesters.dat` と `harvesters.height` を読む。なければ、高さ `tip` より後の要求を読む
+    /// `data_directory` の `harvesters.dat`、`harvesters.height`、`delegations.yaml` を読む。なければ、高さ `tip` より後の
+    /// 要求を読む
     pub fn open(
         key: PrivateKey,
         network: NetworkIdentifier,
@@ -133,6 +193,7 @@ impl Delegated {
     ) -> Result<Self, NodeError> {
         let file = data_directory.join("harvesters.dat");
         let height_file = data_directory.join("harvesters.height");
+        let status_file = data_directory.join("delegations.yaml");
         let mut candidates = Vec::new();
         match std::fs::read(&file) {
             Ok(bytes) => {
@@ -172,6 +233,15 @@ impl Delegated {
                 return Err(format!("{} を読めません: {error}", height_file.display()).into());
             }
         };
+        let statuses = read_statuses(&status_file);
+        // `harvesters.dat` には高さがないので、しまった様子から戻す
+        for entry in &mut candidates {
+            let remote = PublicKey::from_private_key(&entry.signing);
+            entry.height = statuses
+                .iter()
+                .find(|status| status.remote == remote)
+                .and_then(|status| status.height);
+        }
         let public_key = PublicKey::from_private_key(&key);
         println!(
             "委任を引き受けます（上限 {max} 件、要求の届け先 {}）",
@@ -184,8 +254,9 @@ impl Delegated {
             max,
             file,
             height_file,
+            status_file,
             candidates,
-            statuses: Vec::new(),
+            statuses,
             through,
         })
     }
@@ -325,6 +396,7 @@ impl Delegated {
             .collect();
         let changed = now != previous;
         self.save()?;
+        self.save_statuses()?;
         std::fs::write(&self.height_file, format!("{tip}\n"))
             .map_err(|error| format!("{} を書けません: {error}", self.height_file.display()))?;
         let message = (changed || missing > 0).then(|| {
@@ -358,16 +430,153 @@ impl Delegated {
         })
     }
 
-    /// 書きかけで落ちても壊さないように、別のファイルに書いてから置き換える
+    fn save_statuses(&self) -> Result<(), NodeError> {
+        let saved: Vec<SavedStatus> = self.statuses.iter().map(SavedStatus::from).collect();
+        let text = serde_norway::to_string(&saved)
+            .map_err(|error| format!("委任の様子を書き出せません: {error}"))?;
+        write_replacing(&self.status_file, text.as_bytes())
+    }
+
     fn save(&self) -> Result<(), NodeError> {
         let bytes: Vec<u8> = self
             .candidates
             .iter()
             .flat_map(|entry| entry.payload)
             .collect();
-        let temporary = self.file.with_extension("dat.new");
-        std::fs::write(&temporary, &bytes)
-            .and_then(|()| std::fs::rename(&temporary, &self.file))
-            .map_err(|error| format!("{} を書けません: {error}", self.file.display()).into())
+        write_replacing(&self.file, &bytes)
+    }
+}
+
+/// 書きかけで落ちても壊さないように、別のファイルに書いてから置き換える
+fn write_replacing(path: &Path, bytes: &[u8]) -> Result<(), NodeError> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".new");
+    std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|error| format!("{} を書けません: {error}", path.display()).into())
+}
+
+/// しまった様子。見せるためだけのものなので、なかったり読めなかったりしたら、空から始める（次にブロックを足したときに
+/// 作り直す。引き受けなかったものは、そこで忘れる）
+fn read_statuses(path: &Path) -> Vec<DelegationStatus> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            eprintln!("警告: {} を読めません: {error}", path.display());
+            return Vec::new();
+        }
+    };
+    match serde_norway::from_str::<Vec<SavedStatus>>(&text) {
+        Ok(saved) => saved.into_iter().filter_map(SavedStatus::restore).collect(),
+        Err(error) => {
+            eprintln!(
+                "警告: {} が読めないので、委任の様子を空から始めます: {error}",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use heika_wallet::harvest_request::HarvesterKeys;
+
+    use super::*;
+
+    /// 決まったバイト列を返す乱数
+    struct Replay<'a>(&'a [u8]);
+
+    impl rand_core::TryRng for Replay<'_> {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            unimplemented!("only fill_bytes is used")
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            let (head, rest) = self.0.split_at(dst.len());
+            dst.copy_from_slice(head);
+            self.0 = rest;
+            Ok(())
+        }
+    }
+
+    impl rand_core::TryCryptoRng for Replay<'_> {}
+
+    fn key(byte: u8) -> PrivateKey {
+        PrivateKey::from_bytes(&[byte; 32])
+    }
+
+    #[test]
+    fn statuses_survive_a_restart() {
+        let directory =
+            std::env::temp_dir().join(format!("heika-delegated-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let node = key(1);
+        let keys = HarvesterKeys {
+            signing: key(2),
+            vrf: key(3),
+        };
+        let message = harvest_request::encode(
+            &mut Replay(&[4; 64]),
+            &PublicKey::from_private_key(&node),
+            &keys,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("harvesters.dat"),
+            &message[harvest_request::MARKER.len()..],
+        )
+        .unwrap();
+        std::fs::write(directory.join("harvesters.height"), "10\n").unwrap();
+        let open = || {
+            Delegated::open(
+                PrivateKey::from_bytes(node.as_bytes()),
+                NetworkIdentifier::TESTNET,
+                5,
+                &directory,
+                10,
+            )
+            .unwrap()
+        };
+
+        // しまった様子がなければ、空から始める
+        let mut delegated = open();
+        assert!(delegated.statuses().is_empty());
+        assert_eq!(delegated.candidates[0].height, None);
+        let remote = PublicKey::from_private_key(&keys.signing);
+        delegated.statuses = vec![
+            DelegationStatus {
+                main_account: Some(PublicKey::from_private_key(&key(5))),
+                remote,
+                height: Some(7),
+                state: DelegationState::Accepted,
+            },
+            DelegationStatus {
+                main_account: None,
+                remote: PublicKey::from_private_key(&key(6)),
+                height: Some(8),
+                state: DelegationState::Rejected("わけ".to_owned()),
+            },
+        ];
+        delegated.save_statuses().unwrap();
+
+        // 起動し直しても、様子と、要求が入っていた高さが戻る
+        let reopened = open();
+        assert_eq!(reopened.statuses(), delegated.statuses());
+        assert_eq!(reopened.candidates[0].height, Some(7));
+
+        // 読めなければ、空から始める（委任そのものは harvesters.dat から読む）
+        std::fs::write(directory.join("delegations.yaml"), "- [壊れている").unwrap();
+        let broken = open();
+        assert!(broken.statuses().is_empty());
+        assert_eq!(broken.keys().len(), 1);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

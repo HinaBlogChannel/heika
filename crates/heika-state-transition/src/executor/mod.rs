@@ -9,6 +9,7 @@
 
 mod partial;
 pub use partial::{Wanted, is_partial_row};
+pub use validate::PartialCheck;
 pub mod persist;
 mod rules;
 pub mod source;

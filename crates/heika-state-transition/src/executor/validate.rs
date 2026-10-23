@@ -361,3 +361,65 @@ impl Executor {
         Ok(())
     }
 }
+
+/// 連署を待つアグリゲートボンデッドを、今の状態で確かめた結果（catapult の `PtUpdater` の確かめ）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartialCheck {
+    /// 連署が揃った。未承認の置き場に移せる
+    Complete,
+    /// 連署が足りない。待つ
+    Missing,
+    /// 連署できない人（マルチシグをたどっても、どの中のトランザクションにも要らない）の公開鍵。外側の署名者の
+    /// こともある
+    Ineligible(Vec<PublicKey>),
+}
+
+impl Executor {
+    /// アグリゲートボンデッド `hash` のハッシュロックが、確定していて、使われておらず、期限が来ていないか
+    /// （catapult の `AggregateHashPresentValidator`）。今の先端の高さで見る
+    pub fn hash_lock_ready(&self, hash: &Hash256) -> bool {
+        let height = self.height;
+        self.hash_locks
+            .get(&hash.0)
+            .and_then(|history| history.last())
+            .is_some_and(|lock| lock.status == LockStatus::Unused && height < lock.end_height)
+    }
+
+    /// 連署を待つアグリゲートボンデッドを、今の状態で確かめる。連署できない人がいれば、それを返す。いなければ、
+    /// 中のトランザクションに要る署名者がみな（マルチシグならたどって要る数だけ）連署しているか。
+    /// ブロックの中と違い、中のトランザクションは当てずに、今の状態のまま見る（catapult と同じ）
+    pub fn check_partial(&self, transaction: &Transaction) -> PartialCheck {
+        let Body::AggregateBonded(aggregate) = &transaction.body else {
+            return PartialCheck::Ineligible(vec![transaction.signer_public_key]);
+        };
+        let mut eligible = BTreeSet::new();
+        for inner in aggregate.transactions() {
+            for address in self.required_signers(inner) {
+                self.mark_eligible(address, &mut eligible, 0);
+            }
+        }
+        let ineligible: Vec<PublicKey> = std::iter::once(&transaction.signer_public_key)
+            .chain(
+                aggregate
+                    .cosignatures()
+                    .iter()
+                    .map(|cosignature| &cosignature.signer_public_key),
+            )
+            .filter(|key| !eligible.contains(&self.address_of(key)))
+            .copied()
+            .collect();
+        if !ineligible.is_empty() {
+            return PartialCheck::Ineligible(ineligible);
+        }
+        let cosigners = self.cosigners(transaction, aggregate);
+        if aggregate
+            .transactions()
+            .iter()
+            .all(|inner| self.check_sufficient_cosigners(&cosigners, inner).is_ok())
+        {
+            PartialCheck::Complete
+        } else {
+            PartialCheck::Missing
+        }
+    }
+}

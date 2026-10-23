@@ -42,6 +42,7 @@ use crate::verify::{Tip, verify_link};
 mod accept;
 mod finality;
 mod harvest;
+mod partial;
 mod push;
 mod sync;
 

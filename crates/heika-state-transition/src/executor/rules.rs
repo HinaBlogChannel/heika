@@ -1716,6 +1716,77 @@ mod tests {
     }
 
     #[test]
+    fn checks_partial_bonded_aggregates_against_the_multisig_and_the_lock() {
+        use heika_core::hash::Hash256;
+        use heika_core::signature::Signature;
+        use heika_transaction::{
+            Aggregate, Cosignature, EmbeddedTransaction, Transaction, Transfer,
+        };
+
+        use super::super::{HashLockInfo, PartialCheck};
+
+        let mut executor = executor();
+        let key = |n: u8| PublicKey([n; 32]);
+        let (multisig, b, c) = (key(1), key(2), key(3));
+        // 2-of-2 のマルチシグ。b が外側の署名者になって、マルチシグからの送金を出す
+        let addresses = [multisig, b, c].map(|key| executor.address_of(&key));
+        link_multisig(&mut executor, addresses[0], &addresses[1..]);
+        let transfer = Body::Transfer(
+            Transfer::new(
+                UnresolvedAddress(addresses[1]),
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let inner = EmbeddedTransaction::new(multisig, executor.network, transfer);
+        let bonded = |cosigners: &[PublicKey]| {
+            let mut aggregate = Aggregate::new(vec![inner.clone()]).unwrap();
+            for cosigner in cosigners {
+                aggregate.add_cosignature(Cosignature {
+                    signer_public_key: *cosigner,
+                    signature: Signature([0; 64]),
+                });
+            }
+            Transaction::new(b, executor.network, 0, 1, Body::AggregateBonded(aggregate))
+        };
+        assert_eq!(executor.check_partial(&bonded(&[])), PartialCheck::Missing);
+        assert_eq!(
+            executor.check_partial(&bonded(&[c])),
+            PartialCheck::Complete
+        );
+        // 要らない人の連署
+        assert_eq!(
+            executor.check_partial(&bonded(&[c, key(4)])),
+            PartialCheck::Ineligible(vec![key(4)])
+        );
+
+        // ハッシュロックは、使われておらず、期限が来ていないものだけ
+        let hash = Hash256([7; 32]);
+        assert!(!executor.hash_lock_ready(&hash));
+        let lock = |status, end_height| HashLockInfo {
+            owner: addresses[1],
+            mosaic_id: 0,
+            amount: 10_000_000,
+            end_height,
+            status,
+        };
+        executor.height = 10;
+        executor
+            .hash_locks
+            .insert(hash.0, vec![lock(LockStatus::Unused, 11)]);
+        assert!(executor.hash_lock_ready(&hash));
+        executor
+            .hash_locks
+            .insert(hash.0, vec![lock(LockStatus::Unused, 10)]);
+        assert!(!executor.hash_lock_ready(&hash));
+        executor
+            .hash_locks
+            .insert(hash.0, vec![lock(LockStatus::Used, 11)]);
+        assert!(!executor.hash_lock_ready(&hash));
+    }
+
+    #[test]
     fn multisig_depth_and_loops() {
         let mut executor = executor();
         let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(address);

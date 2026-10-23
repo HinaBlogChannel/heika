@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "heika のノードの REST。catapult の REST のうち、ウォレットが委任に使う口と、heika だけの口"
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base16ct = "1.0.0"
 heika-core = { path = "../heika-core" }
 heika-rest = { path = "../heika-rest" }

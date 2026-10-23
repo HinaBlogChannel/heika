@@ -1,6 +1,7 @@
 //! heika のノードの REST。catapult の REST のうち、ウォレットが委任に使う口と、heika だけの口を返す。
 //!
 //! - `/node/info`: ノードの身元と、委任の鍵（`nodePublicKey`）
+//! - `/node/peers`: 知っているピア。GUI のノードは、ここから最初のつなぎ先を選ぶ
 //! - `/chain/info`: 高さ、スコア、確定したブロック
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
@@ -48,6 +49,8 @@ use heika_rest::transaction::TransactionInfo;
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub node: NodeInfoJson,
+    /// 知っているピア（ピアの `Node_Discovery_Pull_Peers` に答えるものと同じ）
+    pub peers: Vec<NodeInfoJson>,
     pub chain: ChainInfoJson,
     pub unlocked: UnlockedAccountJson,
     pub delegations: Vec<DelegationJson>,
@@ -112,6 +115,10 @@ fn read(api: &Api) -> Snapshot {
 
 async fn node_info(State(api): State<Api>) -> Json<NodeInfoJson> {
     Json(read(&api).node)
+}
+
+async fn node_peers(State(api): State<Api>) -> Json<Vec<NodeInfoJson>> {
+    Json(read(&api).peers)
 }
 
 async fn chain_info(State(api): State<Api>) -> Json<ChainInfoJson> {
@@ -307,6 +314,7 @@ async fn allow_any_origin(mut response: Response) -> Response {
 pub fn router(shared: Shared, node: Node) -> Router {
     Router::new()
         .route("/node/info", get(node_info))
+        .route("/node/peers", get(node_peers))
         .route("/chain/info", get(chain_info))
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
@@ -390,8 +398,9 @@ mod tests {
                 network_identifier: 0x98,
                 host: String::new(),
                 friendly_name: "heika".to_owned(),
-                node_public_key: "CC".to_owned(),
+                node_public_key: Some("CC".to_owned()),
             },
+            peers: Vec::new(),
             chain: ChainInfoJson::new(10, 10, 1, 2, 8, "DD".to_owned()),
             unlocked: UnlockedAccountJson {
                 unlocked_account: vec!["EE".to_owned()],
@@ -433,6 +442,16 @@ mod tests {
         assert_eq!(unlocked["unlockedAccount"][0], "EE");
         let (_, delegations) = get(Arc::clone(&shared), "/heika/delegations").await;
         assert_eq!(delegations[0]["state"], "accepted");
+        // ピアは、委任の鍵を持たない形で返す
+        let peer = NodeInfoJson {
+            node_public_key: None,
+            host: "peer.example".to_owned(),
+            ..shared.read().unwrap().node.clone()
+        };
+        shared.write().unwrap().peers = vec![peer];
+        let (_, peers) = get(Arc::clone(&shared), "/node/peers").await;
+        assert_eq!(peers[0]["host"], "peer.example");
+        assert!(peers[0].get("nodePublicKey").is_none());
         // 駆動役が書き換えたら、次の問い合わせから新しいものを返す
         shared.write().unwrap().chain = ChainInfoJson::new(11, 11, 1, 3, 9, "DD".to_owned());
         let (_, chain) = get(shared, "/chain/info").await;

@@ -100,6 +100,7 @@ spec:
 | 口 | 返すもの |
 |---|---|
 | `/node/info` | ノードの身元。`nodePublicKey` は委任の鍵（委任する人が NodeKeyLink を向ける鍵） |
+| `/node/peers` | 知っているピア（ピアの名簿の問い合わせに答えるものと同じ）。GUI のノードは、ここから最初のつなぎ先を選ぶ |
 | `/chain/info` | 高さ、スコア、確定したブロック |
 | `/node/unlockedaccount` | 引き受けて、ハーベストしている委任のリモートの鍵 |
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |

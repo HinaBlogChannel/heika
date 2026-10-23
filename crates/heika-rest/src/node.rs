@@ -1,4 +1,4 @@
-//! ノードとチェーンの様子。`/node/info`、`/chain/info`、`/node/unlockedaccount` が返す JSON と、heika だけの
+//! ノードとチェーンの様子。`/node/info`、`/node/peers`、`/chain/info`、`/node/unlockedaccount` が返す JSON と、heika だけの
 //! `/heika/delegations`（委任の様子）と、`PUT /transactions` の本文と答え。
 //!
 //! catapult の REST の `NodeInfoDTO`、`ChainInfoDTO`、`UnlockedAccountDTO` に合わせている。64ビットの数は、catapult の
@@ -19,8 +19,9 @@ pub struct NodeInfoJson {
     pub network_identifier: u8,
     pub host: String,
     pub friendly_name: String,
-    /// 委任の鍵（NodeKeyLink を向ける鍵）。16進
-    pub node_public_key: String,
+    /// 委任の鍵（NodeKeyLink を向ける鍵）。16進。`/node/peers` のピアにはない
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_public_key: Option<String>,
 }
 
 /// `FinalizedBlockDTO`

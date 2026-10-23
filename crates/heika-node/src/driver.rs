@@ -398,10 +398,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
             node: api_node(identity, spec, parameters, &node_public_key),
             chain: api_chain(&chain.status()),
             unlocked: Default::default(),
+            peers: Vec::new(),
             delegations: Vec::new(),
         };
         let shared: heika_api::Shared = Arc::new(RwLock::new(snapshot));
-        refresh_api(&shared, &chain, delegated.as_ref());
+        refresh_api(&shared, &chain, &peers.reply(), delegated.as_ref());
         // 送ったトランザクションの行方を答えるための、直近のブロックの索引
         let recent = RecentTransactions::open(
             store.db(),
@@ -688,7 +689,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 *status.write().expect("not poisoned") = chain.status();
                 *reply.write().expect("not poisoned") = peers.reply();
                 if let Some((shared, _)) = &api {
-                    refresh_api(shared, &chain, delegated.as_ref());
+                    refresh_api(shared, &chain, &peers.reply(), delegated.as_ref());
                 }
             }
             Ok(Outcome::Stopped)
@@ -797,8 +798,27 @@ fn api_node(
         friendly_name: listen
             .and_then(|listen| listen.friendly_name.clone())
             .unwrap_or_default(),
-        node_public_key: node_public_key.to_string(),
+        node_public_key: Some(node_public_key.to_string()),
     }
+}
+
+/// ピアに `Node_Discovery_Pull_Peers` で答えるもの（`reply`）を、REST の `/node/peers` の形にする
+fn api_peers(reply: &[u8]) -> Vec<NodeInfoJson> {
+    NetworkNode::decode_list(reply)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|node| NodeInfoJson {
+            version: node.version.0,
+            public_key: node.identity_key.to_string(),
+            network_generation_hash_seed: node.network_generation_hash_seed.to_string(),
+            roles: node.roles.0,
+            port: node.port,
+            network_identifier: node.network_identifier.0,
+            host: node.host,
+            friendly_name: node.friendly_name,
+            node_public_key: None,
+        })
+        .collect()
 }
 
 /// API の `/chain/info`
@@ -818,12 +838,14 @@ fn api_chain(status: &heika_chain::chain::Status) -> ChainInfoJson {
 fn refresh_api(
     shared: &heika_api::Shared,
     chain: &Chain<'_, CachedStore>,
+    peers: &[u8],
     delegated: Option<&Delegated>,
 ) {
     let mut snapshot = shared
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     snapshot.chain = api_chain(&chain.status());
+    snapshot.peers = api_peers(peers);
     let Some(delegated) = delegated else {
         return;
     };

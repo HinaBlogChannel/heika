@@ -7,6 +7,8 @@
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
+//! - `/transactionStatus/{hash}`、`/transactions/confirmed/{hash}`、`/blocks/{height}/transactions/{hash}/merkle`:
+//!   送ったトランザクションの行方と、入ったブロックへの Merkle の経路
 //!
 //! ノードの駆動役が [`Snapshot`] を書き換え、ここは読んで返すだけにする。チェーンの本体には触らない。
 //! 受け付けたトランザクションは、駆動役から渡された [`Submit`] に渡し、状態とブロックは [`Reader`] で読む。
@@ -32,12 +34,14 @@ use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::patricia::{self, SubCache};
 use heika_rest::block::BlockInfo;
-use heika_rest::merkle::MerkleStateInfo;
+use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
     AnnounceJson, AnnounceResultJson, ChainInfoJson, DelegationJson, ErrorJson, NodeInfoJson,
     UnlockedAccountJson,
 };
+use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
+use heika_rest::transaction::TransactionInfo;
 
 /// API が返す、ノードの今の様子
 #[derive(Clone, Debug)]
@@ -65,6 +69,16 @@ pub trait Reader: Send + Sync {
     fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String>;
     /// `height` のブロック。なければ（まだないか、刈り込んだか、その高さの根がもうなければ）`None`
     fn block(&self, height: u64) -> Result<Option<BlockInfo>, String>;
+    /// トランザクションの行方。知らなければ `None`
+    fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String>;
+    /// 承認されたトランザクション。知らなければ `None`
+    fn confirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
+    /// 高さ `height` のブロックの TransactionsHash への、`hash` のトランザクションの経路。なければ `None`
+    fn transaction_merkle(
+        &self,
+        height: u64,
+        hash: &Hash256,
+    ) -> Result<Option<MerkleProofInfo>, String>;
     /// 公開鍵からアドレスを出すときのネットワーク
     fn network(&self) -> NetworkIdentifier;
 }
@@ -208,11 +222,49 @@ async fn mosaic_merkle(State(api): State<Api>, Path(id): Path<String>) -> Respon
     )
 }
 
+fn block_height(height: &str) -> Option<u64> {
+    height.parse::<u64>().ok().filter(|&height| height > 0)
+}
+
 async fn block(State(api): State<Api>, Path(height): Path<String>) -> Response {
-    let Some(number) = height.parse::<u64>().ok().filter(|&height| height > 0) else {
+    let Some(number) = block_height(&height) else {
         return invalid("height has an invalid format".to_owned());
     };
     found(&height, api.node.reader.block(number))
+}
+
+/// トランザクションのハッシュ。16進
+fn transaction_hash(hash: &str) -> Option<Hash256> {
+    if hash.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    base16ct::mixed::decode(hash, &mut bytes).ok()?;
+    Some(Hash256(bytes))
+}
+
+async fn transaction_status(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(key) = transaction_hash(&hash) else {
+        return invalid("hash has an invalid format".to_owned());
+    };
+    found(&hash, api.node.reader.transaction_status(&key))
+}
+
+async fn confirmed_transaction(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(key) = transaction_hash(&hash) else {
+        return invalid("transactionId has an invalid format".to_owned());
+    };
+    found(&hash, api.node.reader.confirmed_transaction(&key))
+}
+
+async fn transaction_merkle(
+    State(api): State<Api>,
+    Path((height, hash)): Path<(String, String)>,
+) -> Response {
+    let (Some(number), Some(key)) = (block_height(&height), transaction_hash(&hash)) else {
+        return invalid("height or hash has an invalid format".to_owned());
+    };
+    found(&hash, api.node.reader.transaction_merkle(number, &key))
 }
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
@@ -257,6 +309,12 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
         .route("/blocks/{height}", get(block))
+        .route("/transactionStatus/{hash}", get(transaction_status))
+        .route("/transactions/confirmed/{hash}", get(confirmed_transaction))
+        .route(
+            "/blocks/{height}/transactions/{hash}/merkle",
+            get(transaction_merkle),
+        )
         .layer(map_response(allow_any_origin))
         .with_state(Api { shared, node })
 }
@@ -417,6 +475,35 @@ mod tests {
             Ok(None)
         }
 
+        fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String> {
+            Ok((hash.0 == [0xAA; 32]).then(|| TransactionStatus {
+                group: "confirmed".to_owned(),
+                code: Some("Success".to_owned()),
+                hash: hash.to_string(),
+                deadline: Some("1".to_owned()),
+                height: Some("7".to_owned()),
+            }))
+        }
+
+        fn confirmed_transaction(
+            &self,
+            _hash: &Hash256,
+        ) -> Result<Option<TransactionInfo>, String> {
+            Ok(None)
+        }
+
+        fn transaction_merkle(
+            &self,
+            height: u64,
+            hash: &Hash256,
+        ) -> Result<Option<MerkleProofInfo>, String> {
+            Ok(
+                (height == 7 && hash.0 == [0xAA; 32]).then(|| MerkleProofInfo {
+                    merkle_path: Vec::new(),
+                }),
+            )
+        }
+
         fn network(&self) -> NetworkIdentifier {
             NetworkIdentifier::TESTNET
         }
@@ -487,6 +574,36 @@ mod tests {
         );
 
         assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+
+        let known = "AA".repeat(32);
+        let (status, body) = get_status(&format!("/transactionStatus/{known}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["group"], "confirmed");
+        assert_eq!(body["height"], "7");
+        let unknown = "BB".repeat(32);
+        assert_eq!(
+            get_status(&format!("/transactionStatus/{unknown}")).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_status("/transactionStatus/AB").await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            get_status(&format!("/transactions/confirmed/{known}"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, body) = get_status(&format!("/blocks/7/transactions/{known}/merkle")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["merklePath"], serde_json::json!([]));
+        assert_eq!(
+            get_status(&format!("/blocks/8/transactions/{known}/merkle"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
         for height in ["0", "abc"] {
             assert_eq!(
                 get_status(&format!("/blocks/{height}")).await.0,

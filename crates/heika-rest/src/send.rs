@@ -16,7 +16,7 @@ use heika_block::Block;
 use heika_core::merkle::{MerklePathNode, verify_path};
 use heika_core::network::GenerationHashSeed;
 use heika_transaction::Transaction;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::RestError;
 use crate::balance::{BalanceError, Mismatch, VerifyError, optional, required};
@@ -37,7 +37,7 @@ pub fn announce_body(transaction: &Transaction) -> String {
 }
 
 /// `/transactionStatus/{hash}` が返す `TransactionStatusDTO`。REST が言っているだけで、確かめたものではない
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionStatus {
     /// `unconfirmed`、`confirmed`、`failed` のどれか

@@ -10,5 +10,6 @@ pub mod identity;
 pub mod keys;
 pub mod peer_thread;
 pub mod reader;
+pub mod recent;
 pub mod serve;
 pub mod store;

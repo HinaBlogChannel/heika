@@ -40,6 +40,7 @@ use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
 use crate::reader::DbReader;
+use crate::recent::RecentTransactions;
 use crate::serve::{DbSource, Gate, Responder, serve};
 use crate::store::CachedStore;
 
@@ -401,11 +402,18 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         };
         let shared: heika_api::Shared = Arc::new(RwLock::new(snapshot));
         refresh_api(&shared, &chain, delegated.as_ref());
-        Some(shared)
+        // 送ったトランザクションの行方を答えるための、直近のブロックの索引
+        let recent = RecentTransactions::open(
+            store.db(),
+            parameters.generation_hash_seed,
+            setup.config.max_transaction_lifetime,
+            chain.height(),
+        )?;
+        Some((shared, Arc::new(RwLock::new(recent))))
     };
     let api_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let outcome = std::thread::scope(|scope| -> Result<Outcome, NodeError> {
-        if let Some(shared) = &api {
+        if let Some((shared, recent)) = &api {
             let addresses: Vec<String> =
                 spec.rest.iter().map(|rest| rest.address.clone()).collect();
             let node = heika_api::Node {
@@ -419,6 +427,9 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     store.shared_db(),
                     parameters.identifier,
                     setup.config.currency_mosaic_id,
+                    parameters.generation_hash_seed,
+                    Arc::clone(&mempool),
+                    Arc::clone(recent),
                 )),
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
@@ -553,10 +564,20 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                         if let Some(delegated) = delegated.as_mut() {
                                             delegated.rewind(*common);
                                         }
+                                        if let Some((_, recent)) = &api {
+                                            write(recent).rewind(*common);
+                                        }
                                         Some(new.height)
                                     }
                                     _ => None,
                                 };
+                                if let (Some(height), Some((_, recent))) = (reached, &api)
+                                    && let Err(error) = write(recent).advance(store.db(), height)
+                                {
+                                    eprintln!(
+                                        "入ったトランザクションの索引を作れませんでした: {error}"
+                                    );
+                                }
                                 if let (Some(height), Some(delegated)) =
                                     (reached, delegated.as_mut())
                                 {
@@ -623,7 +644,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 }
                 *status.write().expect("not poisoned") = chain.status();
                 *reply.write().expect("not poisoned") = peers.reply();
-                if let Some(shared) = &api {
+                if let Some((shared, _)) = &api {
                     refresh_api(shared, &chain, delegated.as_ref());
                 }
             }
@@ -901,6 +922,12 @@ fn submit(
             Err(error) => Err(error.to_string()),
         }
     })
+}
+
+/// 書く側の鍵。読む側（API）が落ちていても書き続ける
+fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Nemesis からのミリ秒。トランザクションの期限と同じ数え方

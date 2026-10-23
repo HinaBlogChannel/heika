@@ -1,4 +1,4 @@
-//! すんぼる草不可避。送り先のアドレスに決まった額（既定は 1 XYM）以上を送るたびに、畑に何かが1つ生える。
+//! すんぼる草不可避。送り先のアドレスに決まった額（既定は 10 XYM）以上を送るたびに、畑に何かが1つ生える。
 //! 鍵は扱わない。REST から送金の履歴を読んで描くだけ。
 
 mod field;
@@ -21,7 +21,7 @@ const DEFAULT_TARGET: &str = match option_env!("KUSA_TARGET") {
 /// 数える最低額（XYM）。ビルドするときに環境変数 `KUSA_MIN_XYM` で決める。遊ぶ人もくわしい設定で変えられる
 const DEFAULT_MIN: &str = match option_env!("KUSA_MIN_XYM") {
     Some(min) => min,
-    None => "1",
+    None => "10",
 };
 /// ブラウザから読める公開ノードの一覧（`discover` で作り、ビルドするときに `KUSA_NODES` で渡す）。
 /// `{"mainnet": [URL…], "testnet": [URL…]}`。渡さなければ空で、遊ぶ人が REST を決める

@@ -351,7 +351,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 parameters.identifier,
                 config.max,
                 &spec.data_directory,
-                chain.status().finalized.height,
+                chain.height(),
             )?)
         }
         None => None,
@@ -489,11 +489,23 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 } else {
                                     println!("{notice}");
                                 }
-                                // 確定が進んだら、そこまでに届いた委任の要求を読み、引き受けているものを確かめ直す
-                                if let (Notice::Finalized { height, .. }, Some(delegated)) =
-                                    (&notice, delegated.as_mut())
+                                // 先端が進んだら、そこまでに届いた委任の要求を読み、取り込めるものを確かめ直す。
+                                // 枝を取り替えたら、分かれ目から読み直す
+                                let reached = match &notice {
+                                    Notice::Accepted { height, .. }
+                                    | Notice::Produced { height, .. } => Some(*height),
+                                    Notice::Switched { common, new, .. } => {
+                                        if let Some(delegated) = delegated.as_mut() {
+                                            delegated.rewind(*common);
+                                        }
+                                        Some(new.height)
+                                    }
+                                    _ => None,
+                                };
+                                if let (Some(height), Some(delegated)) =
+                                    (reached, delegated.as_mut())
                                 {
-                                    match delegated.finalized(store.db(), *height) {
+                                    match delegated.advance(store.db(), height) {
                                         Ok(progress) => {
                                             if let Some(message) = progress.message {
                                                 println!("{message}");

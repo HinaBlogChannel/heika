@@ -325,7 +325,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     )?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     let book = setup.book(&db)?;
-    let store = CachedStore::new(db, spec.storage.cache.state_megabytes << 20);
+    let store = CachedStore::new(Arc::new(db), spec.storage.cache.state_megabytes << 20);
     let mut chain = now_or_never(Chain::new(
         &store,
         &SystemEnv,

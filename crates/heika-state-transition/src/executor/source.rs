@@ -2,7 +2,7 @@
 //! （ブラウザでは、OPFS を専用の Worker から同期で使う前提）。
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::ExecError;
 
@@ -18,6 +18,25 @@ pub trait StateSource {
         prefix: &[u8],
         visit: &mut dyn FnMut(&[u8], &[u8]),
     ) -> Result<(), ExecError>;
+}
+
+/// 分け合っている読み口。ほかのスレッドと同じ DB を読むとき
+impl<S: StateSource + ?Sized> StateSource for Arc<S> {
+    fn row(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+        (**self).row(key)
+    }
+
+    fn node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+        (**self).node(key)
+    }
+
+    fn for_each_row(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]),
+    ) -> Result<(), ExecError> {
+        (**self).for_each_row(prefix, visit)
+    }
 }
 
 /// [`StateSource`] を包み、読んだ行と木のノード（なかったことも）を覚えておくキャッシュ。要るものだけを読む

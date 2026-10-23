@@ -473,6 +473,15 @@ pub fn height_of_meta(meta: &[u8]) -> Result<u64, ExecError> {
     Reader::new(meta).u64()
 }
 
+/// アカウントの行（[`row_key`] が [`SubCache::AccountState`] の行）の値を読む。ノードが、ブロックを作る外で
+/// アカウントのリンクを確かめるときに使う
+pub fn decode_account_row(value: &[u8]) -> Result<AccountState, ExecError> {
+    let mut reader = Reader::new(value);
+    let account = decode_account(&mut reader)?;
+    reader.finish()?;
+    Ok(account)
+}
+
 /// 行のキー
 pub fn row_key(cache: SubCache, key: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + key.len());
@@ -923,4 +932,24 @@ fn set_or_remove<K: Ord, V>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_rows_read_back() {
+        let mut account = AccountState::new([0x68; 24], 7);
+        account.public_key = [1; 32];
+        account.account_type = AccountType::Main;
+        account.linked = Some([2; 32]);
+        account.node = Some([3; 32]);
+        account.vrf = Some([4; 32]);
+        account.credit(0x6BED_913F_A202_23F8, 10_000);
+        let row = encode_account(&account);
+        assert_eq!(decode_account_row(&row).unwrap(), account);
+        // 余りのある行は読まない
+        assert!(decode_account_row(&[row, vec![0]].concat()).is_err());
+    }
 }

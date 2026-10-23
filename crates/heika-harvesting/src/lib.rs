@@ -2,6 +2,7 @@
 
 pub mod delegation;
 pub mod harvesters_dat;
+pub mod unlocked;
 
 #[cfg(test)]
 mod testing {

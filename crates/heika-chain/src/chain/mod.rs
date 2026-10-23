@@ -612,6 +612,8 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     harvest_warning: Option<String>,
     /// 未承認のトランザクションの置き場。なければ、トランザクションのないブロックを作る
     pending: Option<Arc<dyn produce::Pending>>,
+    /// 作るブロックの受取先。なければ、署名した鍵のアドレス
+    beneficiary: Option<Address>,
     /// 駆動役にまだ渡していない指示
     actions: Vec<Action>,
 }
@@ -663,6 +665,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
             planned: None,
             harvest_warning: None,
             pending: None,
+            beneficiary: None,
             actions: Vec::new(),
         })
     }
@@ -678,6 +681,12 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
     /// [`Action::Included`] と [`Action::Restored`] で知らせる
     pub fn set_pending(&mut self, pending: Arc<dyn produce::Pending>) {
         self.pending = Some(pending);
+    }
+
+    /// 作るブロックの受取先（報酬のうち受取先の分を受け取るアドレス）。`None` なら、署名した鍵のアドレスにする。
+    /// 委任を引き受けるノードは、運営者のアドレスにする
+    pub fn set_beneficiary(&mut self, beneficiary: Option<Address>) {
+        self.beneficiary = beneficiary;
     }
 
     /// 確定を上げるたびに、残す分より下の差分を消す

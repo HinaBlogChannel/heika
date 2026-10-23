@@ -10,12 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use heika_cert::certificate::Certificate;
 use heika_cert::key::private_key_from_pem;
-use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Outcome, Penalty};
+use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
 use heika_chain::produce::Pending;
 use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::nemesis_hash;
+use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::key::PrivateKey;
 use heika_core::network::NetworkParameters;
@@ -31,6 +32,7 @@ use heika_tls::{ConnectError, Identity};
 
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
+use crate::delegated::Delegated;
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
 use crate::peer_thread::{self, NodeEvent, Request};
@@ -329,10 +331,35 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     if let Some(keep) = keep(spec)? {
         chain.set_keep(keep);
     }
-    let (mut applied, keys) = setup
+    if let Some(beneficiary) = &spec.beneficiary {
+        let address: Address = beneficiary
+            .trim()
+            .parse()
+            .map_err(|_| format!("beneficiary の {beneficiary} が、アドレスとして読めません"))?;
+        chain.set_beneficiary(Some(address));
+    }
+    let mut delegated = match &spec.delegations {
+        Some(config) => {
+            let path = config
+                .key
+                .clone()
+                .unwrap_or_else(|| spec.certificates.directory.join("tls.key"));
+            let key = read_private_key(&path)
+                .map_err(|error| format!("委任の鍵 {} を読めません: {error}", path.display()))?;
+            Some(Delegated::open(
+                key,
+                parameters.identifier,
+                config.max,
+                &spec.data_directory,
+                chain.status().finalized.height,
+            )?)
+        }
+        None => None,
+    };
+    let (mut applied, mut own) = setup
         .harvesters_if_changed(None)
         .expect("always returned the first time");
-    chain.set_harvesters(keys);
+    chain.set_harvesters(combined(&own, delegated.as_ref()));
     let mempool = Arc::new(SharedMempool::new(Mempool::new(
         parameters,
         heika_mempool::Config::default(),
@@ -403,7 +430,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 setup.harvesters_if_changed(Some(applied))
                             {
                                 applied = version;
-                                chain.set_harvesters(keys);
+                                own = keys;
+                                chain.set_harvesters(combined(&own, delegated.as_ref()));
                             }
                             mempool.lock().prune(network_now(parameters));
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
@@ -455,8 +483,34 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 });
                             }
                             Action::RejectPush(key) => gate.cut(key),
-                            Action::Notify(notice) if notice.is_warning() => eprintln!("{notice}"),
-                            Action::Notify(notice) => println!("{notice}"),
+                            Action::Notify(notice) => {
+                                if notice.is_warning() {
+                                    eprintln!("{notice}");
+                                } else {
+                                    println!("{notice}");
+                                }
+                                // 確定が進んだら、そこまでに届いた委任の要求を読み、引き受けているものを確かめ直す
+                                if let (Notice::Finalized { height, .. }, Some(delegated)) =
+                                    (&notice, delegated.as_mut())
+                                {
+                                    match delegated.finalized(store.db(), *height) {
+                                        Ok(progress) => {
+                                            if let Some(message) = progress.message {
+                                                println!("{message}");
+                                            }
+                                            if progress.changed {
+                                                chain.set_harvesters(combined(
+                                                    &own,
+                                                    Some(delegated),
+                                                ));
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!("委任の要求を読めませんでした: {error}")
+                                        }
+                                    }
+                                }
+                            }
                             Action::Included(hashes) => mempool.lock().tip_changed(
                                 &hashes,
                                 Vec::new(),
@@ -582,6 +636,19 @@ fn read_harvesters(spec: &NodeConfig) -> Result<Vec<KeyPair>, NodeError> {
         ));
     }
     Ok(keys)
+}
+
+/// 設定ファイルとメモリの自分の鍵に、引き受けている委任の鍵を足す
+fn combined(own: &[KeyPair], delegated: Option<&Delegated>) -> Arc<Vec<KeyPair>> {
+    let copy = |key: &PrivateKey| PrivateKey::from_bytes(key.as_bytes());
+    let mut keys: Vec<KeyPair> = own
+        .iter()
+        .map(|(signing, vrf)| (copy(signing), copy(vrf)))
+        .collect();
+    if let Some(delegated) = delegated {
+        keys.extend(delegated.keys());
+    }
+    Arc::new(keys)
 }
 
 /// 接続してきたピアに ping で返し、つないだピアに名乗る、自分の `NetworkNode`。鍵は CA の公開鍵

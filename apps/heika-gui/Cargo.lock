@@ -2033,6 +2033,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-finalization"
+version = "0.9.0"
+dependencies = [
+ "heika-block",
+ "heika-core",
+]
+
+[[package]]
 name = "heika-gui"
 version = "0.9.0"
 dependencies = [
@@ -2098,6 +2106,7 @@ dependencies = [
  "heika-cert",
  "heika-chain",
  "heika-core",
+ "heika-finalization",
  "heika-harvesting",
  "heika-mempool",
  "heika-packet",

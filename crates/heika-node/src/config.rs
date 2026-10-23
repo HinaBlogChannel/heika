@@ -129,17 +129,33 @@ pub struct Finalization {
     /// 投票はしない
     #[serde(default)]
     pub observe: bool,
+    /// 投票の鍵のフォルダー（catapult の `votingkeys`。`private_key_tree1.dat` から順に置く）。書くと投票する
+    /// （`observe` も有効になる）
+    #[serde(default)]
+    pub voting_keys: Option<PathBuf>,
+}
+
+impl Finalization {
+    /// 投票を数えるか
+    pub fn counts(&self) -> bool {
+        self.observe || self.voting_keys.is_some()
+    }
 }
 
 impl NodeConfig {
-    /// 名乗るロール。`listen.roles` がなければ、Peer と IPv4 に、REST の口があれば Api を足す
+    /// 名乗るロール。`listen.roles` がなければ、Peer と IPv4 に、REST の口があれば Api を、投票するなら Voting を足す
     pub fn roles(&self) -> NodeRoles {
         self.listen
             .as_ref()
             .and_then(|listen| listen.roles)
             .unwrap_or_else(|| {
                 let api = if self.rest.is_empty() { 0 } else { 0x02 };
-                NodeRoles(NodeRoles::PEER.0 | 0x40 | api)
+                let voting = self
+                    .finalization
+                    .as_ref()
+                    .filter(|finalization| finalization.voting_keys.is_some())
+                    .map_or(0, |_| NodeRoles::VOTING.0);
+                NodeRoles(NodeRoles::PEER.0 | 0x40 | api | voting)
             })
     }
 }
@@ -497,7 +513,19 @@ spec:
         let spec = Manifest::parse(&format!("{MINIMAL}  finalization:\n    observe: true\n"))
             .unwrap()
             .spec;
-        assert_eq!(spec.finalization, Some(Finalization { observe: true }));
+        assert_eq!(
+            spec.finalization,
+            Some(Finalization {
+                observe: true,
+                voting_keys: None
+            })
+        );
+        let voting = format!("{MINIMAL}  finalization:\n    votingKeys: /keys\n");
+        let spec = Manifest::parse(&voting).unwrap().spec;
+        let finalization = spec.finalization.as_ref().unwrap();
+        assert!(finalization.counts());
+        assert_eq!(finalization.voting_keys, Some(PathBuf::from("/keys")));
+        assert_eq!(spec.roles().0, 0x45);
         assert!(Manifest::parse(&format!("{MINIMAL}  finalization:\n    vote: true\n")).is_err());
     }
 

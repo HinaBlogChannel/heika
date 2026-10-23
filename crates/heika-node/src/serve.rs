@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use heika_block::Block;
+use heika_block::finalization::FinalizationRound;
 use heika_block::finalization::proof::proof_header;
 use heika_core::key::PublicKey;
 use heika_core::network::NetworkParameters;
@@ -37,6 +38,7 @@ use heika_chain::event::{ChainEvent, PULL_BLOCKS, PULL_HASHES};
 use heika_chain::verify::verify_alone;
 use heika_store_redb::Db;
 
+use crate::finalization::Observer;
 use crate::partials::Incoming;
 use crate::peer_thread::NodeEvent;
 
@@ -117,6 +119,9 @@ pub struct Responder<'a> {
     /// `Pull_Partial_Transaction_Infos` に答える、連署を待つものの置き場。`None` なら空で答える。押し付けられた
     /// 連署を待つものと連署は、状態で確かめるので、[`Responder::pushes`] で駆動役に渡す
     pub partials: Option<&'a SharedPartialPool>,
+    /// `Pull_Finalization_Messages` に答える、集めている投票。`None` なら空で答える。押し付けられた投票は、
+    /// [`Responder::pushes`] で駆動役に渡す
+    pub votes: Option<&'a Mutex<Observer>>,
 }
 
 impl Responder<'_> {
@@ -230,8 +235,27 @@ impl Responder<'_> {
                     &partials.unknown_to(min_deadline, &known),
                 ))
             }
-            // 集めている投票は持っていない
-            packet_type::PULL_FINALIZATION_MESSAGES => reply(Vec::new()),
+            // catapult の `FinalizationRoundRange` に、知っているメッセージの短いハッシュが続く
+            packet_type::PULL_FINALIZATION_MESSAGES => {
+                if body.len() < 16 || !(body.len() - 16).is_multiple_of(4) {
+                    return Ok(Answer::Close(
+                        "投票のメッセージの要求を読めません".to_owned(),
+                    ));
+                }
+                let Some(votes) = self.votes else {
+                    return reply(Vec::new());
+                };
+                let u32_at = |offset: usize| {
+                    u32::from_le_bytes(body[offset..offset + 4].try_into().expect("4 bytes"))
+                };
+                let round = |offset| FinalizationRound {
+                    epoch: u32_at(offset),
+                    point: u32_at(offset + 4),
+                };
+                let known: HashSet<u32> = (16..body.len()).step_by(4).map(u32_at).collect();
+                let votes = votes.lock().expect("not poisoned");
+                reply(votes.unknown_to(round(0), round(8), &known))
+            }
             packet_type::CHAIN_STATISTICS
             | packet_type::FINALIZATION_STATISTICS
             | packet_type::NODE_DISCOVERY_PULL_PING
@@ -311,10 +335,22 @@ impl Responder<'_> {
                 }
                 Ok(Answer::Nothing)
             }
+            // 投票は駆動役に渡す。読めなければ読み捨てる（catapult は空なら読み捨てる）
+            packet_type::PUSH_FINALIZATION_MESSAGES => {
+                if self.votes.is_some()
+                    && let (Ok(messages), Some(pushes)) = (split_size_prefixed(body), &self.pushes)
+                {
+                    let _ = pushes.send(NodeEvent::Votes {
+                        messages: messages.into_iter().map(<[u8]>::to_vec).collect(),
+                        from: None,
+                    });
+                }
+                Ok(Answer::Nothing)
+            }
             // ほかの押し付けられたものは、今は読み捨てる
-            packet_type::NODE_DISCOVERY_PUSH_PING
-            | packet_type::NODE_DISCOVERY_PUSH_PEERS
-            | packet_type::PUSH_FINALIZATION_MESSAGES => Ok(Answer::Nothing),
+            packet_type::NODE_DISCOVERY_PUSH_PING | packet_type::NODE_DISCOVERY_PUSH_PEERS => {
+                Ok(Answer::Nothing)
+            }
             _ => Ok(Answer::Close(format!(
                 "知らない種類 {request_type:#x} の要求が来ました"
             ))),
@@ -961,6 +997,7 @@ mod tests {
             pushes,
             mempool,
             partials: None,
+            votes: None,
         }
         .answer(request_type, body)
     }
@@ -1146,13 +1183,18 @@ mod tests {
         for (request_type, body) in [
             (packet_type::PULL_TRANSACTIONS, &[0; 12][..]),
             (packet_type::PULL_PARTIAL_TRANSACTION_INFOS, &[0; 16][..]),
-            (packet_type::PULL_FINALIZATION_MESSAGES, &[0; 12][..]),
+            (packet_type::PULL_FINALIZATION_MESSAGES, &[0; 16][..]),
         ] {
             assert_eq!(
                 answer(&source, request_type, body),
                 Answer::Reply(request_type, Vec::new())
             );
         }
+        // 形の合わない投票の要求は切る
+        assert!(matches!(
+            answer(&source, packet_type::PULL_FINALIZATION_MESSAGES, &[0; 12]),
+            Answer::Close(_)
+        ));
         // 形の合わない連署待ちの要求は切る
         assert!(matches!(
             answer(
@@ -1202,6 +1244,7 @@ mod tests {
             pushes: None,
             mempool: None,
             partials: None,
+            votes: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1278,6 +1321,7 @@ mod tests {
             pushes: None,
             mempool: None,
             partials: None,
+            votes: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();

@@ -1,4 +1,5 @@
-//! ノードとチェーンの様子。`/node/info`、`/node/peers`、`/chain/info`、`/node/unlockedaccount` が返す JSON と、heika だけの
+//! ノードとチェーンの様子。`/node/info`、`/node/peers`、`/chain/info`、`/node/unlockedaccount`、`/node/server`、`/node/health`、
+//! `/network` が返す JSON と、heika だけの
 //! `/heika/delegations`（委任の様子）と、`PUT /transactions` の本文と答え。
 //!
 //! catapult の REST の `NodeInfoDTO`、`ChainInfoDTO`、`UnlockedAccountDTO` に合わせている。64ビットの数は、catapult の
@@ -22,6 +23,51 @@ pub struct NodeInfoJson {
     /// 委任の鍵（NodeKeyLink を向ける鍵）。16進。`/node/peers` のピアにはない
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_public_key: Option<String>,
+}
+
+/// `NetworkTypeDTO`（`/network`）。ノードの一覧を作るクローラーは、これでどのネットワークのノードかを見分ける
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct NetworkJson {
+    /// `mainnet`、`testnet` など
+    pub name: String,
+    pub description: String,
+}
+
+/// `ServerInfoDTO`（`/node/server`）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfoJson {
+    pub server_info: ServerJson,
+}
+
+/// [`ServerInfoJson`] の中身。catapult の REST は、わからない値を `N/A` にする
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerJson {
+    pub rest_version: String,
+    pub deployment: DeploymentJson,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentJson {
+    pub deployment_tool: String,
+    pub deployment_tool_version: String,
+    pub last_updated_date: String,
+}
+
+/// `NodeHealthDTO`（`/node/health`）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct NodeHealthJson {
+    pub status: HealthStatusJson,
+}
+
+/// `up` か `down`
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthStatusJson {
+    pub api_node: String,
+    pub db: String,
 }
 
 /// `FinalizedBlockDTO`

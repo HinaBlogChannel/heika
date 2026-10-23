@@ -103,6 +103,7 @@ spec:
 | `/node/info` | ノードの身元。`nodePublicKey` は委任の鍵（委任する人が NodeKeyLink を向ける鍵） |
 | `/node/peers` | 知っているピア（ピアの名簿の問い合わせに答えるものと同じ）。GUI のノードは、ここから最初のつなぎ先を選ぶ |
 | `/chain/info` | 高さ、スコア、確定したブロック |
+| `/network`、`/node/server`、`/node/health` | ネットワークの名前（`mainnet` など）、REST の版（heika の版。配った道具は `heika`）、動いているか（同じプロセスなので、答えられれば `up`）。ノードの一覧を作るクローラーが、最初に叩く |
 | `/node/unlockedaccount` | 引き受けて、ハーベストしている委任のリモートの鍵 |
 | `/heika/sourcecode.zip` | このノードのソース（`heika legal source` と同じ、バイナリに入れた ZIP）。手を入れてビルドしたなら、そのソースが返る。AGPL-3.0 の 13 条のため。ソースの入っていないバイナリなら 404 |
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |

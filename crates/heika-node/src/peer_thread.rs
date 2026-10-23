@@ -9,8 +9,11 @@ use heika_chain::event::{ChainEvent, PULL_BYTES, PeerCommand, PeerId};
 use heika_chain::verify::verify_alone;
 use heika_core::network::NetworkParameters;
 use heika_packet::packet_type;
+use heika_packet::partial::ShortHashPair;
 use heika_peer::{Ask, PeerEvent};
-use heika_peer_protocol::ClientConnection;
+use heika_peer_protocol::{ClientConnection, PulledPartial};
+
+use crate::partials::Incoming;
 use rayon::prelude::*;
 
 /// ピアのスレッドへの命令。中核からのものと、ピアの意思決定からのもの
@@ -20,6 +23,16 @@ pub enum Request {
     Peer(Ask),
     /// 受け付けたトランザクションを押し付ける。返事はなく、失敗したときだけ `ChainEvent::Failed` を返す
     Transactions(Arc<Vec<u8>>),
+    /// `packet_type` の本体 `body` を押し付ける（連署を待つものと、連署）。返事はない
+    Push {
+        packet_type: u32,
+        body: Arc<Vec<u8>>,
+    },
+    /// 連署を待つものを頼む。[`NodeEvent::PulledPartial`] で返す
+    PullPartial {
+        min_deadline: u64,
+        known: Vec<ShortHashPair>,
+    },
     /// 未承認のトランザクションを頼む。期限が `min_deadline` 以降で、手数料の倍率が `min_fee_multiplier` 以上のもののうち、
     /// `known`（短いハッシュ）にないもの。[`NodeEvent::Pulled`] で返す
     PullTransactions {
@@ -39,6 +52,16 @@ pub enum NodeEvent {
     Relay {
         transactions: Arc<Vec<u8>>,
         except: Option<PeerId>,
+    },
+    /// 連署を待つものが入ってきた。`from` は、それをくれたピア（送り返さない）
+    Partial {
+        incoming: Incoming,
+        from: Option<PeerId>,
+    },
+    /// ピアに頼んだ、連署を待つもの
+    PulledPartial {
+        peer: PeerId,
+        pulled: Vec<PulledPartial>,
     },
     /// ピアに頼んだ未承認のトランザクション（1件ずつのバイト列）
     Pulled {
@@ -85,6 +108,17 @@ pub fn spawn(
                     known,
                 } => match connection.pull_transactions(min_deadline, min_fee_multiplier, &known) {
                     Ok(transactions) => NodeEvent::Pulled { peer, transactions },
+                    Err(error) => failed(peer, error, false),
+                },
+                Request::Push { packet_type, body } => match connection.push(packet_type, &body) {
+                    Ok(()) => continue,
+                    Err(error) => failed(peer, error, false),
+                },
+                Request::PullPartial {
+                    min_deadline,
+                    known,
+                } => match connection.pull_partial_infos(min_deadline, &known) {
+                    Ok(pulled) => NodeEvent::PulledPartial { peer, pulled },
                     Err(error) => failed(peer, error, false),
                 },
                 Request::Transactions(bytes) => {

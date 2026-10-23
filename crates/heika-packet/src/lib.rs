@@ -48,6 +48,8 @@ pub fn encode(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, usize> {
 }
 
 /// catapult の `ionet::PacketType` のうち使うもの。
+pub mod partial;
+
 pub mod packet_type {
     pub const PUSH_BLOCK: u32 = 3;
     pub const PULL_BLOCK: u32 = 4;
@@ -457,6 +459,8 @@ pub enum DecodeError {
     EntityTooSmall { size: usize, minimum: usize },
     /// 先頭の Size と、実際の長さや中身から計算した長さが合わない
     SizeMismatch { declared: usize, actual: usize },
+    /// 0 で埋めるはずのところが0でない
+    NonZeroPadding,
 }
 
 impl fmt::Display for DecodeError {
@@ -471,6 +475,7 @@ impl fmt::Display for DecodeError {
             Self::EntityTooSmall { size, minimum } => {
                 write!(f, "{size} バイトしかありません（最低 {minimum} バイト）")
             }
+            Self::NonZeroPadding => write!(f, "0 で埋めるはずのところが0ではありません"),
             Self::SizeMismatch { declared, actual } => {
                 write!(
                     f,

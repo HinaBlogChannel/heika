@@ -4,8 +4,10 @@
 //! 残高が足りるかなど状態に依ることは確かめず、ブロックを作ってみて弾かれたものを [`Mempool::remove`] で外す。
 //! 状態の写しは持たない。
 //!
-//! 連署を待つアグリゲートボンデッド（catapult の PT キャッシュ）は扱わない。ハッシュロックがあるかを確かめるのに
-//! 状態が要るので、受け付けない。
+//! 連署を待つアグリゲートボンデッド（catapult の PT キャッシュ）は、別の置き場（[`partial`]）で待たせ、連署が
+//! 揃ってからここに移す。ここに直接来たものは受け付けない。
+
+pub mod partial;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -51,7 +53,7 @@ pub enum Rejected {
     Malformed(String),
     /// もう持っている
     Known,
-    /// アグリゲートボンデッドは扱わない
+    /// アグリゲートボンデッドは直接は扱わない（連署を待つものの置き場で揃ったものだけを受け付ける）
     Bonded,
     /// 期限が過ぎている
     Expired,
@@ -72,7 +74,10 @@ impl fmt::Display for Rejected {
         match self {
             Self::Malformed(error) => write!(f, "トランザクションとして読めません: {error}"),
             Self::Known => write!(f, "もう持っています"),
-            Self::Bonded => write!(f, "アグリゲートボンデッドは扱いません"),
+            Self::Bonded => write!(
+                f,
+                "アグリゲートボンデッドは、連署を待つものの置き場で揃ったものだけを受け付けます"
+            ),
             Self::Expired => write!(f, "期限が過ぎています"),
             Self::TooFarAhead => write!(f, "期限が先すぎます"),
             Self::LowFee(fee_multiplier) => {
@@ -163,6 +168,27 @@ impl Mempool {
     /// 署名したトランザクション `bytes` を、今（Nemesis からのミリ秒 `now`）、高さ `height` のブロックに入れる
     /// つもりで受け付ける。いっぱいなら、手数料の倍率がこれより低いものを追い出して空ける。受け付けたらハッシュを返す
     pub fn add(&mut self, bytes: Vec<u8>, now: u64, height: u64) -> Result<Hash256, Rejected> {
+        self.accept(bytes, now, height, false)
+    }
+
+    /// 連署を待つものの置き場（[`partial`]）で、ハッシュロックと連署が揃ったと確かめたアグリゲートボンデッドを受け付ける。
+    /// 期限が `maxTransactionLifetime` より先でも（ボンデッドは `maxBondedTransactionLifetime` まで）受け付ける
+    pub fn add_completed(
+        &mut self,
+        bytes: Vec<u8>,
+        now: u64,
+        height: u64,
+    ) -> Result<Hash256, Rejected> {
+        self.accept(bytes, now, height, true)
+    }
+
+    fn accept(
+        &mut self,
+        bytes: Vec<u8>,
+        now: u64,
+        height: u64,
+        completed: bool,
+    ) -> Result<Hash256, Rejected> {
         let transaction = Transaction::from_bytes(&bytes)
             .map_err(|error| Rejected::Malformed(error.to_string()))?;
         // 署名を確かめるのは重いので、安く弾けるものを先に弾く
@@ -170,7 +196,8 @@ impl Mempool {
         if self.entries.contains_key(&hash) {
             return Err(Rejected::Known);
         }
-        if matches!(transaction.body, Body::AggregateBonded(_)) {
+        let bonded = matches!(transaction.body, Body::AggregateBonded(_));
+        if bonded != completed {
             return Err(Rejected::Bonded);
         }
         // catapult の `DeadlineValidator` と同じく、今からの範囲に入っていること
@@ -179,7 +206,7 @@ impl Mempool {
         }
         let lifetime =
             u64::try_from(self.parameters.max_transaction_lifetime.as_millis()).unwrap_or(u64::MAX);
-        if transaction.deadline > now.saturating_add(lifetime) {
+        if !completed && transaction.deadline > now.saturating_add(lifetime) {
             return Err(Rejected::TooFarAhead);
         }
         let fee_multiplier =
@@ -489,6 +516,15 @@ mod tests {
         let transaction = Transaction::new(public_key, NETWORK.identifier, 0, NOW + 1, bonded);
         assert!(matches!(
             pool.add(transaction.to_bytes(), NOW, 2),
+            Err(Rejected::Bonded)
+        ));
+        // 揃ったものの入り口は、ボンデッドなら先に進んで確かめ（署名がないので通らない）、ボンデッドでなければ弾く
+        assert!(matches!(
+            pool.add_completed(transaction.to_bytes(), NOW, 2),
+            Err(Rejected::Invalid(_))
+        ));
+        assert!(matches!(
+            pool.add_completed(transfer(1, 0, NOW + HOUR, b""), NOW, 2),
             Err(Rejected::Bonded)
         ));
     }

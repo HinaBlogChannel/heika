@@ -20,8 +20,9 @@ use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::network::NetworkParameters;
+use heika_mempool::partial::{PartialConfig, PartialPool, SharedPartialPool};
 use heika_mempool::{Mempool, Rejected, SharedMempool};
-use heika_packet::{NetworkNode, NodeRoles, NodeVersion};
+use heika_packet::{NetworkNode, NodeRoles, NodeVersion, packet_type};
 use heika_peer::book::{FIRST_TRIES, best};
 use heika_peer::{Book, KnownPeer, PeerAction, PeerEvent, Peers, endpoint};
 use heika_peer_protocol::ClientConnection;
@@ -32,12 +33,14 @@ use heika_state_transition::config::{ChainConfig, load_network_parameters};
 use heika_state_transition::executor::persist::height_of_meta;
 use heika_store_redb::Db;
 use heika_tls::{ConnectError, Identity};
+use heika_transaction::{Body, DetachedCosignature, Transaction};
 
 use crate::catch_up;
 use crate::config::{Manifest, Mode, NetworkType, NodeConfig};
 use crate::delegated::{Delegated, DelegationState};
 use crate::harvesters::{KeyPair, MemoryHarvesters};
 use crate::keys::{others_can_read, read_private_key};
+use crate::partials::{self, Incoming};
 use crate::peer_thread::{self, NodeEvent, Request};
 use crate::reader::DbReader;
 use crate::recent::RecentTransactions;
@@ -372,6 +375,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         heika_mempool::Config::default(),
     )));
     chain.set_pending(Arc::clone(&mempool) as Arc<dyn Pending>);
+    // 連署を待つアグリゲートボンデッド。揃ったら未承認の置き場に移す
+    let partials = Arc::new(SharedPartialPool::new(PartialPool::new(
+        parameters,
+        PartialConfig::default(),
+    )));
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
@@ -424,6 +432,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     Arc::clone(&status),
                     events.clone(),
                 ),
+                submit_partial: submit_partial(events.clone()),
+                submit_cosignature: submit_cosignature(events.clone()),
                 reader: Arc::new(DbReader::new(
                     store.shared_db(),
                     parameters.identifier,
@@ -431,6 +441,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     parameters.generation_hash_seed,
                     Arc::clone(&mempool),
                     Arc::clone(recent),
+                    Arc::clone(&partials),
                 )),
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
@@ -445,7 +456,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 .map_err(|error| format!("{} で待ち受けられません: {error}", listen.address))?;
             let (status, reply, gate, done) = (&*status, &reply, &gate, &done);
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
-            let mempool = &*mempool;
+            let (mempool, partials) = (&*mempool, &*partials);
             let server_config = Arc::new(heika_tls::server_config(identity));
             scope.spawn(move || {
                 let source = DbSource {
@@ -460,6 +471,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     node,
                     pushes: Some(pushes),
                     mempool: Some(mempool),
+                    partials: Some(partials),
                 };
                 let stop = || stopping() || done.load(std::sync::atomic::Ordering::SeqCst);
                 if let Err(error) = serve(listener, server_config, &responder, gate, &stop) {
@@ -498,7 +510,9 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 chain.set_harvesters(combined(&own, delegated.as_ref()));
                             }
                             mempool.lock().prune(network_now(parameters));
-                            // catapult と同じく、ピアを順に1つずつ選んで、知らない未承認のトランザクションを頼む
+                            partials.lock().prune(network_now(parameters));
+                            // catapult と同じく、ピアを順に1つずつ選んで、知らない未承認のトランザクションと、
+                            // 連署を待つものを頼む
                             pull_from = next_peer(&senders, pull_from);
                             if let Some(peer) = pull_from {
                                 let request = {
@@ -510,6 +524,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     }
                                 };
                                 let _ = senders[&peer].send(request);
+                                let known = partials.lock().short_hash_pairs();
+                                let _ = senders[&peer].send(Request::PullPartial {
+                                    min_deadline: network_now(parameters),
+                                    known,
+                                });
                             }
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {
                                 return Ok(outcome);
@@ -539,6 +558,51 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 pending.push(NodeEvent::Relay {
                                     transactions: Arc::new(added.concat()),
                                     except: Some(peer),
+                                });
+                            }
+                        }
+                        NodeEvent::PulledPartial { peer, pulled } => {
+                            for incoming in Incoming::from_pulled(pulled) {
+                                pending.push(NodeEvent::Partial {
+                                    incoming,
+                                    from: Some(peer),
+                                });
+                            }
+                        }
+                        NodeEvent::Partial { incoming, from } => {
+                            let height = chain.height() + 1;
+                            let handled = partials::handle(
+                                &mut chain,
+                                &partials,
+                                &mempool,
+                                incoming,
+                                network_now(parameters),
+                                height,
+                            );
+                            for (packet_type, body) in [
+                                (packet_type::PUSH_PARTIAL_TRANSACTIONS, handled.partial),
+                                (
+                                    packet_type::PUSH_DETACHED_COSIGNATURES,
+                                    handled.cosignatures,
+                                ),
+                            ] {
+                                if body.is_empty() {
+                                    continue;
+                                }
+                                let body = Arc::new(body);
+                                for (id, sender) in &senders {
+                                    if Some(*id) != from {
+                                        let _ = sender.send(Request::Push {
+                                            packet_type,
+                                            body: Arc::clone(&body),
+                                        });
+                                    }
+                                }
+                            }
+                            if !handled.completed.is_empty() {
+                                pending.push(NodeEvent::Relay {
+                                    transactions: Arc::new(handled.completed),
+                                    except: None,
                                 });
                             }
                         }
@@ -643,12 +707,18 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     }
                                 }
                             }
-                            Action::Included(hashes) => mempool.lock().tip_changed(
-                                &hashes,
-                                Vec::new(),
-                                network_now(parameters),
-                                chain.height() + 1,
-                            ),
+                            Action::Included(hashes) => {
+                                mempool.lock().tip_changed(
+                                    &hashes,
+                                    Vec::new(),
+                                    network_now(parameters),
+                                    chain.height() + 1,
+                                );
+                                let mut partials = partials.lock();
+                                for hash in &hashes {
+                                    partials.remove(hash);
+                                }
+                            }
                             Action::Restored(transactions) => mempool.lock().tip_changed(
                                 &[],
                                 transactions,
@@ -962,6 +1032,41 @@ fn save_known(db: &Db, records: &[(String, KnownPeer)]) -> Result<(), NodeError>
     batch.replace_known_peers(&records)?;
     batch.commit()?;
     Ok(())
+}
+
+/// REST で届いた連署を待つアグリゲートボンデッドを、駆動役に渡す口。状態に依る確かめは駆動役でするので、
+/// ここでは読めるかと種類だけを見る（catapult の REST と同じく、受け付けたら 202 で答える）
+fn submit_partial(relay: Sender<NodeEvent>) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let transaction = Transaction::from_bytes(&bytes)
+            .map_err(|error| format!("トランザクションとして読めません: {error}"))?;
+        if !matches!(transaction.body, Body::AggregateBonded(_)) {
+            return Err("アグリゲートボンデッドではありません".to_owned());
+        }
+        relay
+            .send(NodeEvent::Partial {
+                incoming: Incoming::Transactions(vec![bytes]),
+                from: None,
+            })
+            .map_err(|_| "ノードが止まっています".to_owned())
+    })
+}
+
+/// REST で届いた連署を、駆動役に渡す口。署名だけはここで確かめる
+fn submit_cosignature(relay: Sender<NodeEvent>) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let detached = DetachedCosignature::from_bytes(&bytes)
+            .map_err(|error| format!("連署として読めません: {error}"))?;
+        if !detached.verify() {
+            return Err("連署の署名が、アグリゲートのハッシュに対して正しくありません".to_owned());
+        }
+        relay
+            .send(NodeEvent::Partial {
+                incoming: Incoming::Cosignatures(vec![detached]),
+                from: None,
+            })
+            .map_err(|_| "ノードが止まっています".to_owned())
+    })
 }
 
 /// REST で届いたトランザクションを、次のブロックに入れるつもりでメモリプールに入れ、受け付けたらピアに流す口

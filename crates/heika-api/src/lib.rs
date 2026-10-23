@@ -6,6 +6,7 @@
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
+//! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
@@ -38,8 +39,8 @@ use heika_core::patricia::{self, SubCache};
 use heika_rest::block::BlockInfo;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
-    AnnounceJson, AnnounceResultJson, ChainInfoJson, DelegationJson, ErrorJson, NodeInfoJson,
-    TransactionFeesJson, UnlockedAccountJson,
+    AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson, ErrorJson,
+    NodeInfoJson, TransactionFeesJson, UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
@@ -93,6 +94,10 @@ pub trait Reader: Send + Sync {
 #[derive(Clone)]
 pub struct Node {
     pub submit: Submit,
+    /// 連署を待つアグリゲートボンデッドを受け付ける口
+    pub submit_partial: Submit,
+    /// 切り離した連署（catapult の `DetachedCosignature` の 136 バイト）を受け付ける口
+    pub submit_cosignature: Submit,
     pub reader: Arc<dyn Reader>,
 }
 
@@ -134,6 +139,56 @@ async fn delegations(State(api): State<Api>) -> Json<Vec<DelegationJson>> {
 }
 
 /// 16進のトランザクションを受け付ける。catapult の REST と同じく、受け付けたら 202、受け付けなければ 409
+/// 連署を待つアグリゲートボンデッドを受け付ける
+async fn announce_partial(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
+    let result = match decode_hex(&body.payload) {
+        Some(bytes) => (api.node.submit_partial)(bytes),
+        None => Err("payload が16進ではありません".to_owned()),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(AnnounceResultJson::pushed_via(256, "/transactions/partial")),
+        )
+            .into_response(),
+        Err(message) => invalid(message),
+    }
+}
+
+/// 切り離した連署を受け付ける。バージョン（0）、署名者の公開鍵、署名、アグリゲートのハッシュの順に並べて渡す
+async fn announce_cosignature(
+    State(api): State<Api>,
+    Json(body): Json<CosignatureJson>,
+) -> Response {
+    let version_ok = body
+        .version
+        .as_deref()
+        .is_none_or(|version| version.parse::<u64>() == Ok(0));
+    let parts = (
+        decode_hex(&body.signer_public_key).filter(|bytes| bytes.len() == 32),
+        decode_hex(&body.signature).filter(|bytes| bytes.len() == 64),
+        decode_hex(&body.parent_hash).filter(|bytes| bytes.len() == 32),
+    );
+    let result = match parts {
+        (Some(key), Some(signature), Some(parent)) if version_ok => {
+            let bytes = [&[0; 8][..], &key, &signature, &parent].concat();
+            (api.node.submit_cosignature)(bytes)
+        }
+        _ => Err("連署の形が正しくありません".to_owned()),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(AnnounceResultJson::pushed_via(
+                257,
+                "/transactions/cosignature",
+            )),
+        )
+            .into_response(),
+        Err(message) => invalid(message),
+    }
+}
+
 async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
     let result = match decode_hex(&body.payload) {
         Some(bytes) => (api.node.submit)(bytes),
@@ -319,6 +374,14 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
         .route("/transactions", put(announce).options(preflight))
+        .route(
+            "/transactions/partial",
+            put(announce_partial).options(preflight),
+        )
+        .route(
+            "/transactions/cosignature",
+            put(announce_cosignature).options(preflight),
+        )
         .route("/accounts/{id}", get(account))
         .route("/accounts/{id}/merkle", get(account_merkle))
         .route("/mosaics/{id}", get(mosaic))
@@ -542,6 +605,8 @@ mod tests {
 
     fn node(submit: Submit) -> Node {
         Node {
+            submit_partial: Arc::clone(&submit),
+            submit_cosignature: Arc::clone(&submit),
             submit,
             reader: Arc::new(FakeReader),
         }
@@ -664,9 +729,17 @@ mod tests {
         received: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         body: &str,
     ) -> (StatusCode, serde_json::Value) {
+        put_to(received, "/transactions", body).await
+    }
+
+    async fn put_to(
+        received: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let response = router(snapshot(), node(submit(Arc::clone(received))))
             .oneshot(
-                Request::put("/transactions")
+                Request::put(path)
                     .header("Content-Type", "application/json")
                     .body(Body::from(body.to_owned()))
                     .unwrap(),
@@ -698,6 +771,49 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{payload:?}");
         }
         assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
+    }
+
+    #[tokio::test]
+    async fn announces_partials_and_cosignatures_like_catapult() {
+        let received = Arc::default();
+        let (status, answer) =
+            put_to(&received, "/transactions/partial", r#"{"payload":"0102"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            answer["message"],
+            "packet 256 was pushed to the network via /transactions/partial"
+        );
+        let cosignature = format!(
+            r#"{{"version":"0","signerPublicKey":"{}","signature":"{}","parentHash":"{}"}}"#,
+            "11".repeat(32),
+            "22".repeat(64),
+            "33".repeat(32)
+        );
+        let (status, answer) = put_to(&received, "/transactions/cosignature", &cosignature).await;
+        // 受け付けの口は [1, 2] だけを受け付けるので、形が正しくても 409 になる。渡したものを見る
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        let passed = received.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(passed.len(), 136);
+        assert_eq!(&passed[..8], &[0; 8]);
+        assert_eq!(&passed[8..40], &[0x11; 32]);
+        assert_eq!(&passed[104..], &[0x33; 32]);
+        // 形が違えば、口に渡さない
+        let before = received.lock().unwrap().len();
+        let broken = cosignature.replace(&"33".repeat(32), "33");
+        assert_eq!(
+            put_to(&received, "/transactions/cosignature", &broken)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let other_version = cosignature.replace(r#""version":"0""#, r#""version":"1""#);
+        assert_eq!(
+            put_to(&received, "/transactions/cosignature", &other_version)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(received.lock().unwrap().len(), before);
     }
 
     #[tokio::test]

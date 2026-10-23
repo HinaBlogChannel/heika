@@ -668,6 +668,7 @@ dependencies = [
  "heika-core",
  "heika-packet",
  "heika-transaction",
+ "sha3",
 ]
 
 [[package]]
@@ -718,6 +719,7 @@ name = "heika-peer-protocol"
 version = "0.9.0"
 dependencies = [
  "heika-block",
+ "heika-core",
  "heika-packet",
  "heika-tls",
 ]

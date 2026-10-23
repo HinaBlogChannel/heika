@@ -6,6 +6,9 @@ use std::fmt;
 use std::time::Duration;
 
 use heika_block::finalization::{FinalizationRound, FinalizedBlockHeader};
+use heika_packet::partial::{
+    COSIGNATURE_SIZE, PartialInfo, ShortHashPair, pull_partial_request, read_partial_infos,
+};
 use heika_packet::{
     ChainStatistics, DecodeError, NetworkNode, NetworkTime, packet_type, pull_blocks_request,
     pull_transactions_request, split_size_prefixed,
@@ -179,6 +182,30 @@ impl ClientConnection {
     }
 
     /// 種類 `packet_type` で本体が `body` のパケットを押し付ける。catapult は押し付けに答えないので、待たない
+    /// 連署を待つアグリゲートボンデッドのうち、期限が `min_deadline` 以降で、`known` と同じでないものを取る。
+    /// 知らないものはトランザクションと連署が、知っているものはハッシュと連署が来る（[`PulledPartial`]）。
+    /// 中身は確かめない
+    pub fn pull_partial_infos(
+        &mut self,
+        min_deadline: u64,
+        known: &[ShortHashPair],
+    ) -> Result<Vec<PulledPartial>, QueryError> {
+        let body = self.request(
+            packet_type::PULL_PARTIAL_TRANSACTION_INFOS,
+            &pull_partial_request(min_deadline, known),
+        )?;
+        Ok(read_partial_infos(&body)?
+            .into_iter()
+            .map(|info| PulledPartial {
+                transaction: match info.info {
+                    PartialInfo::Transaction(bytes) => Ok(bytes.to_vec()),
+                    PartialInfo::Hash(hash) => Err(hash),
+                },
+                cosignatures: info.cosignatures.into_iter().copied().collect(),
+            })
+            .collect())
+    }
+
     pub fn push(&mut self, packet_type: u32, body: &[u8]) -> Result<(), QueryError> {
         Ok(self.connection.send_packet(packet_type, body)?)
     }
@@ -189,6 +216,15 @@ impl ClientConnection {
 }
 
 /// 問い合わせが失敗した理由。
+/// ピアから取った、連署を待つアグリゲートボンデッド1件
+#[derive(Clone, Debug)]
+pub struct PulledPartial {
+    /// 知らなかったものは、連署を除いたトランザクション。知っていたものは、そのハッシュ
+    pub transaction: Result<Vec<u8>, heika_core::hash::Hash256>,
+    /// 連署（アグリゲートの中と同じ形）
+    pub cosignatures: Vec<[u8; COSIGNATURE_SIZE]>,
+}
+
 #[derive(Debug)]
 pub enum QueryError {
     Request(RequestError),

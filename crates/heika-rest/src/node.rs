@@ -155,10 +155,26 @@ pub struct AnnounceResultJson {
 
 impl AnnounceResultJson {
     pub fn pushed() -> Self {
+        Self::pushed_via(9, "/transactions")
+    }
+
+    /// パケットの種類 `packet_type` で、口 `path` から流したとき（catapult の REST と同じ文）
+    pub fn pushed_via(packet_type: u32, path: &str) -> Self {
         Self {
-            message: "packet 9 was pushed to the network via /transactions".to_owned(),
+            message: format!("packet {packet_type} was pushed to the network via {path}"),
         }
     }
+}
+
+/// `PUT /transactions/cosignature` の本体（catapult の `CosignatureDTO`）。16進で、`version` は10進の文字列
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CosignatureJson {
+    #[serde(default)]
+    pub version: Option<String>,
+    pub signer_public_key: String,
+    pub signature: String,
+    pub parent_hash: String,
 }
 
 /// 受け付けなかったときの答え（catapult の REST のエラーと同じ形）

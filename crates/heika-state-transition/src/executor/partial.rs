@@ -311,29 +311,41 @@ impl Executor {
             let Ok(transaction) = Transaction::from_bytes(bytes) else {
                 continue;
             };
-            let signer = self.address_of(&transaction.signer_public_key);
-            wanted.accounts.insert(signer);
-            wanted.multisigs.insert(signer);
-            match &transaction.body {
-                Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
-                    if matches!(transaction.body, Body::AggregateBonded(_)) {
-                        wanted
-                            .hash_locks
-                            .insert(transaction.hash(&self.generation_hash_seed).0);
-                    }
-                    for cosignature in aggregate.cosignatures() {
-                        let cosigner = self.address_of(&cosignature.signer_public_key);
-                        wanted.accounts.insert(cosigner);
-                        wanted.multisigs.insert(cosigner);
-                    }
-                    for inner in aggregate.transactions() {
-                        self.want_body(inner, &mut wanted);
-                    }
-                }
-                _ => self.want_inner_body(signer, &transaction.body, &mut wanted),
-            }
+            self.want_transaction(&transaction, &mut wanted);
         }
         wanted
+    }
+
+    /// トランザクション1つを確かめるのに要りそうなキー。連署を待つアグリゲートボンデッドを、ブロックの外で
+    /// 確かめるとき（[`Executor::check_partial`]）にも使う
+    pub fn wanted_for_transaction(&self, transaction: &Transaction) -> Wanted {
+        let mut wanted = Wanted::default();
+        self.want_transaction(transaction, &mut wanted);
+        wanted
+    }
+
+    fn want_transaction(&self, transaction: &Transaction, wanted: &mut Wanted) {
+        let signer = self.address_of(&transaction.signer_public_key);
+        wanted.accounts.insert(signer);
+        wanted.multisigs.insert(signer);
+        match &transaction.body {
+            Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+                if matches!(transaction.body, Body::AggregateBonded(_)) {
+                    wanted
+                        .hash_locks
+                        .insert(transaction.hash(&self.generation_hash_seed).0);
+                }
+                for cosignature in aggregate.cosignatures() {
+                    let cosigner = self.address_of(&cosignature.signer_public_key);
+                    wanted.accounts.insert(cosigner);
+                    wanted.multisigs.insert(cosigner);
+                }
+                for inner in aggregate.transactions() {
+                    self.want_body(inner, wanted);
+                }
+            }
+            _ => self.want_inner_body(signer, &transaction.body, wanted),
+        }
     }
 
     fn want_body(&self, inner: &EmbeddedTransaction, wanted: &mut Wanted) {

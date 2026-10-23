@@ -20,11 +20,16 @@ use heika_block::finalization::proof::proof_header;
 use heika_core::key::PublicKey;
 use heika_core::network::NetworkParameters;
 use heika_mempool::SharedMempool;
+use heika_mempool::partial::SharedPartialPool;
+use heika_packet::partial::{
+    read_pull_partial_request, split_detached_cosignatures, write_partial_infos,
+};
 use heika_packet::{
     BlockHashesRequest, ChainStatistics, NetworkTime, PullBlocksRequest, packet_type,
     read_pull_transactions_request, split_size_prefixed,
 };
 use heika_tls::{Connection, RequestError, ServerConfig};
+use heika_transaction::DetachedCosignature;
 
 use heika_chain::chain::Status;
 use heika_chain::env::Env;
@@ -32,6 +37,7 @@ use heika_chain::event::{ChainEvent, PULL_BLOCKS, PULL_HASHES};
 use heika_chain::verify::verify_alone;
 use heika_store_redb::Db;
 
+use crate::partials::Incoming;
 use crate::peer_thread::NodeEvent;
 
 /// 1回の `Pull_Blocks` で返すバイト数の上限
@@ -108,6 +114,9 @@ pub struct Responder<'a> {
     pub pushes: Option<Sender<NodeEvent>>,
     /// 押し付けられたトランザクションを入れ、`Pull_Transactions` に答える置き場。`None` なら読み捨て、空で答える
     pub mempool: Option<&'a SharedMempool>,
+    /// `Pull_Partial_Transaction_Infos` に答える、連署を待つものの置き場。`None` なら空で答える。押し付けられた
+    /// 連署を待つものと連署は、状態で確かめるので、[`Responder::pushes`] で駆動役に渡す
+    pub partials: Option<&'a SharedPartialPool>,
 }
 
 impl Responder<'_> {
@@ -203,9 +212,26 @@ impl Responder<'_> {
                         .concat(),
                 )
             }
-            // 連署を待つトランザクションと、集めている投票は持っていない
-            packet_type::PULL_PARTIAL_TRANSACTION_INFOS
-            | packet_type::PULL_FINALIZATION_MESSAGES => reply(Vec::new()),
+            packet_type::PULL_PARTIAL_TRANSACTION_INFOS => {
+                let Ok((min_deadline, known)) = read_pull_partial_request(body) else {
+                    return Ok(Answer::Close(
+                        "連署を待つトランザクションの要求を読めません".to_owned(),
+                    ));
+                };
+                let Some(partials) = self.partials else {
+                    return reply(Vec::new());
+                };
+                let known: HashMap<u32, u32> = known
+                    .into_iter()
+                    .map(|pair| (pair.transaction, pair.cosignatures))
+                    .collect();
+                let partials = partials.lock();
+                reply(write_partial_infos(
+                    &partials.unknown_to(min_deadline, &known),
+                ))
+            }
+            // 集めている投票は持っていない
+            packet_type::PULL_FINALIZATION_MESSAGES => reply(Vec::new()),
             packet_type::CHAIN_STATISTICS
             | packet_type::FINALIZATION_STATISTICS
             | packet_type::NODE_DISCOVERY_PULL_PING
@@ -258,10 +284,35 @@ impl Responder<'_> {
                 }
                 Ok(Answer::Nothing)
             }
+            // 連署を待つものと連署は、状態で確かめるので駆動役に渡す。読めなければ読み捨てる（catapult と同じ）
+            packet_type::PUSH_PARTIAL_TRANSACTIONS => {
+                if let (Ok(transactions), Some(pushes)) = (split_size_prefixed(body), &self.pushes)
+                {
+                    let transactions = transactions.into_iter().map(<[u8]>::to_vec).collect();
+                    let _ = pushes.send(NodeEvent::Partial {
+                        incoming: Incoming::Transactions(transactions),
+                        from: None,
+                    });
+                }
+                Ok(Answer::Nothing)
+            }
+            packet_type::PUSH_DETACHED_COSIGNATURES => {
+                if let (Ok(cosignatures), Some(pushes)) =
+                    (split_detached_cosignatures(body), &self.pushes)
+                {
+                    let cosignatures = cosignatures
+                        .into_iter()
+                        .filter_map(|bytes| DetachedCosignature::from_bytes(bytes).ok())
+                        .collect();
+                    let _ = pushes.send(NodeEvent::Partial {
+                        incoming: Incoming::Cosignatures(cosignatures),
+                        from: None,
+                    });
+                }
+                Ok(Answer::Nothing)
+            }
             // ほかの押し付けられたものは、今は読み捨てる
-            packet_type::PUSH_PARTIAL_TRANSACTIONS
-            | packet_type::PUSH_DETACHED_COSIGNATURES
-            | packet_type::NODE_DISCOVERY_PUSH_PING
+            packet_type::NODE_DISCOVERY_PUSH_PING
             | packet_type::NODE_DISCOVERY_PUSH_PEERS
             | packet_type::PUSH_FINALIZATION_MESSAGES => Ok(Answer::Nothing),
             _ => Ok(Answer::Close(format!(
@@ -909,6 +960,7 @@ mod tests {
             node: b"node".to_vec(),
             pushes,
             mempool,
+            partials: None,
         }
         .answer(request_type, body)
     }
@@ -1091,16 +1143,25 @@ mod tests {
             reply(answer(&source, packet_type::NODE_DISCOVERY_PULL_PEERS, &[])),
             b"peers"
         );
-        for request_type in [
-            packet_type::PULL_TRANSACTIONS,
-            packet_type::PULL_PARTIAL_TRANSACTION_INFOS,
-            packet_type::PULL_FINALIZATION_MESSAGES,
+        for (request_type, body) in [
+            (packet_type::PULL_TRANSACTIONS, &[0; 12][..]),
+            (packet_type::PULL_PARTIAL_TRANSACTION_INFOS, &[0; 16][..]),
+            (packet_type::PULL_FINALIZATION_MESSAGES, &[0; 12][..]),
         ] {
             assert_eq!(
-                answer(&source, request_type, &[0; 12]),
+                answer(&source, request_type, body),
                 Answer::Reply(request_type, Vec::new())
             );
         }
+        // 形の合わない連署待ちの要求は切る
+        assert!(matches!(
+            answer(
+                &source,
+                packet_type::PULL_PARTIAL_TRANSACTION_INFOS,
+                &[0; 12]
+            ),
+            Answer::Close(_)
+        ));
     }
 
     /// `seed` から作った CA と、`seed + 1` から作ったノードで名乗る
@@ -1140,6 +1201,7 @@ mod tests {
             node: Vec::new(),
             pushes: None,
             mempool: None,
+            partials: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1215,6 +1277,7 @@ mod tests {
             node: Vec::new(),
             pushes: None,
             mempool: None,
+            partials: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1333,6 +1396,36 @@ mod tests {
             assert!(connect(address, 3).chain_statistics().is_err());
             assert!(connect(address, 5).chain_statistics().is_ok());
         });
+    }
+
+    #[test]
+    fn hands_pushed_cosignatures_to_the_driver() {
+        let source = memory(1, 10, 1..=1);
+        let (pushes, events) = std::sync::mpsc::channel();
+        let detached = heika_transaction::DetachedCosignature::sign(
+            &PrivateKey::from_bytes(&[3; 32]),
+            &heika_core::hash::Hash256([5; 32]),
+        );
+        let push = |body: &[u8]| {
+            answer_pushing(
+                &source,
+                None,
+                Some(pushes.clone()),
+                packet_type::PUSH_DETACHED_COSIGNATURES,
+                body,
+            )
+        };
+        assert_eq!(push(&detached.to_bytes()), Answer::Nothing);
+        match events.try_recv() {
+            Ok(NodeEvent::Partial {
+                incoming: Incoming::Cosignatures(cosignatures),
+                from: None,
+            }) => assert_eq!(cosignatures, [detached]),
+            _ => panic!("連署を渡していません"),
+        }
+        // 読めない長さなら読み捨てる
+        assert_eq!(push(&[0; 10]), Answer::Nothing);
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

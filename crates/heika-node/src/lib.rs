@@ -8,6 +8,7 @@ pub mod driver;
 pub mod harvesters;
 pub mod identity;
 pub mod keys;
+pub mod partials;
 pub mod peer_thread;
 pub mod reader;
 pub mod recent;

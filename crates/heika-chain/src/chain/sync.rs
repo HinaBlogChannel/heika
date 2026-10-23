@@ -349,6 +349,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             .await?
             .ok_or("巻き戻せるチェックポイントがありません")?;
         let rows = self.store.changes_above(checkpoint).await?;
+        let rows_count = rows.len();
         let mut kept = Vec::new();
         for height in checkpoint + 1..=common {
             kept.push(
@@ -369,11 +370,8 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let (parent, statistics, tip) =
             context(self.store, &mut self.executor, self.parameters, lifetime).await?;
         if self.executor.state_hash() != parent.state_hash {
-            // 戻せなかったら、DB から丸ごと読み直す（遅いが確か）
-            self.notify(Notice::Progress {
-                message: "巻き戻した根が合わないので、DB から読み直します".to_owned(),
-                warning: true,
-            });
+            // 戻せなかったら、DB から丸ごと読み直す（遅いが確か）。どの木が食い違っていたかを添える
+            let reverted = self.executor.roots();
             let loaded = load_from(
                 self.store,
                 self.config.clone(),
@@ -382,6 +380,32 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             )
             .await?;
             self.executor = loaded.executor;
+            let names = [
+                "アカウント",
+                "ネームスペース",
+                "モザイク",
+                "マルチシグ",
+                "ハッシュロック",
+                "シークレットロック",
+                "アカウントの制限",
+                "モザイクの制限",
+                "メタデータ",
+            ];
+            let fresh = self.executor.roots();
+            let differing: Vec<&str> = names
+                .iter()
+                .zip(reverted.iter().zip(&fresh))
+                .filter(|(_, (reverted, fresh))| reverted != fresh)
+                .map(|(name, _)| *name)
+                .collect();
+            self.notify(Notice::Progress {
+                message: format!(
+                    "巻き戻した根が合わないので、DB から読み直しました（高さ {common}、チェックポイント {checkpoint}、戻した行 {}、食い違った木: {}）",
+                    rows_count,
+                    if differing.is_empty() { "なし（読み直しても同じ）".to_owned() } else { differing.join("、") }
+                ),
+                warning: true,
+            });
         }
         self.generation_hash = parent.generation_hash();
         self.parent = parent;

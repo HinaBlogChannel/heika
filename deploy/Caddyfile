@@ -1,0 +1,17 @@
+# heika の REST を外に出す Caddy の設定。heika は 127.0.0.1:3002 で HTTP だけを話し、ここで
+# 3000（HTTP）と 3001（HTTPS）にする。証明書は Let's Encrypt から取り、そのために 80 番も外から届くようにする。
+# HEIKA_HOST はノードが名乗る名前（sslip.io の名前など）。手順は docs/deploy.md
+#
+# lb_try_duration: heika を起動し直すあいだ（数秒）につながらなかった要求を、エラーにせずに待ってつなぎ直す
+
+http://{$HEIKA_HOST}:3000 {
+	reverse_proxy 127.0.0.1:3002 {
+		lb_try_duration 15s
+	}
+}
+
+{$HEIKA_HOST}:3001 {
+	reverse_proxy 127.0.0.1:3002 {
+		lb_try_duration 15s
+	}
+}

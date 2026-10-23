@@ -1,4 +1,4 @@
-//! すんぼる草不可避。送り先のアドレスに 1 XYM 以上送るたびに、畑に何かが1つ生える。
+//! すんぼる草不可避。送り先のアドレスに決まった額（既定は 1 XYM）以上を送るたびに、畑に何かが1つ生える。
 //! 鍵は扱わない。REST から送金の履歴を読んで描くだけ。
 
 mod field;
@@ -17,6 +17,11 @@ use wasm_bindgen::prelude::*;
 const DEFAULT_TARGET: &str = match option_env!("KUSA_TARGET") {
     Some(target) => target,
     None => "",
+};
+/// 数える最低額（XYM）。ビルドするときに環境変数 `KUSA_MIN_XYM` で決める。遊ぶ人もくわしい設定で変えられる
+const DEFAULT_MIN: &str = match option_env!("KUSA_MIN_XYM") {
+    Some(min) => min,
+    None => "1",
 };
 /// ブラウザから読める公開ノードの一覧（`discover` で作り、ビルドするときに `KUSA_NODES` で渡す）。
 /// `{"mainnet": [URL…], "testnet": [URL…]}`。渡さなければ空で、遊ぶ人が REST を決める
@@ -209,7 +214,10 @@ async fn pick_node(network: u8) -> Result<String, String> {
     })
 }
 
-async fn load(rest_url: &str, target: &str, player: &str) -> Result<Loaded, String> {
+async fn load(rest_url: &str, target: &str, player: &str, min: &str) -> Result<Loaded, String> {
+    let min = rest::parse_xym(min)
+        .filter(|min| *min > 0)
+        .ok_or("数える最低額は、0 より大きい XYM の額（小数は6桁まで）にしてください")?;
     let target = parse_address(target, "送り先")?;
     let player = parse_address(player, "自分のアドレス")?;
     if target.network() != player.network() {
@@ -234,7 +242,7 @@ async fn load(rest_url: &str, target: &str, player: &str) -> Result<Loaded, Stri
     let finalized = rest::finalized_height(&info).ok_or("確定した高さが分かりません")?;
 
     let key = format!(
-        "kusa:{RULES}:{network}:{}:{}",
+        "kusa:{RULES}:{network}:{}:{}:{min}",
         target.to_hex(),
         player.to_hex()
     );
@@ -276,7 +284,7 @@ async fn load(rest_url: &str, target: &str, player: &str) -> Result<Loaded, Stri
             counted + 1
         );
         let body = get(&url).await?.unwrap_or(Value::Null);
-        let (sends, entries) = rest::sends(&body, &target.to_hex(), &signer, currency);
+        let (sends, entries) = rest::sends(&body, &target.to_hex(), &signer, currency, min);
         for send in sends {
             if send.height <= finalized {
                 new.push(send.seed)
@@ -347,6 +355,11 @@ fn App() -> impl IntoView {
             .unwrap_or_else(|| DEFAULT_TARGET.into()),
     );
     let player = RwSignal::new(initial("me"));
+    let min = RwSignal::new(
+        query("min")
+            .or_else(|| saved["min"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| DEFAULT_MIN.into()),
+    );
     let plants = RwSignal::new(Vec::<Plant>::new());
     let status = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
@@ -357,17 +370,19 @@ fn App() -> impl IntoView {
         }
         busy.set(true);
         status.set("読んでいます…".into());
-        let (rest_text, target_text, player_text) = (
+        let (rest_text, target_text, player_text, min_text) = (
             rest_url.get_untracked(),
             target.get_untracked(),
             player.get_untracked(),
+            min.get_untracked(),
         );
         save_item(
             "kusa:inputs",
-            &json!({ "rest": rest_text, "to": target_text, "me": player_text }).to_string(),
+            &json!({ "rest": rest_text, "to": target_text, "me": player_text, "min": min_text })
+                .to_string(),
         );
         spawn_local(async move {
-            match load(&rest_text, &target_text, &player_text).await {
+            match load(&rest_text, &target_text, &player_text, &min_text).await {
                 Err(message) => status.set(message),
                 Ok(loaded) => {
                     let mut shown: Vec<Plant> = loaded
@@ -455,13 +470,19 @@ fn App() -> impl IntoView {
                     <label>"送り先のアドレス"
                         <input prop:value=move || target.get() on:input=move |e| target.set(event_target_value(&e)) placeholder="N… または T…" spellcheck="false"/>
                     </label>
+                    <label>"数える最低額（XYM）"
+                        <input prop:value=move || min.get() on:input=move |e| min.set(event_target_value(&e)) inputmode="decimal" spellcheck="false"/>
+                    </label>
                     <label>"REST の URL（空なら公開ノードから選びます）"
                         <input prop:value=move || rest_url.get() on:input=move |e| rest_url.set(event_target_value(&e)) placeholder="https://…:3001" spellcheck="false"/>
                     </label>
                 </details>
             </form>
             <footer>
-                <p>"自分のアドレスから送り先へ 1 XYM 以上を送るたびに、畑に何かが1つ生えます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。"</p>
+                <p>{move || format!(
+                    "自分のアドレスから送り先へ {} XYM 以上を送るたびに、畑に何かが1つ生えます。何が生えるかは、送金のハッシュで決まります。珍しいものに優劣はありません。",
+                    rest::parse_xym(&min.get()).map(rest::format_xym).unwrap_or_else(|| min.get()),
+                )}</p>
                 <p>"払う義務はありません。送り先は自由に変えられて、テストネットや自分のプライベートネットでも遊べます。鍵は使わず、REST から送金の履歴を読むだけです。"</p>
                 <p>"シェアする画像と文には、アドレスを入れません。"</p>
             </footer>

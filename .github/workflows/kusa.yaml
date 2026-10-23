@@ -4,6 +4,7 @@
 # - Secrets の KUSA_SEED_MAINNET / KUSA_SEED_TESTNET: 辿り始める REST の URL（片方だけでもよい）
 # - Secrets の KUSA_EXCLUDE: 一覧に入れないホスト名（カンマ区切り）。自分のノードなど
 # - 変数の KUSA_TARGET: 作者の受け取り用のアドレス。なければ、遊ぶ人が自分で決める
+# - 変数の KUSA_MIN_XYM: 数える最低額（XYM）。なければ 1
 name: すんぼる草不可避
 
 on:
@@ -51,6 +52,7 @@ jobs:
         working-directory: apps/sunboru-kusa
         env:
           KUSA_TARGET: ${{ vars.KUSA_TARGET }}
+          KUSA_MIN_XYM: ${{ vars.KUSA_MIN_XYM }}
         run: KUSA_NODES="$RUNNER_TEMP/nodes.json" trunk build --release --locked
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -6,6 +6,7 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-env-changed=KUSA_NODES");
     println!("cargo:rerun-if-env-changed=KUSA_TARGET");
+    println!("cargo:rerun-if-env-changed=KUSA_MIN_XYM");
     let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("nodes.json");
     let nodes = match std::env::var("KUSA_NODES") {
         Ok(path) if !path.is_empty() => {

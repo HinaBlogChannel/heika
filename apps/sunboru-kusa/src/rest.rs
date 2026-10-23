@@ -7,8 +7,42 @@ use sha3::{Digest, Sha3_256};
 const TRANSFER: u64 = 0x4154;
 /// `symbol.xym` のネームスペースの ID。名前だけから決まるので、どのネットワークでも同じ
 pub const XYM_ALIAS: u64 = 0xE74B_99BA_41F4_AFEE;
-/// これより少ない送金は数えない（1 XYM）
-pub const MIN_AMOUNT: u64 = 1_000_000;
+/// 1 XYM の最小単位の数
+pub const MICROS: u64 = 1_000_000;
+
+/// `100` や `0.5` のような XYM の額を、最小単位にする。小数は6桁まで
+pub fn parse_xym(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty() && fraction.is_empty()
+        || fraction.len() > 6
+        || !fraction.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole: u64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let fraction: u64 = if fraction.is_empty() {
+        0
+    } else {
+        format!("{fraction:0<6}").parse().ok()?
+    };
+    whole.checked_mul(MICROS)?.checked_add(fraction)
+}
+
+/// 最小単位の額を、`100` や `0.5` のような XYM の書き方にする
+pub fn format_xym(micros: u64) -> String {
+    let fraction = format!("{:06}", micros % MICROS);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        format!("{}", micros / MICROS)
+    } else {
+        format!("{}.{fraction}", micros / MICROS)
+    }
+}
 
 /// 数える送金の1件
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,8 +102,14 @@ pub fn public_key(account: &Value) -> Option<String> {
 
 /// `/transactions/confirmed` の1ページから、数える送金を取り出す。
 /// REST の絞り込みを信じきらずに、送り先、署名者、通貨、額をもう一度確かめる。
-/// 2つ目の値は、ページに入っていた件数（0 なら、もう続きがない）
-pub fn sends(page: &Value, target_hex: &str, signer: &str, currency: u64) -> (Vec<Send>, usize) {
+/// `min` より少ない送金は数えない。2つ目の値は、ページに入っていた件数（0 なら、もう続きがない）
+pub fn sends(
+    page: &Value,
+    target_hex: &str,
+    signer: &str,
+    currency: u64,
+    min: u64,
+) -> (Vec<Send>, usize) {
     let Some(entries) = page["data"].as_array() else {
         return (Vec::new(), 0);
     };
@@ -99,7 +139,7 @@ pub fn sends(page: &Value, target_hex: &str, signer: &str, currency: u64) -> (Ve
             })
             .filter_map(|mosaic| number(&mosaic["amount"]))
             .fold(0, u64::saturating_add);
-        if amount < MIN_AMOUNT {
+        if amount < min {
             continue;
         }
         let Some(height) = number(&meta["height"]) else {
@@ -140,6 +180,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_and_writes_xym_amounts() {
+        assert_eq!(parse_xym("100"), Some(100_000_000));
+        assert_eq!(parse_xym(" 0.5 "), Some(500_000));
+        assert_eq!(parse_xym(".000001"), Some(1));
+        assert_eq!(parse_xym("1.0000001"), None);
+        assert_eq!(parse_xym("abc"), None);
+        assert_eq!(parse_xym(""), None);
+        assert_eq!(format_xym(100_000_000), "100");
+        assert_eq!(format_xym(500_000), "0.5");
+        assert_eq!(format_xym(1_250_000), "1.25");
+    }
+
+    #[test]
     fn reads_rest_shapes() {
         assert_eq!(
             finalized_height(&json!({"latestFinalizedBlock": {"height": "5887020"}})),
@@ -177,7 +230,7 @@ mod tests {
             // 数えない: XYM ではないモザイク
             transfer(json!({"height": "15", "hash": hash}), TARGET, SIGNER, json!([{"id": "6787EB27D79D2B23", "amount": "1000000"}])),
         ]});
-        let (found, entries) = sends(&page, TARGET, SIGNER, CURRENCY);
+        let (found, entries) = sends(&page, TARGET, SIGNER, CURRENCY, MICROS);
         assert_eq!(entries, 6);
         assert_eq!(found.len(), 2);
         assert_eq!(

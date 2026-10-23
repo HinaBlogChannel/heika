@@ -106,5 +106,5 @@ cargo test
   - GUI の識別子（Android のパッケージ名にもなる）は、リポジトリの変数 `APP_IDENTIFIER` で変えられる。フォークしたら自分のものにする。
 - `.github/workflows/release.yaml`: `v1.2.3` の形のタグで、そのコミットの `master` の CI が通るのを待ち、CI が作ったものをビルドし直さずに Release と Pages に出す。タグと `Cargo.toml` の版が同じか、ファイルが過不足なくそろっているか、どれにも CI の来歴の証明が付いているか、APK が決めた鍵で署名されているかを確かめ、`SHA256SUMS` を付ける。
 - リリースの手順は、`master` を push して CI が緑になったのを見てから、タグを打って push する。CI の Artifact は90日で消えるので、タグはそれまでに打つ。
-- `.github/workflows/kusa.yaml`: 手で動かすと、すんぼる草不可避（`apps/sunboru-kusa`）を確かめ、公開ノードを探して一覧を埋め込み、`dist` を Artifact に上げる。種のノードと除外するホストは Secrets の `KUSA_SEED_MAINNET`、`KUSA_SEED_TESTNET`、`KUSA_EXCLUDE`、受け取り用のアドレスは変数の `KUSA_TARGET` で渡す。
+- `.github/workflows/kusa.yaml`: 手で動かすと、すんぼる草不可避（`apps/sunboru-kusa`）を確かめ、公開ノードを探して一覧を埋め込み、`dist` を Artifact に上げる。種のノードと除外するホストは Secrets の `KUSA_SEED_MAINNET`、`KUSA_SEED_TESTNET`、`KUSA_EXCLUDE`、受け取り用のアドレスと数える最低額は変数の `KUSA_TARGET`、`KUSA_MIN_XYM` で渡す。
 - Rust のツールチェイン、trunk、Tauri の CLI の版は `.github/actions/` の中で固定する。Action はコミットのハッシュで固定する。

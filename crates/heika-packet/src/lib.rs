@@ -283,6 +283,14 @@ impl NodeRoles {
         (0x80, "IPv6"),
     ];
 
+    /// catapult の設定ファイルでの名前（`Peer`、`Api` など）から、そのビット。知らない名前なら `None`。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .find(|(_, known)| *known == name)
+            .map(|(bit, _)| Self(*bit))
+    }
+
     /// `roles` のビットがすべて立っているか。
     pub fn contains(self, roles: Self) -> bool {
         self.0 & roles.0 == roles.0
@@ -734,6 +742,13 @@ mod tests {
         assert_eq!(NodeRoles(0x141).to_config_value(), "Peer,IPv4");
         assert!(NodeRoles(0x41).contains(NodeRoles::PEER));
         assert!(!NodeRoles(0x42).contains(NodeRoles::PEER));
+    }
+
+    #[test]
+    fn reads_role_names_like_catapult_config() {
+        assert_eq!(NodeRoles::from_name("Api"), Some(NodeRoles(0x02)));
+        assert_eq!(NodeRoles::from_name("IPv4"), Some(NodeRoles(0x40)));
+        assert_eq!(NodeRoles::from_name("api"), None);
     }
 
     #[test]

@@ -337,7 +337,11 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
 
     /// DB とメモリの状態を高さ `common` まで巻き戻す。DB の `common` より上のブロックは消え、`orphans` は
     /// 同じコミットで孤立ブロックの表に入る。チェックポイントが `common` より下なら、そこから `common` までの
-    /// しまったブロックを当て直す
+    /// しまったブロックを当て直す。
+    ///
+    /// 要るものだけをメモリに持つ形では、メモリの状態は DB から読み直す。読んだ木のノードは捨てた枝のまま残り、
+    /// ブロックをしまうたびに手放してもいるので、変わった行を戻しても、読んでいないノードの書き戻しが抜けて根が
+    /// 戻らない。DB はもう戻っているので、読み直せば確か（起動と同じで、数秒）
     pub(super) async fn rewind(
         &mut self,
         common: u64,
@@ -348,8 +352,12 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             .checkpoint_at_or_below(common)
             .await?
             .ok_or("巻き戻せるチェックポイントがありません")?;
-        let rows = self.store.changes_above(checkpoint).await?;
-        let rows_count = rows.len();
+        let partial = self.executor.is_partial();
+        let rows = if partial {
+            Vec::new()
+        } else {
+            self.store.changes_above(checkpoint).await?
+        };
         let mut kept = Vec::new();
         for height in checkpoint + 1..=common {
             kept.push(
@@ -362,23 +370,43 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let grouping = self.config.finalization.voting_set_grouping;
         let voters_from = u32::try_from(common / grouping + 3)?;
         self.store.rollback(common, voters_from, orphans).await?;
-        self.executor.revert(rows, &meta)?;
+        let (parent, statistics, tip) = if partial {
+            let loaded = load_from(self.store, self.config.clone(), self.parameters, true).await?;
+            self.executor = loaded.executor;
+            (loaded.parent, loaded.statistics, loaded.tip)
+        } else {
+            self.revert(rows, &meta, common, checkpoint).await?
+        };
+        self.generation_hash = parent.generation_hash();
+        self.parent = parent;
+        self.statistics = statistics;
+        self.tip = tip;
+        for bytes in kept {
+            let block = Block::from_bytes(&bytes)?;
+            self.accept(&block, bytes, false).await?;
+        }
+        Ok(())
+    }
+
+    /// 全部をメモリに持つ形で、メモリの状態を、変わった行 `rows` を戻してチェックポイント `meta` にする
+    async fn revert(
+        &mut self,
+        rows: Vec<crate::store::Change>,
+        meta: &[u8],
+        common: u64,
+        checkpoint: u64,
+    ) -> Result<(Block, VecDeque<BlockStatistic>, Tip), ChainError> {
+        let rows_count = rows.len();
+        self.executor.revert(rows, meta)?;
         let lifetime = self
             .config
             .max_transaction_lifetime
             .max(self.config.max_bonded_transaction_lifetime);
-        let (parent, statistics, tip) =
-            context(self.store, &mut self.executor, self.parameters, lifetime).await?;
-        if self.executor.state_hash() != parent.state_hash {
+        let context = context(self.store, &mut self.executor, self.parameters, lifetime).await?;
+        if self.executor.state_hash() != context.0.state_hash {
             // 戻せなかったら、DB から丸ごと読み直す（遅いが確か）。どの木が食い違っていたかを添える
             let reverted = self.executor.roots();
-            let loaded = load_from(
-                self.store,
-                self.config.clone(),
-                self.parameters,
-                self.executor.is_partial(),
-            )
-            .await?;
+            let loaded = load_from(self.store, self.config.clone(), self.parameters, false).await?;
             self.executor = loaded.executor;
             let names = [
                 "アカウント",
@@ -407,14 +435,6 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 warning: true,
             });
         }
-        self.generation_hash = parent.generation_hash();
-        self.parent = parent;
-        self.statistics = statistics;
-        self.tip = tip;
-        for bytes in kept {
-            let block = Block::from_bytes(&bytes)?;
-            self.accept(&block, bytes, false).await?;
-        }
-        Ok(())
+        Ok(context)
     }
 }

@@ -598,6 +598,46 @@ mod tests {
     }
 
     #[test]
+    fn putting_leaves_back_after_eviction_needs_loading() {
+        // 根に近い段より深く葉が並ぶくらいの木
+        let mut rng = Rng(11);
+        let mut full = PatriciaTree::new();
+        let keys: Vec<[u8; 32]> = (0..20_000).map(|_| rng.key()).collect();
+        let before: Vec<Hash256> = keys.iter().map(|_| Hash256(rng.key())).collect();
+        for (key, value) in keys.iter().zip(&before) {
+            full.set(Hash256(*key), *value);
+        }
+        let old_root = full.root();
+        let mut store = Store(full.nodes().into_iter().collect());
+        // ブロックを当てて書き、読んだノードを手放す
+        let mut lazy = LazyTree::new();
+        let changed = &keys[..50];
+        store.run(&mut lazy, changed, |tree| {
+            for key in changed {
+                tree.set(Hash256(*key), Hash256([7; 32]));
+            }
+            tree.root();
+        });
+        store.commit(lazy.take_node_changes());
+        lazy.evict(0);
+        // 読み直さずに葉を前の値に戻すと、読んでいないノードの書き戻しが抜け、根が戻らない（巻き戻しで起きたこと）
+        for (key, value) in changed.iter().zip(&before) {
+            lazy.set(Hash256(*key), *value);
+        }
+        assert!(!lazy.take_missed().is_empty());
+        assert_ne!(lazy.root(), old_root);
+        // 足りないノードを読みながら戻せば、前の根になる
+        let mut lazy = LazyTree::new();
+        store.run(&mut lazy, changed, |tree| {
+            for (key, value) in changed.iter().zip(&before) {
+                tree.set(Hash256(*key), *value);
+            }
+            tree.root();
+        });
+        assert_eq!(lazy.root(), old_root);
+    }
+
+    #[test]
     fn walks_the_path_to_load() {
         let mut full = PatriciaTree::new();
         let mut rng = Rng(7);

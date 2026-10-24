@@ -83,11 +83,12 @@ pub enum ChainEvent {
     PeerLost { peer: PeerId },
     /// 頼んだ時刻（[`crate::chain::Action::WakeAt`]）になった
     Wake,
-    /// 接続してきたピアが押し付けたブロック。前後に依らない確かめは済んでいる。`from` は押し付けた相手の鍵
+    /// 接続してきたピアが押し付けたブロック。前後に依らない確かめは済んでいる。`from` は押し付けた相手の鍵。
+    /// REST（`PUT /blocks`）で届いたものは `None` で、弾いても罰さない
     Pushed {
         block: Box<Block>,
         bytes: Vec<u8>,
-        from: PublicKey,
+        from: Option<PublicKey>,
     },
     /// 決まった間隔で入れる。ピアに統計を聞き直し、押し付けのまとめを出す
     Tick,

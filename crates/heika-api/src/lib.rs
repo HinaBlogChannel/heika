@@ -6,6 +6,7 @@
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
+//! - `PUT /blocks`: 外で組んだブロックを受け取って、先端につながれば足し、ネットワークに流す（heika だけ）
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
@@ -141,6 +142,8 @@ pub struct Node {
     pub submit_partial: Submit,
     /// 切り離した連署（catapult の `DetachedCosignature` の 136 バイト）を受け付ける口
     pub submit_cosignature: Submit,
+    /// 外で組んだブロックを受け取る口
+    pub submit_block: Submit,
     pub reader: Arc<dyn Reader>,
     /// `/network/properties` で返す、ネットワークの設定。動いている間は変わらない
     pub network_properties: Arc<NetworkPropertiesJson>,
@@ -292,6 +295,23 @@ async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Res
     };
     match result {
         Ok(()) => (StatusCode::ACCEPTED, Json(AnnounceResultJson::pushed())).into_response(),
+        Err(message) => invalid(message),
+    }
+}
+
+/// 16進のブロックを受け取る。`PUT /transactions` と同じく、受け取ったら 202、受け取らなければ 409。足したかは
+/// あとでチェーンが決めるので、`/chain/info` かノードのログで見る
+async fn announce_block(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
+    let result = match decode_hex(&body.payload) {
+        Some(bytes) => (api.node.submit_block)(bytes),
+        None => Err("payload が16進ではありません".to_owned()),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(AnnounceResultJson::pushed_via(3, "/blocks")),
+        )
+            .into_response(),
         Err(message) => invalid(message),
     }
 }
@@ -555,6 +575,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/heika/delegations", get(delegations))
         .route("/heika/sourcecode.zip", get(source_code))
         .route("/transactions", put(announce).options(preflight))
+        .route("/blocks", put(announce_block).options(preflight))
         .route(
             "/transactions/partial",
             put(announce_partial)
@@ -813,6 +834,7 @@ mod tests {
         Node {
             submit_partial: Arc::clone(&submit),
             submit_cosignature: Arc::clone(&submit),
+            submit_block: Arc::clone(&submit),
             submit,
             reader: Arc::new(FakeReader),
             network_properties: Arc::new(NetworkPropertiesJson::default()),
@@ -1047,6 +1069,23 @@ mod tests {
             let (status, _) = put(&received, &format!(r#"{{"payload":"{payload}"}}"#)).await;
             assert_eq!(status, StatusCode::CONFLICT, "{payload:?}");
         }
+        assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
+    }
+
+    #[tokio::test]
+    async fn takes_blocks_like_transactions() {
+        let received = Arc::default();
+        let (status, answer) = put_to(&received, "/blocks", r#"{"payload":"0102"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            answer["message"],
+            "packet 3 was pushed to the network via /blocks"
+        );
+        let (status, answer) = put_to(&received, "/blocks", r#"{"payload":"0a0B03"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(answer["message"], "確かめが通りません");
+        let (status, _) = put_to(&received, "/blocks", r#"{"payload":"01XY"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
     }
 

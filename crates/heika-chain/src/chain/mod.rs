@@ -670,7 +670,7 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     pushes: PushCounts,
     /// 押し付けられた、先端の次につながるが時刻のまだ来ていないブロック。時刻が来たら受け入れる（
     /// `docs/archive/tip.md` の「未来のブロックは、受け入れずに手元に持つ」）
-    held: Option<(Block, Vec<u8>, PublicKey)>,
+    held: Option<(Block, Vec<u8>, Option<PublicKey>)>,
     /// 最近受け入れた高さと時刻。押し付けがどれだけ遅れて届いたかを測る
     accepted_at: VecDeque<(u64, SystemTime)>,
     /// ハーベストする鍵（署名の鍵、VRF の鍵）。空ならハーベストしない

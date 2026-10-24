@@ -762,7 +762,7 @@ fn respond(
                     let _ = pushes.send(NodeEvent::Chain(ChainEvent::Pushed {
                         block,
                         bytes,
-                        from: key,
+                        from: Some(key),
                     }));
                 }
                 continue;

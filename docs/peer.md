@@ -131,6 +131,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `PUT /transactions/partial`、`PUT /transactions/cosignature` | 連署を待つアグリゲートボンデッドと、その連署（catapult の `CosignatureDTO`）を受け付ける。受け付けたら 202。ハッシュロックや連署できる人かは、そのあとノードで確かめる。連署を待っているものは、行方（`/transactionStatus`）で `partial` になる |
 | `/transactions/partial/{hash}`、`/transactions/partial` | 連署を待っているもの（集まった連署付き、高さは "0"）と、その一覧。一覧は `address`（外側の署名者、中のトランザクションの署名者、連署者、送金の宛先のどれか）と `signerPublicKey`（外側の署名者）で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る |
 | `PUT /transactions` | 署名したトランザクション（`{"payload":"16進"}`）を受け付けて、つないでいるピアに流す。catapult の REST と同じく、受け付けたら 202。heika は先にメモリプールで確かめるので、受け付けなかったら 409 で `message` にわけを返す |
+| `PUT /blocks` | 外で組んで署名したブロック（`{"payload":"16進"}`）を受け取る。heika だけの口。P2P の `Push_Block` と同じく、形と署名を確かめて 202 を返し（読めなければ 409）、先端の次につながるか、先端と同じ親の上でスコアが高ければ足して、つないでいるピアに流す。足したかはノードのログか `/chain/info` で見る。規則に合わなくても、P2P と違って締め出す相手はいない |
 
 - トランザクションの行方は、トランザクションの期限（`maxTransactionLifetime`、メインネットで 6 時間）の分の直近のブロックだけから答える。送ったばかりのものは、その間に入るか二度と入らないかなので、送金のあとの確かめには足りる。索引はメモリにだけ持ち、起動したら直近のブロックを読んで作り直す（ライトの残し方でもブロックはその分ある）。それより古いトランザクションは 404
 - 話すのは HTTP だけ。HTTPS で外に出すなら、手前に Nginx や Caddy を置き、そこで TLS を終わらせる。systemd と Caddy で外に出す手順は [deploy.md](deploy.md)

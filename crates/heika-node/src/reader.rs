@@ -5,6 +5,9 @@
 //! ブロックの9本の根は DB にしまっていないので、その高さの木の根のノードを読んで求め直す。差分が残っていない高さの
 //! ブロックは、根を出せないので返さない。
 //!
+//! ネームスペースの行はルートごとなので、子の ID で引かれたら、どのルートの子かを ID から求められないぶん、
+//! ネームスペースの行を全部見て探す。
+//!
 //! トランザクションの行方は、メモリプール、連署を待つものの置き場と、直近のブロックの索引（[`crate::recent`]）で答える。索引より古い
 //! トランザクションは知らないことにする。
 
@@ -13,6 +16,7 @@ use std::sync::Arc;
 use heika_api::PartialFilter;
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
+use heika_chain::store::EXECUTOR_META;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::merkle::{self, Position};
@@ -24,9 +28,11 @@ use heika_rest::block::{BlockHeader, BlockInfo, BlockMeta};
 use heika_rest::merkle::{MerklePathItem, MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::TransactionFeesJson;
 use heika_rest::send::TransactionStatus;
-use heika_rest::state::{AccountJson, MosaicStateJson};
+use heika_rest::state::{
+    AccountJson, MetadataEntryJson, MosaicStateJson, NamespaceInfo, RootNamespaceState,
+};
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
-use heika_state_transition::executor::persist::{decode_account_row, row_key};
+use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
 use heika_store_redb::{Db, DbError};
 use heika_transaction::{Body, Transaction};
@@ -159,6 +165,14 @@ impl DbReader {
     }
 }
 
+/// 行は、葉のバイト列からバージョンを除いたもの（モザイクとネームスペースは ID も除く）
+fn state_bytes(id: &[u8], row: &[u8]) -> Vec<u8> {
+    let mut bytes = 1u16.to_le_bytes().to_vec();
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(row);
+    bytes
+}
+
 fn decode_node(bytes: &[u8]) -> Result<TreeNode, String> {
     TreeNode::decode_all(bytes)
         .ok()
@@ -193,11 +207,61 @@ impl heika_api::Reader for DbReader {
         else {
             return Ok(None);
         };
-        // 行は、葉のバイト列からバージョンと ID を除いたもの
-        let mut bytes = 1u16.to_le_bytes().to_vec();
-        bytes.extend_from_slice(&id.to_le_bytes());
-        bytes.extend_from_slice(&row);
-        MosaicStateJson::from_state_bytes(&bytes)
+        MosaicStateJson::from_state_bytes(&state_bytes(&id.to_le_bytes(), &row))
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String> {
+        let root_bytes = |root_id: u64, row: &[u8]| state_bytes(&root_id.to_le_bytes(), row);
+        let mut found = self
+            .db
+            .state_row(&row_key(SubCache::Namespace, &id.to_le_bytes()))
+            .map_err(|error| error.to_string())?
+            .map(|row| root_bytes(id, &row));
+        if found.is_none() {
+            // 子。ID のバイト列を含む行だけを読んで確かめる
+            let needle = id.to_le_bytes();
+            let mut rows = Vec::new();
+            self.db
+                .for_each_state_row(&[SubCache::Namespace.index() as u8], &mut |key, row| {
+                    if row.windows(8).any(|window| window == needle)
+                        && let Ok(root_id) = key[1..].try_into().map(u64::from_le_bytes)
+                    {
+                        rows.push(root_bytes(root_id, row));
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            found = rows.into_iter().find(|bytes| {
+                RootNamespaceState::from_state_bytes(bytes)
+                    .is_ok_and(|state| state.info(id, 0).is_ok_and(|info| info.is_some()))
+            });
+        }
+        let Some(bytes) = found else {
+            return Ok(None);
+        };
+        let height = match self
+            .db
+            .meta(EXECUTOR_META)
+            .map_err(|error| error.to_string())?
+        {
+            Some(meta) => height_of_meta(&meta).map_err(|error| error.to_string())?,
+            None => 0,
+        };
+        RootNamespaceState::from_state_bytes(&bytes)
+            .and_then(|state| state.info(id, height))
+            .map_err(|error| error.to_string())
+    }
+
+    fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String> {
+        let Some(row) = self
+            .db
+            .state_row(&row_key(SubCache::Metadata, &composite_hash.0))
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        MetadataEntryJson::from_state_bytes(&state_bytes(&[], &row))
             .map(Some)
             .map_err(|error| error.to_string())
     }

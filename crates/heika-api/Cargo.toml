@@ -15,6 +15,7 @@ serde = "1.0.229"
 tokio = { version = "1.53.3", features = ["net", "rt", "time"] }
 
 [dev-dependencies]
+heika-transaction = { path = "../heika-transaction" }
 http-body-util = "0.1.5"
 serde_json = "1.0.154"
 tower = { version = "0.5.3", features = ["util"] }

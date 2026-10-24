@@ -1,5 +1,5 @@
 //! 状態。`/accounts/{id}`、`/mosaics/{id}`、`/namespaces`、`/metadata` が返す JSON から、
-//! catapult が状態の木の葉にする状態のバイト列を組み直す。アカウントとモザイクは、ノードが REST の口で返すために、
+//! catapult が状態の木の葉にする状態のバイト列を組み直す。ノードが REST の口で返すために、
 //! 状態のバイト列から JSON にする逆向きもある。
 //!
 //! 葉の値は、状態のバージョン（u16）に続けて、履歴を除いた状態を書いたものの SHA3-256
@@ -372,16 +372,33 @@ impl MetadataEntryJson {
             target_address: Address(hex_array(&self.target_address, "targetAddress")?),
             scoped_metadata_key: id(&self.scoped_metadata_key, "scopedMetadataKey")?,
             target_id: id(&self.target_id, "targetId")?,
-            metadata_type: match self.metadata_type {
-                0 => MetadataType::Account,
-                1 => MetadataType::Mosaic,
-                2 => MetadataType::Namespace,
-                _ => {
-                    return Err(RestError::InvalidValue {
-                        field: "metadataType",
-                    });
-                }
-            },
+            metadata_type: metadata_type(self.metadata_type)?,
+        })
+    }
+
+    /// 状態のバイト列から、REST が返す形にする。[`MetadataEntryJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let key = MetadataKey {
+            source_address: Address(reader.array()?),
+            target_address: Address(reader.array()?),
+            scoped_metadata_key: reader.u64()?,
+            target_id: reader.u64()?,
+            metadata_type: metadata_type(reader.u8()?)?,
+        };
+        let value_size = reader.u16()?;
+        let value = reader.take(usize::from(value_size))?;
+        reader.finish()?;
+        Ok(Self {
+            version: STATE_VERSION,
+            composite_hash: key.unique_key().to_string(),
+            source_address: hex(&key.source_address.0),
+            target_address: hex(&key.target_address.0),
+            scoped_metadata_key: format!("{:016X}", key.scoped_metadata_key),
+            target_id: format!("{:016X}", key.target_id),
+            metadata_type: key.metadata_type as u8,
+            value_size,
+            value: hex(value),
         })
     }
 
@@ -447,6 +464,9 @@ pub struct NamespaceJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level2: Option<String>,
     pub alias: AliasJson,
+    /// 親の ID。ルートは `0000000000000000`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub owner_address: String,
     pub start_height: String,
     pub end_height: String,
@@ -511,6 +531,25 @@ impl AliasJson {
         }
         Ok(())
     }
+
+    fn decode(reader: &mut StateReader) -> Result<Self, RestError> {
+        let alias_type = reader.u8()?;
+        let (mosaic_id, address) = match alias_type {
+            0 => (None, None),
+            1 => (Some(format!("{:016X}", reader.u64()?)), None),
+            2 => (None, Some(hex(reader.take(24)?))),
+            _ => {
+                return Err(RestError::InvalidValue {
+                    field: "alias.type",
+                });
+            }
+        };
+        Ok(Self {
+            alias_type,
+            mosaic_id,
+            address,
+        })
+    }
 }
 
 /// ルートのネームスペースの状態。REST はルートと子を1つずつ別に返すので、同じルートのもの
@@ -550,6 +589,81 @@ impl RootNamespaceState {
         })
     }
 
+    /// 状態のバイト列から組む。[`RootNamespaceState::to_state_bytes`] の逆で、ルートと子を
+    /// REST が返す形（[`NamespaceJson`]）にする
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let root_id = reader.u64()?;
+        let owner_address = hex(reader.take(24)?);
+        let start_height = reader.u64()?.to_string();
+        let end_height = reader.u64()?.to_string();
+        // 子も、持ち主と期間はルートのもの
+        let entry = |path: &[u64], alias| {
+            let level = |depth: usize| path.get(depth).map(|id| format!("{id:016X}"));
+            let parent = if path.len() > 1 {
+                path[path.len() - 2]
+            } else {
+                0
+            };
+            NamespaceJson {
+                version: STATE_VERSION,
+                registration_type: u8::from(path.len() > 1),
+                depth: path.len() as u8,
+                level0: format!("{:016X}", path[0]),
+                level1: level(1),
+                level2: level(2),
+                alias,
+                parent_id: Some(format!("{parent:016X}")),
+                owner_address: owner_address.clone(),
+                start_height: start_height.clone(),
+                end_height: end_height.clone(),
+            }
+        };
+        let root = entry(&[root_id], AliasJson::decode(&mut reader)?);
+        let mut children = Vec::new();
+        for _ in 0..reader.u64()? {
+            let depth = reader.u8()?;
+            if !(1..=2).contains(&depth) {
+                return Err(RestError::InvalidValue { field: "state" });
+            }
+            let mut path = vec![root_id];
+            for _ in 0..depth {
+                path.push(reader.u64()?);
+            }
+            let child = entry(&path, AliasJson::decode(&mut reader)?);
+            children.push((path, child));
+        }
+        reader.finish()?;
+        Ok(Self {
+            root_id,
+            root,
+            children,
+        })
+    }
+
+    /// ルートか子の `id` を、`/namespaces/{id}` の形にする。なければ `None`。
+    /// `height` は今のチェーンの高さで、catapult の REST と同じく、終わりの高さがそれより後なら `active`
+    pub fn info(&self, id: u64, height: u64) -> Result<Option<NamespaceInfo>, RestError> {
+        let namespace = if id == self.root_id {
+            &self.root
+        } else {
+            match self
+                .children
+                .iter()
+                .find(|(path, _)| path.last() == Some(&id))
+            {
+                Some((_, child)) => child,
+                None => return Ok(None),
+            }
+        };
+        Ok(Some(NamespaceInfo {
+            meta: NamespaceMetaJson {
+                active: number(&self.root.end_height, "endHeight")? > height,
+            },
+            namespace: namespace.clone(),
+        }))
+    }
+
     /// 状態のバイト列。catapult の `RootNamespaceHistoryNonHistoricalSerializer`。
     /// 今のルートだけを、子の経路（ルートの ID を除く）と別名とともに書く。
     pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
@@ -577,6 +691,17 @@ impl RootNamespaceState {
     /// 状態の木のキー。ルートの ID の SHA3-256。
     pub fn tree_key(&self) -> Hash256 {
         patricia::id_key(self.root_id)
+    }
+}
+
+fn metadata_type(value: u8) -> Result<MetadataType, RestError> {
+    match value {
+        0 => Ok(MetadataType::Account),
+        1 => Ok(MetadataType::Mosaic),
+        2 => Ok(MetadataType::Namespace),
+        _ => Err(RestError::InvalidValue {
+            field: "metadataType",
+        }),
     }
 }
 
@@ -608,6 +733,10 @@ impl<'a> StateReader<'a> {
             .ok_or(RestError::InvalidValue { field: "state" })?;
         self.0 = rest;
         Ok(head)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], RestError> {
+        Ok(self.take(N)?.try_into().expect("N bytes"))
     }
 
     fn u8(&mut self) -> Result<u8, RestError> {

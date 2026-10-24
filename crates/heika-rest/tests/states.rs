@@ -5,8 +5,8 @@ use heika_core::patricia::TreeNode;
 use heika_rest::RestError;
 use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::state::{
-    AccountInfo, AccountJson, MetadataInfo, MosaicInfo, MosaicStateJson, NamespaceInfo,
-    RootNamespaceState,
+    AccountInfo, AccountJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicStateJson,
+    NamespaceInfo, RootNamespaceState,
 };
 use serde_json::{Value, json};
 use sha3::{Digest, Sha3_256};
@@ -221,6 +221,15 @@ fn rebuilds_the_metadata_state_and_checks_the_composite_hash() {
         info.metadata_entry.tree_key(),
         Ok(heika_core::patricia::hash_key(&key.unique_key()))
     );
+    // ノードが返す向き。バイト列から組んだものは、REST の JSON と同じになる
+    assert_eq!(
+        MetadataEntryJson::from_state_bytes(&expected),
+        Ok(info.metadata_entry.clone())
+    );
+    assert_eq!(
+        MetadataEntryJson::from_state_bytes(&expected[..expected.len() - 1]),
+        Err(RestError::InvalidValue { field: "state" })
+    );
 
     let mut other = json;
     other["metadataEntry"]["compositeHash"] = json!(hex(&[0; 32]));
@@ -303,6 +312,31 @@ fn rebuilds_a_root_namespace_from_its_children() {
     expected.push(0);
     assert_eq!(state.to_state_bytes().unwrap(), expected);
     assert_eq!(state.tree_key(), heika_core::patricia::id_key(root_id));
+
+    // ノードが返す向き。バイト列から組み直すと同じバイト列に戻り、子は親の ID とルートの持ち主と期間を持つ
+    let rebuilt = RootNamespaceState::from_state_bytes(&expected).unwrap();
+    assert_eq!(rebuilt.to_state_bytes().unwrap(), expected);
+    let root = rebuilt.info(root_id, 100).unwrap().unwrap();
+    assert!(root.meta.active);
+    assert_eq!(root.namespace.registration_type, 0);
+    assert_eq!(
+        root.namespace.parent_id.as_deref(),
+        Some("0000000000000000")
+    );
+    let child = rebuilt.info(9, 100).unwrap().unwrap();
+    assert_eq!(child.namespace.registration_type, 1);
+    assert_eq!(child.namespace.depth, 3);
+    assert_eq!(child.namespace.path(), Ok(vec![root_id, 2, 9]));
+    assert_eq!(
+        child.namespace.parent_id.as_deref(),
+        Some("0000000000000002")
+    );
+    assert_eq!(child.namespace.alias.address, Some(hex(&[0x69; 24])));
+    assert_eq!(child.namespace.owner_address, hex(&[0x68; 24]));
+    assert_eq!(child.namespace.end_height, u64::MAX.to_string());
+    assert_eq!(rebuilt.info(5, 100), Ok(None));
+    // 終わりの高さに届いたら（猶予の間）、まだ返すが active ではない
+    assert!(!rebuilt.info(9, u64::MAX).unwrap().unwrap().meta.active);
 
     assert_eq!(
         RootNamespaceState::collect(0x99, &entries),

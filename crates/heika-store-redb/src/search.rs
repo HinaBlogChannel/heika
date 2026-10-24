@@ -97,34 +97,32 @@ impl MetadataFields {
         })
     }
 
-    /// 検索表のキー。並べ方ごとに。ID は上位から書くので、キーの順は REST の16進の順と同じ
-    pub fn search_keys(&self) -> Vec<Vec<u8>> {
-        let key = |prefix: u8, parts: &[&[u8]]| {
-            let mut out = vec![prefix];
-            for part in parts {
-                out.extend_from_slice(part);
-            }
-            out
-        };
+    /// 並べ方 `prefix`（[`METADATA_BY_SOURCE`] など）での、検索表のキー。ID は上位から書くので、キーの順は REST の16進の順と同じ
+    pub fn search_key(&self, prefix: u8) -> Vec<u8> {
         let kind = [self.metadata_type];
         let (target_id, scoped_key) = (self.target_id.to_be_bytes(), self.scoped_key.to_be_bytes());
-        let mut keys = vec![
-            key(
-                METADATA_BY_SOURCE,
-                &[&self.source, &kind, &self.target, &target_id, &scoped_key],
-            ),
-            key(
-                METADATA_BY_TARGET,
-                &[&self.target, &kind, &target_id, &scoped_key, &self.source],
-            ),
-        ];
-        if self.metadata_type != 0 {
-            keys.push(key(
-                METADATA_BY_TARGET_ID,
-                &[&kind, &target_id, &scoped_key, &self.target, &self.source],
-            ));
+        let parts: [&[u8]; 5] = match prefix {
+            METADATA_BY_SOURCE => [&self.source, &kind, &self.target, &target_id, &scoped_key],
+            METADATA_BY_TARGET => [&self.target, &kind, &target_id, &scoped_key, &self.source],
+            _ => [&kind, &target_id, &scoped_key, &self.target, &self.source],
+        };
+        let mut out = vec![prefix];
+        for part in parts {
+            out.extend_from_slice(part);
         }
-        keys
+        out
+    }
+
+    /// 検索表に入れるキー。対象からの並べ方は、モザイクとネームスペースのメタデータだけ
+    pub fn search_keys(&self) -> Vec<Vec<u8>> {
+        let mut prefixes = vec![METADATA_BY_SOURCE, METADATA_BY_TARGET];
+        if self.metadata_type != 0 {
+            prefixes.push(METADATA_BY_TARGET_ID);
+        }
+        prefixes
+            .into_iter()
+            .map(|prefix| self.search_key(prefix))
+            .collect()
     }
 
     /// 1件を指すハッシュ（compositeHash）。知らない種類なら `None`

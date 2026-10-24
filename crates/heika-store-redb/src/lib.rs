@@ -426,10 +426,11 @@ impl Db {
     }
 
     /// 検索表のキーが `prefix` で始まるものを、キーの順に（`reverse` なら逆に）`visit` に渡す。
-    /// `visit` が `false` を返したら止める
+    /// `after` があれば、その順でそれより後のものから。`visit` が `false` を返したら止める
     pub fn for_each_search_key(
         &self,
         prefix: &[u8],
+        after: Option<&[u8]>,
         reverse: bool,
         visit: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Result<(), DbError> {
@@ -437,30 +438,9 @@ impl Db {
         let Some(table) = open_if_exists(&transaction, SEARCH)? else {
             return Ok(());
         };
-        let range = table.range(prefix..).map_err(db_error)?;
-        let mut visit_row = |row: Result<(AccessGuard<&[u8]>, AccessGuard<()>), StorageError>| {
-            let (key, _) = row.map_err(db_error)?;
-            let key = key.value();
-            Ok::<_, DbError>(key.starts_with(prefix) && visit(key))
-        };
-        if reverse {
-            // `prefix` の次のキーより前から、逆に
-            let end = search::prefix_end(prefix);
-            let range = match &end {
-                Some(end) => table.range(prefix..end.as_slice()),
-                None => table.range(prefix..),
-            }
-            .map_err(db_error)?;
-            for row in range.rev() {
-                if !visit_row(row)? {
-                    break;
-                }
-            }
-        } else {
-            for row in range {
-                if !visit_row(row)? {
-                    break;
-                }
+        for key in search_range(&table, prefix, after, reverse)? {
+            if !visit(&key?) {
+                break;
             }
         }
         Ok(())
@@ -471,6 +451,7 @@ impl Db {
     pub fn for_each_search_key_with_past(
         &self,
         prefix: &[u8],
+        after: Option<&[u8]>,
         reverse: bool,
         visit: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Result<(), DbError> {
@@ -481,23 +462,8 @@ impl Db {
         ) else {
             return Ok(());
         };
-        let end = search::prefix_end(prefix);
-        let keys = |table: &ReadOnlyTable<&'static [u8], ()>| -> Result<_, DbError> {
-            let range = match &end {
-                Some(end) => table.range(prefix..end.as_slice()),
-                None => table.range(prefix..),
-            }
-            .map_err(db_error)?;
-            let rows: Box<dyn Iterator<Item = _>> = if reverse {
-                Box::new(range.rev())
-            } else {
-                Box::new(range)
-            };
-            Ok(rows
-                .map(|row| row.map(|(key, _)| key.value().to_vec()).map_err(db_error))
-                .peekable())
-        };
-        let (mut left, mut right) = (keys(&current)?, keys(&past)?);
+        let mut left = search_range(&current, prefix, after, reverse)?.peekable();
+        let mut right = search_range(&past, prefix, after, reverse)?.peekable();
         loop {
             // 2つの表の先頭のうち、順で先のほう。同じキーなら1回だけ
             let take_left = match (left.peek(), right.peek()) {
@@ -1581,6 +1547,53 @@ fn read_u64(transaction: &WriteTransaction, name: &str) -> Result<Option<u64>, D
     Ok(value.map(|value| u64_from(value.value())))
 }
 
+/// 検索表のキーを順に読むもの
+type SearchKeys<'a> = Box<dyn Iterator<Item = Result<Vec<u8>, DbError>> + 'a>;
+
+/// 検索表 `table` のキーが `prefix` で始まるものを、順に（`reverse` なら逆に）。`after` があれば、その順でそれより後から
+fn search_range<'a>(
+    table: &'a ReadOnlyTable<&'static [u8], ()>,
+    prefix: &[u8],
+    after: Option<&[u8]>,
+    reverse: bool,
+) -> Result<SearchKeys<'a>, DbError> {
+    use std::ops::Bound;
+
+    let end = search::prefix_end(prefix);
+    let mut low = Bound::Included(prefix);
+    let mut high = match &end {
+        Some(end) => Bound::Excluded(end.as_slice()),
+        None => Bound::Unbounded,
+    };
+    if let Some(after) = after {
+        let past_end = end.as_deref().is_some_and(|end| after >= end);
+        if reverse {
+            if after <= prefix {
+                return Ok(Box::new(std::iter::empty()));
+            }
+            if !past_end {
+                high = Bound::Excluded(after);
+            }
+        } else {
+            if past_end {
+                return Ok(Box::new(std::iter::empty()));
+            }
+            if after >= prefix {
+                low = Bound::Excluded(after);
+            }
+        }
+    }
+    let range = table.range::<&[u8]>((low, high)).map_err(db_error)?;
+    let keys = |row: Result<(AccessGuard<&[u8]>, AccessGuard<()>), StorageError>| {
+        row.map(|(key, _)| key.value().to_vec()).map_err(db_error)
+    };
+    Ok(if reverse {
+        Box::new(range.rev().map(keys))
+    } else {
+        Box::new(range.map(keys))
+    })
+}
+
 /// `meta` に覚えた、作る検索
 fn read_searches(
     meta: &impl ReadableTable<&'static str, &'static [u8]>,
@@ -2350,7 +2363,7 @@ mod tests {
 
     fn search_keys(db: &Db, prefix: &[u8]) -> Vec<Vec<u8>> {
         let mut keys = Vec::new();
-        db.for_each_search_key(prefix, false, &mut |key| {
+        db.for_each_search_key(prefix, None, false, &mut |key| {
             keys.push(key.to_vec());
             true
         })
@@ -2407,7 +2420,7 @@ mod tests {
 
         // 逆の順でも引ける
         let mut reversed = Vec::new();
-        db.for_each_search_key(&[], true, &mut |key| {
+        db.for_each_search_key(&[], None, true, &mut |key| {
             reversed.push(key.to_vec());
             true
         })
@@ -2432,10 +2445,15 @@ mod tests {
 
     fn search_keys_with_past(db: &Db, reverse: bool) -> Vec<Vec<u8>> {
         let mut keys = Vec::new();
-        db.for_each_search_key_with_past(&[search::METADATA_BY_SOURCE], reverse, &mut |key| {
-            keys.push(key.to_vec());
-            true
-        })
+        db.for_each_search_key_with_past(
+            &[search::METADATA_BY_SOURCE],
+            None,
+            reverse,
+            &mut |key| {
+                keys.push(key.to_vec());
+                true
+            },
+        )
         .unwrap();
         keys
     }
@@ -2492,6 +2510,42 @@ mod tests {
         let row = search::row_key_of(&search_keys(&db, &[search::METADATA_BY_SOURCE])[0]).unwrap();
         let fields = MetadataFields::from_row(&db.state_row(&row).unwrap().unwrap()).unwrap();
         assert_eq!(fields.source, [1; 24]);
+        // 位置の後から読む。今の表と消えたキーの表を混ぜても、順でそれより後だけ
+        let keys = search_keys_with_past(&db, false);
+        let after = |after: &[u8], reverse: bool| {
+            let mut out = Vec::new();
+            db.for_each_search_key_with_past(
+                &[search::METADATA_BY_SOURCE],
+                Some(after),
+                reverse,
+                &mut |key| {
+                    out.push(source_of(key));
+                    true
+                },
+            )
+            .unwrap();
+            out
+        };
+        assert_eq!(after(&keys[0], false), vec![2, 3]);
+        assert_eq!(after(&keys[2], true), vec![2, 1]);
+        assert_eq!(after(&keys[2], false), Vec::<u8>::new());
+        // 頭より前や後の位置なら、全部か何もなし
+        assert_eq!(after(&[0], false), vec![1, 2, 3]);
+        assert_eq!(after(&[0], true), Vec::<u8>::new());
+        assert_eq!(after(&[0xFF], true), vec![3, 2, 1]);
+        let mut current = Vec::new();
+        db.for_each_search_key(
+            &[search::METADATA_BY_SOURCE],
+            Some(&keys[0]),
+            false,
+            &mut |key| {
+                current.push(source_of(key));
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(current, vec![3]);
+
         // やめたら消える
         db.set_search(Searches::METADATA).unwrap();
         assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 3]);

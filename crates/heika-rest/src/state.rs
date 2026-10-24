@@ -345,6 +345,10 @@ impl MosaicStateJson {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataInfo {
+    /// 検索のページ送り（`offset`）に渡す位置。catapult の REST では MongoDB の ID、heika では
+    /// [`MetadataEntryJson::position`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub metadata_entry: MetadataEntryJson,
 }
 
@@ -374,6 +378,19 @@ impl MetadataEntryJson {
             target_id: id(&self.target_id, "targetId")?,
             metadata_type: metadata_type(self.metadata_type)?,
         })
+    }
+
+    /// heika の REST の検索で、この件の位置（`id`）。送り主、種類、宛先、対象の ID、キーを16進でつないだもの。
+    /// 検索の `offset` に渡すと、この件の次から返す
+    pub fn position(&self) -> String {
+        format!(
+            "{}{:02X}{}{}{}",
+            self.source_address,
+            self.metadata_type,
+            self.target_address,
+            self.target_id,
+            self.scoped_metadata_key
+        )
     }
 
     /// 状態のバイト列から、REST が返す形にする。[`MetadataEntryJson::to_state_bytes`] の逆

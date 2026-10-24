@@ -3,7 +3,7 @@
 use super::*;
 
 impl<S: ChainStore + StateSource> Chain<'_, S> {
-    /// 押し付けられたブロック。先端の次で先端につながり、同期の途中でないときだけ使う。先端と同じ親の上の別の
+    /// 押し付けられたブロック。先端の次で先端につながり、同期の途中でないときだけ使い、使ったらピアに流す。先端と同じ親の上の別の
     /// ブロックなら、[`Self::on_rival`] に回す。時刻がまだ来ていなければ
     /// （テストネットもメインネットも、ネットワークの時刻は UTC より数秒進んでいる）、来るまで1つだけ持っておく。
     /// ほかのもの（もう持っている高さ、枝の先、先の高さ）は、統計を聞いて追うのに任せる。弾いたら、押し付けた
@@ -12,7 +12,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         &mut self,
         block: Block,
         bytes: Vec<u8>,
-        from: PublicKey,
+        from: Option<PublicKey>,
     ) -> Result<(), ChainError> {
         let height = block.height;
         if height == self.tip.height
@@ -60,7 +60,10 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             return Ok(());
         }
         match self.accept(&block, bytes, true).await {
-            Ok(()) => self.pushes.used += 1,
+            Ok(()) => {
+                self.pushes.used += 1;
+                self.broadcast(block.as_bytes().to_vec());
+            }
             Err(error) => {
                 self.pushes.rejected += 1;
                 self.reject_push(height, from, &error);
@@ -77,7 +80,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         &mut self,
         block: Block,
         bytes: Vec<u8>,
-        from: PublicKey,
+        from: Option<PublicKey>,
     ) -> Result<(), ChainError> {
         let height = block.height;
         let common = height - 1;
@@ -111,12 +114,16 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             Verdict::Better => {}
         }
         let old = self.tip;
+        let relayed = bytes.clone();
         match self.replace(common, vec![(block, bytes)], true).await? {
             Replaced::Done => {
                 self.pushes.replaced += 1;
+                self.broadcast(relayed);
                 self.progress(format!(
-                    "押し付けられた高さ {height} のブロックのほうがスコアが高いので、先端を差し替えました: {} → {}（鍵 {from}）",
-                    old.hash, self.tip.hash
+                    "押し付けられた高さ {height} のブロックのほうがスコアが高いので、先端を差し替えました: {} → {}（{}）",
+                    old.hash,
+                    self.tip.hash,
+                    sender(from)
                 ));
             }
             Replaced::Failed { message, penalty } => {
@@ -159,7 +166,10 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         }
         let (block, bytes, from) = self.held.take().expect("checked above");
         match self.accept(&block, bytes, true).await {
-            Ok(()) => self.pushes.used_late += 1,
+            Ok(()) => {
+                self.pushes.used_late += 1;
+                self.broadcast(block.as_bytes().to_vec());
+            }
             Err(error) => {
                 self.pushes.rejected_late += 1;
                 self.reject_push(block.height, from, &error);
@@ -169,8 +179,9 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
     }
 
     /// 押し付けられた高さ `height` を弾いたことを知らせる。ブロックが規則に合わなければ、押し付けた鍵 `from` の
-    /// 接続を切る（締め出さない）。先端につながるブロックしか試さないので、同じ規則のノードのものなら通る
-    pub(super) fn reject_push(&mut self, height: u64, from: PublicKey, error: &ChainError) {
+    /// 接続を切る（締め出さない）。先端につながるブロックしか試さないので、同じ規則のノードのものなら通る。
+    /// REST で届いたもの（`from` が `None`）は、知らせるだけ
+    pub(super) fn reject_push(&mut self, height: u64, from: Option<PublicKey>, error: &ChainError) {
         if !is_invalid(error) {
             self.notify(Notice::Progress {
                 message: format!(
@@ -180,6 +191,13 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             });
             return;
         }
+        let Some(from) = from else {
+            self.notify(Notice::Progress {
+                message: format!("REST で届いた高さ {height} を弾きました: {error}"),
+                warning: true,
+            });
+            return;
+        };
         self.notify(Notice::Progress {
             message: format!(
                 "押し付けられた高さ {height} を弾き、鍵 {from} の接続を切ります: {error}"
@@ -206,6 +224,14 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         if counts.total() > 0 {
             self.progress(counts.to_string());
         }
+    }
+}
+
+/// 押し付けた相手を、知らせに書く形にする
+fn sender(from: Option<PublicKey>) -> String {
+    match from {
+        Some(key) => format!("鍵 {key}"),
+        None => "REST".to_owned(),
     }
 }
 

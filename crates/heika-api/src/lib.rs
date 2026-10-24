@@ -6,6 +6,7 @@
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
+//! - `PUT /blocks`: 外で組んだブロックを受け取って、先端につながれば足し、ネットワークに流す（heika だけ）
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
@@ -21,16 +22,17 @@
 //! catapult の REST と同じく、どこのページからでも読めるようにする（CORS）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
+use axum::extract::Request;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     CONTENT_DISPOSITION, CONTENT_TYPE,
 };
 use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::map_response;
+use axum::middleware::{Next, from_fn, map_response};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -141,6 +143,8 @@ pub struct Node {
     pub submit_partial: Submit,
     /// 切り離した連署（catapult の `DetachedCosignature` の 136 バイト）を受け付ける口
     pub submit_cosignature: Submit,
+    /// 外で組んだブロックを受け取る口
+    pub submit_block: Submit,
     pub reader: Arc<dyn Reader>,
     /// `/network/properties` で返す、ネットワークの設定。動いている間は変わらない
     pub network_properties: Arc<NetworkPropertiesJson>,
@@ -292,6 +296,23 @@ async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Res
     };
     match result {
         Ok(()) => (StatusCode::ACCEPTED, Json(AnnounceResultJson::pushed())).into_response(),
+        Err(message) => invalid(message),
+    }
+}
+
+/// 16進のブロックを受け取る。`PUT /transactions` と同じく、受け取ったら 202、受け取らなければ 409。足したかは
+/// あとでチェーンが決めるので、`/chain/info` かノードのログで見る
+async fn announce_block(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
+    let result = match decode_hex(&body.payload) {
+        Some(bytes) => (api.node.submit_block)(bytes),
+        None => Err("payload が16進ではありません".to_owned()),
+    };
+    match result {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(AnnounceResultJson::pushed_via(3, "/blocks")),
+        )
+            .into_response(),
         Err(message) => invalid(message),
     }
 }
@@ -555,6 +576,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/heika/delegations", get(delegations))
         .route("/heika/sourcecode.zip", get(source_code))
         .route("/transactions", put(announce).options(preflight))
+        .route("/blocks", put(announce_block).options(preflight))
         .route(
             "/transactions/partial",
             put(announce_partial)
@@ -582,9 +604,74 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .with_state(Api { shared, node })
 }
 
-/// `addresses` のそれぞれで待ち受け、`stop` が立つまで答える。呼んだスレッドで tokio を回す
+/// 待ち受ける口
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listener {
+    /// 待ち受けるアドレス（`127.0.0.1:3000` など）
+    pub address: String,
+    /// この口で、1 秒あたりに答える要求の数。どの道への要求も数え、超えたら 429。0 なら絞らない
+    pub rate_limit: u32,
+}
+
+/// 1 秒あたり `rate` 回までに絞る。ためておけるのは 1 秒分まで（トークンバケツ）
+struct Throttle {
+    rate: f64,
+    bucket: Mutex<(f64, Instant)>,
+}
+
+impl Throttle {
+    fn new(rate: u32, now: Instant) -> Self {
+        let rate = f64::from(rate);
+        Self {
+            rate,
+            bucket: Mutex::new((rate, now)),
+        }
+    }
+
+    /// `now` に 1 回分を使えれば使う
+    fn take(&self, now: Instant) -> bool {
+        let mut bucket = self
+            .bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (tokens, last) = *bucket;
+        let tokens =
+            (tokens + now.saturating_duration_since(last).as_secs_f64() * self.rate).min(self.rate);
+        let (tokens, taken) = if tokens >= 1.0 {
+            (tokens - 1.0, true)
+        } else {
+            (tokens, false)
+        };
+        *bucket = (tokens, now);
+        taken
+    }
+}
+
+/// `app` への要求を、1 秒あたり `rate` 回までに絞る。0 なら絞らない。超えたら catapult の REST と同じく 429
+pub fn limit(app: Router, rate: u32) -> Router {
+    if rate == 0 {
+        return app;
+    }
+    let throttle = Arc::new(Throttle::new(rate, Instant::now()));
+    app.layer(from_fn(move |request: Request, next: Next| {
+        let throttle = Arc::clone(&throttle);
+        async move {
+            if throttle.take(Instant::now()) {
+                return next.run(request).await;
+            }
+            allow_any_origin(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TooManyRequests",
+                format!("1 秒に {rate} 回までです"),
+            ))
+            .await
+        }
+    }))
+}
+
+/// `listeners` のそれぞれで待ち受け、`stop` が立つまで答える。呼んだスレッドで tokio を回す
 pub fn serve(
-    addresses: &[String],
+    listeners: &[Listener],
     shared: Shared,
     node: Node,
     stop: Arc<AtomicBool>,
@@ -596,12 +683,16 @@ pub fn serve(
         .map_err(|error| format!("API の tokio を動かせません: {error}"))?;
     runtime.block_on(async move {
         let mut tasks = tokio::task::JoinSet::new();
-        for address in addresses {
+        for Listener {
+            address,
+            rate_limit,
+        } in listeners
+        {
             let listener = tokio::net::TcpListener::bind(address)
                 .await
                 .map_err(|error| format!("API を {address} で待ち受けられません: {error}"))?;
             println!("API を {address} で待ち受けます");
-            let app = router(Arc::clone(&shared), node.clone());
+            let app = limit(router(Arc::clone(&shared), node.clone()), *rate_limit);
             let stop = Arc::clone(&stop);
             tasks.spawn(async move {
                 axum::serve(listener, app)
@@ -813,6 +904,7 @@ mod tests {
         Node {
             submit_partial: Arc::clone(&submit),
             submit_cosignature: Arc::clone(&submit),
+            submit_block: Arc::clone(&submit),
             submit,
             reader: Arc::new(FakeReader),
             network_properties: Arc::new(NetworkPropertiesJson::default()),
@@ -1047,6 +1139,49 @@ mod tests {
             let (status, _) = put(&received, &format!(r#"{{"payload":"{payload}"}}"#)).await;
             assert_eq!(status, StatusCode::CONFLICT, "{payload:?}");
         }
+        assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
+    }
+
+    #[test]
+    fn throttle_refills_up_to_one_second() {
+        let start = Instant::now();
+        let throttle = Throttle::new(3, start);
+        assert!((0..3).all(|_| throttle.take(start)));
+        assert!(!throttle.take(start));
+        // 1 回分たまるのは 1/3 秒あと
+        assert!(!throttle.take(start + Duration::from_millis(300)));
+        assert!(throttle.take(start + Duration::from_millis(340)));
+        // 長く空けても、ためておけるのは 1 秒分
+        let later = start + Duration::from_secs(10);
+        assert!((0..3).all(|_| throttle.take(later)));
+        assert!(!throttle.take(later));
+    }
+
+    #[tokio::test]
+    async fn answers_429_with_cors_over_the_limit() {
+        let app = limit(router(snapshot(), node(submit(Arc::default()))), 1);
+        let request = || Request::get("/chain/info").body(Body::empty()).unwrap();
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    }
+
+    #[tokio::test]
+    async fn takes_blocks_like_transactions() {
+        let received = Arc::default();
+        let (status, answer) = put_to(&received, "/blocks", r#"{"payload":"0102"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            answer["message"],
+            "packet 3 was pushed to the network via /blocks"
+        );
+        let (status, answer) = put_to(&received, "/blocks", r#"{"payload":"0a0B03"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(answer["message"], "確かめが通りません");
+        let (status, _) = put_to(&received, "/blocks", r#"{"payload":"01XY"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
     }
 

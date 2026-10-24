@@ -17,7 +17,7 @@ use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
 use heika_chain::produce::{Assemble, Pending};
 use heika_chain::store::{EXECUTOR_META, now_or_never};
-use heika_chain::verify::nemesis_hash;
+use heika_chain::verify::{nemesis_hash, verify_alone};
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
@@ -491,8 +491,14 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     let api_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let outcome = std::thread::scope(|scope| -> Result<Outcome, NodeError> {
         if let Some((shared, recent)) = &api {
-            let addresses: Vec<String> =
-                spec.rest.iter().map(|rest| rest.address.clone()).collect();
+            let listeners: Vec<heika_api::Listener> = spec
+                .rest
+                .iter()
+                .map(|rest| heika_api::Listener {
+                    address: rest.address.clone(),
+                    rate_limit: rest.rate_limit,
+                })
+                .collect();
             let node = heika_api::Node {
                 submit: submit(
                     parameters,
@@ -502,6 +508,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                 ),
                 submit_partial: submit_partial(events.clone()),
                 submit_cosignature: submit_cosignature(events.clone()),
+                submit_block: submit_block(parameters, events.clone()),
                 reader: Arc::new(DbReader::new(
                     store.shared_db(),
                     parameters.identifier,
@@ -518,7 +525,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {
-                if let Err(error) = heika_api::serve(&addresses, shared, node, stop) {
+                if let Err(error) = heika_api::serve(&listeners, shared, node, stop) {
                     eprintln!("{error}");
                 }
             });
@@ -1220,6 +1227,28 @@ fn submit_cosignature(relay: Sender<NodeEvent>) -> heika_api::Submit {
                 incoming: Incoming::Cosignatures(vec![detached]),
                 from: None,
             })
+            .map_err(|_| "ノードが止まっています".to_owned())
+    })
+}
+
+/// REST で届いたブロックを、P2P で押し付けられたものと同じく駆動役に渡す口。状態を見ない確かめ（形、署名）は
+/// ここでして、先端につながるか、状態に合うかはチェーンが決める。弾いても罰する相手はいない
+fn submit_block(
+    parameters: &'static NetworkParameters,
+    relay: Sender<NodeEvent>,
+) -> heika_api::Submit {
+    Arc::new(move |bytes: Vec<u8>| {
+        let block = Block::from_bytes(&bytes)
+            .map_err(|error| format!("ブロックとして読めません: {error}"))?;
+        verify_alone(parameters, &block)
+            .map_err(|error| format!("高さ {} を弾きます: {error}", block.height))?;
+        println!("REST から高さ {} のブロックを受け取りました", block.height);
+        relay
+            .send(NodeEvent::Chain(ChainEvent::Pushed {
+                block: Box::new(block),
+                bytes,
+                from: None,
+            }))
             .map_err(|_| "ノードが止まっています".to_owned())
     })
 }

@@ -187,13 +187,19 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             seconds: (block.timestamp - parent_timestamp) / 1000,
             peers: self.peers.len(),
         });
-        // catapult は押し付けられたブロックを中継しないので、つないでいるピアの全部に配る。返事はない
+        self.broadcast(bytes);
+        Ok(())
+    }
+
+    /// 足したブロックを、つないでいるピアの全部に押し付ける。返事はない。catapult と同じく、作ったものに加えて、
+    /// 押し付けられて受け入れたものも流す（`DispatcherService` の `newBlockSinkSourceMask`）。押し付けてきた
+    /// 相手にも送り返すことがあるが、相手はもう持っている高さとして捨てる
+    pub(super) fn broadcast(&mut self, bytes: Vec<u8>) {
         let bytes = Arc::new(bytes);
         for &id in self.peers.keys() {
             self.actions
                 .push(Action::Command(id, PeerCommand::Push(Arc::clone(&bytes))));
         }
-        Ok(())
     }
 
     /// [`Chain::produce_and_accept`] の、作って確かめるまで。状態に当て始めたら `touched` を立てる。返すのは、

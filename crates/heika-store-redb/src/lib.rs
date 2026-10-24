@@ -18,6 +18,7 @@
 //! - `peers`: アドレス → 知っているノードの記録
 //! - `search`: 検索表（[`search`]）。REST の検索のために、今の状態の行を別の切り口で並べ直したキー → なし
 //! - `search_past`: 検索表から消えたキー → なし。昔の高さで検索するときの候補（[`Searches::PAST`]）
+//! - `namespace_names`: ネームスペースの ID → 親の ID（ルートは 0）と名前。ブロックの登録から拾う（[`Searches::NAMESPACES`]）
 //!
 //! `meta` の `format` に、この形の版（[`FORMAT`]）を書く。違う版の DB は開かない。
 //!
@@ -64,6 +65,10 @@ const PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("peers");
 const SEARCH: TableDefinition<&[u8], ()> = TableDefinition::new("search");
 /// 検索表から消えたキー（[`search`]）
 const SEARCH_PAST: TableDefinition<&[u8], ()> = TableDefinition::new("search_past");
+/// ネームスペースの ID → 親の ID（u64、ルートは 0）と名前。ID は親と名前から決まるので、足すだけで消さない
+const NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("namespace_names");
+/// 名前の表を、しまってあるブロックから作る残り（次に読む高さと、そこまで読む高さ）をしまう `meta` の名前
+const NAMES_BACKFILL: &str = "namespace_names_backfill";
 /// 作る検索（[`Searches`] のビット）をしまう `meta` の名前
 const SEARCH_META: &str = "search";
 
@@ -264,6 +269,7 @@ impl Db {
         transaction.open_table(PEERS).map_err(db_error)?;
         transaction.open_table(SEARCH).map_err(db_error)?;
         transaction.open_table(SEARCH_PAST).map_err(db_error)?;
+        transaction.open_table(NAMES).map_err(db_error)?;
         for tables in [STATE_TABLES, TRIE_TABLES] {
             transaction.open_table(tables.current).map_err(db_error)?;
             transaction
@@ -417,12 +423,100 @@ impl Db {
                 }
             }
             let mut meta = transaction.open_table(META).map_err(db_error)?;
+            // 名前の表は、足したらしまってあるブロックから作り（[`Db::backfill_names`]）、外したら消す
+            if added.contains(Searches::NAMESPACES) {
+                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
+                let range = (
+                    blocks
+                        .first()
+                        .map_err(db_error)?
+                        .map(|(height, _)| height.value()),
+                    blocks
+                        .last()
+                        .map_err(db_error)?
+                        .map(|(height, _)| height.value()),
+                );
+                if let (Some(first), Some(last)) = range {
+                    let pending = [first.to_le_bytes(), last.to_le_bytes()].concat();
+                    meta.insert(NAMES_BACKFILL, pending.as_slice())
+                        .map_err(db_error)?;
+                }
+            }
+            if removed.contains(Searches::NAMESPACES) {
+                transaction
+                    .open_table(NAMES)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                meta.remove(NAMES_BACKFILL).map_err(db_error)?;
+            }
             meta.insert(SEARCH_META, &[new.bits()][..])
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
         self.search = new;
         Ok(())
+    }
+
+    /// 名前の表を、しまってあるブロックから作る（[`Searches::NAMESPACES`] を足したとき）。まとまりごとにコミットし、
+    /// 止めても次は続きから。`stopping` が真になるか、全部読んだら返る。全部読んだら `true`。
+    /// `progress` には、読んだ高さと、そこまで読む高さを渡す
+    pub fn backfill_names(
+        &self,
+        stopping: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<bool, DbError> {
+        /// 1回のコミットで読むブロックの数
+        const CHUNK: u64 = 100_000;
+        let Handle::Write(database) = &self.handle else {
+            return Err(DbError::ReadOnly);
+        };
+        loop {
+            let Some(pending) = self.meta(NAMES_BACKFILL)? else {
+                return Ok(true);
+            };
+            if stopping() {
+                return Ok(false);
+            }
+            let (next, through) = (u64_from(&pending[..8]), u64_from(&pending[8..]));
+            let last = through.min(next.saturating_add(CHUNK - 1));
+            self.check_space()?;
+            let transaction = database.begin_write().map_err(db_error)?;
+            {
+                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
+                let mut names = transaction.open_table(NAMES).map_err(db_error)?;
+                for row in blocks.range(next..=last).map_err(db_error)? {
+                    let (_, block) = row.map_err(db_error)?;
+                    for (id, parent, name) in search::names_in_block(block.value()) {
+                        let value = [&parent.to_le_bytes()[..], &name].concat();
+                        names.insert(id, value.as_slice()).map_err(db_error)?;
+                    }
+                }
+                let mut meta = transaction.open_table(META).map_err(db_error)?;
+                if last >= through {
+                    meta.remove(NAMES_BACKFILL).map_err(db_error)?;
+                } else {
+                    let pending = [(last + 1).to_le_bytes(), through.to_le_bytes()].concat();
+                    meta.insert(NAMES_BACKFILL, pending.as_slice())
+                        .map_err(db_error)?;
+                }
+            }
+            transaction.commit().map_err(db_error)?;
+            progress(last, through);
+        }
+    }
+
+    /// ネームスペースの名前と親の ID（ルートは 0）。登録を見ていなければ `None`
+    pub fn namespace_name(&self, id: u64) -> Result<Option<(u64, Vec<u8>)>, DbError> {
+        let transaction = self.begin_read()?;
+        let Some(names) = open_if_exists(&transaction, NAMES)? else {
+            return Ok(None);
+        };
+        Ok(names.get(id).map_err(db_error)?.and_then(|value| {
+            let value = value.value();
+            (value.len() >= 8).then(|| (u64_from(&value[..8]), value[8..].to_vec()))
+        }))
     }
 
     /// 検索表のキーが `prefix` で始まるものを、キーの順に（`reverse` なら逆に）`visit` に渡す。
@@ -1341,6 +1435,7 @@ impl Db {
             copier.table(PEERS, progress)?,
             copier.table(SEARCH, progress)?,
             copier.table(SEARCH_PAST, progress)?,
+            copier.table(NAMES, progress)?,
         ];
         if whole.contains(&false) {
             return Ok(false);
@@ -1888,9 +1983,17 @@ pub struct Batch {
 
 impl Batch {
     /// ブロックを足す。高さの順を守るのは呼ぶ側。
+    /// [`Searches::NAMESPACES`] なら、ネームスペースの登録から名前の表も足す
     pub fn put_block(&mut self, height: u64, block: &[u8]) -> Result<(), DbError> {
         let mut table = self.transaction.open_table(BLOCKS).map_err(db_error)?;
         table.insert(height, block).map_err(db_error)?;
+        if self.search.contains(Searches::NAMESPACES) {
+            let mut names = self.transaction.open_table(NAMES).map_err(db_error)?;
+            for (id, parent, name) in search::names_in_block(block) {
+                let value = [&parent.to_le_bytes()[..], &name].concat();
+                names.insert(id, value.as_slice()).map_err(db_error)?;
+            }
+        }
         Ok(())
     }
 
@@ -2561,6 +2664,99 @@ mod tests {
             vec![2, 3]
         );
         assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 2, 3]);
+    }
+
+    /// ネームスペースの登録を1件入れた、通常のブロックのバイト列。署名は確かめないので0のまま
+    fn block_registering(parent: Option<u64>, name: &[u8], right_id: bool) -> Vec<u8> {
+        use heika_transaction::{NamespaceId, NamespaceRegistration, NamespaceRegistrationType};
+        let parent = parent.map(NamespaceId);
+        let mut id = NamespaceId::generate(parent, name);
+        if !right_id {
+            id.0 ^= 1;
+        }
+        let registration = NamespaceRegistration {
+            registration_type: match parent {
+                None => NamespaceRegistrationType::Root { duration: 100 },
+                Some(parent_id) => NamespaceRegistrationType::Child { parent_id },
+            },
+            id,
+            name: name.to_vec().try_into().unwrap(),
+        };
+        let transaction = heika_transaction::Transaction::new(
+            heika_core::key::PublicKey([0x11; 32]),
+            heika_core::network::NetworkIdentifier::MAINNET,
+            0,
+            0,
+            heika_transaction::Body::NamespaceRegistration(registration),
+        )
+        .to_bytes();
+        let mut block = vec![0; 376];
+        block[110..112].copy_from_slice(&0x8143u16.to_le_bytes());
+        block.extend_from_slice(&transaction);
+        block.resize(block.len().next_multiple_of(8), 0);
+        let size = block.len() as u32;
+        block[..4].copy_from_slice(&size.to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn names_come_from_namespace_registrations() {
+        use heika_transaction::NamespaceId;
+        let root = NamespaceId::generate(None, b"hina").0;
+        let child = NamespaceId::generate(Some(NamespaceId(root)), b"xym").0;
+        let dir = TempDir::new();
+        let mut db = Db::open(&dir.0).unwrap();
+        // 有効にする前のブロック
+        let mut batch = db.batch().unwrap();
+        batch
+            .put_block(1, &block_registering(None, b"hina", true))
+            .unwrap();
+        batch.commit().unwrap();
+        assert_eq!(db.namespace_name(root).unwrap(), None);
+
+        // 有効にしたら、しまってあるブロックから作る
+        db.set_search(Searches::NAMESPACES).unwrap();
+        assert_eq!(db.namespace_name(root).unwrap(), None);
+        let mut seen = Vec::new();
+        assert!(
+            db.backfill_names(&|| false, &mut |at, through| seen.push((at, through)))
+                .unwrap()
+        );
+        assert_eq!(seen, vec![(1, 1)]);
+        assert_eq!(
+            db.namespace_name(root).unwrap(),
+            Some((0, b"hina".to_vec()))
+        );
+        // 終わったら、もう読まない
+        assert!(db.backfill_names(&|| false, &mut |_, _| panic!()).unwrap());
+
+        // 有効なあいだは、足すブロックから。ID が名前と合わないものは入れない
+        let mut batch = db.batch().unwrap();
+        batch
+            .put_block(2, &block_registering(Some(root), b"xym", true))
+            .unwrap();
+        batch
+            .put_block(3, &block_registering(None, b"fake", false))
+            .unwrap();
+        batch.commit().unwrap();
+        assert_eq!(
+            db.namespace_name(child).unwrap(),
+            Some((root, b"xym".to_vec()))
+        );
+        let fake = NamespaceId::generate(None, b"fake").0;
+        assert_eq!(db.namespace_name(fake).unwrap(), None);
+        assert_eq!(db.namespace_name(fake ^ 1).unwrap(), None);
+
+        // 止める合図なら、続きを残して返る
+        db.set_search(Searches::NONE).unwrap();
+        assert_eq!(db.namespace_name(root).unwrap(), None);
+        db.set_search(Searches::NAMESPACES).unwrap();
+        assert!(!db.backfill_names(&|| true, &mut |_, _| {}).unwrap());
+        assert!(db.backfill_names(&|| false, &mut |_, _| {}).unwrap());
+        assert_eq!(
+            db.namespace_name(child).unwrap(),
+            Some((root, b"xym".to_vec()))
+        );
     }
 
     #[test]

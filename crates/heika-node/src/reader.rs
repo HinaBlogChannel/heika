@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use heika_api::{PartialFilter, StateError};
+use heika_api::{MetadataFilter, PageRequest, PartialFilter, StateError};
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
 use heika_chain::store::EXECUTOR_META;
@@ -36,8 +36,9 @@ use heika_rest::state::{
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
 use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
-use heika_store_redb::{At, Db, DbError};
-use heika_transaction::{Body, Transaction};
+use heika_store_redb::search::{METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID};
+use heika_store_redb::{At, Db, DbError, MetadataFields, Searches};
+use heika_transaction::{Body, MetadataKey, MetadataType, Transaction};
 
 use crate::recent::SharedRecent;
 
@@ -207,6 +208,95 @@ impl DbReader {
     }
 }
 
+/// メタデータの検索で、検索表のどこをなめるか。並べ方と、決まった項目だけで作ったキーの頭。
+/// 頭に入らなかった項目は、なめたあとで絞る
+fn metadata_prefixes(filter: &MetadataFilter) -> Vec<Vec<u8>> {
+    let kind = filter.metadata_type;
+    let (source, target) = (filter.source.map(|a| a.0), filter.target.map(|a| a.0));
+    let target_id = filter.target_id.map(u64::to_be_bytes);
+    let scoped_key = filter.scoped_key.map(u64::to_be_bytes);
+    // 前から順に、決まっているところまでを頭にする
+    let prefix = |head: u8, parts: &[Option<&[u8]>]| {
+        let mut out = vec![head];
+        for part in parts {
+            let Some(part) = part else { break };
+            out.extend_from_slice(part);
+        }
+        out
+    };
+    let kind_byte = kind.map(|kind| [kind]);
+    if let Some(source) = &source {
+        return vec![prefix(
+            METADATA_BY_SOURCE,
+            &[
+                Some(source),
+                kind_byte.as_ref().map(|k| &k[..]),
+                target.as_ref().map(|t| &t[..]),
+                target_id.as_ref().map(|i| &i[..]),
+                scoped_key.as_ref().map(|k| &k[..]),
+            ],
+        )];
+    }
+    if let Some(target) = &target {
+        return vec![prefix(
+            METADATA_BY_TARGET,
+            &[
+                Some(target),
+                kind_byte.as_ref().map(|k| &k[..]),
+                target_id.as_ref().map(|i| &i[..]),
+                scoped_key.as_ref().map(|k| &k[..]),
+            ],
+        )];
+    }
+    // 対象からの並べ方は、モザイクとネームスペースのメタデータだけを持つ
+    let by_target_id = |kind: u8| {
+        prefix(
+            METADATA_BY_TARGET_ID,
+            &[
+                Some(&[kind][..]),
+                target_id.as_ref().map(|i| &i[..]),
+                scoped_key.as_ref().map(|k| &k[..]),
+            ],
+        )
+    };
+    match kind {
+        Some(kind @ (1 | 2)) => vec![by_target_id(kind)],
+        None if target_id.is_some_and(|id| id != [0; 8]) => vec![by_target_id(1), by_target_id(2)],
+        // ほかは、宛先からの並べ方を全部なめる（全部のメタデータが1回ずつ入っている）
+        _ => vec![vec![METADATA_BY_TARGET]],
+    }
+}
+
+fn matches(filter: &MetadataFilter, fields: &MetadataFields) -> bool {
+    filter.source.is_none_or(|source| source.0 == fields.source)
+        && filter.target.is_none_or(|target| target.0 == fields.target)
+        && filter.scoped_key.is_none_or(|key| key == fields.scoped_key)
+        && filter.target_id.is_none_or(|id| id == fields.target_id)
+        && filter
+            .metadata_type
+            .is_none_or(|kind| kind == fields.metadata_type)
+}
+
+/// 1件を指すハッシュ（compositeHash）
+fn composite_hash(fields: &MetadataFields) -> Option<Hash256> {
+    let metadata_type = match fields.metadata_type {
+        0 => MetadataType::Account,
+        1 => MetadataType::Mosaic,
+        2 => MetadataType::Namespace,
+        _ => return None,
+    };
+    Some(
+        MetadataKey {
+            source_address: Address(fields.source),
+            target_address: Address(fields.target),
+            scoped_metadata_key: fields.scoped_key,
+            target_id: fields.target_id,
+            metadata_type,
+        }
+        .unique_key(),
+    )
+}
+
 /// 状態を引く先
 enum View {
     /// 今の状態
@@ -314,6 +404,57 @@ impl heika_api::Reader for DbReader {
             MetadataEntryJson::from_state_bytes(&state_bytes(&[], &row))
                 .map_err(|error| error.to_string())?,
         ))
+    }
+
+    fn search_metadata(
+        &self,
+        filter: &MetadataFilter,
+        page: PageRequest,
+    ) -> Result<Option<Vec<MetadataEntryJson>>, String> {
+        if !self.db.searches().contains(Searches::METADATA) {
+            return Ok(None);
+        }
+        let mut prefixes = metadata_prefixes(filter);
+        if page.descending {
+            prefixes.reverse();
+        }
+        let mut skip = (page.number - 1) * page.size;
+        let mut found = Vec::new();
+        for prefix in prefixes {
+            self.db
+                .for_each_search_key(&prefix, page.descending, &mut |key| {
+                    let Some(fields) = MetadataFields::from_search_key(key) else {
+                        return true;
+                    };
+                    if !matches(filter, &fields) {
+                        return true;
+                    }
+                    if skip > 0 {
+                        skip -= 1;
+                        return true;
+                    }
+                    found.push(fields);
+                    found.len() < page.size
+                })
+                .map_err(|error| error.to_string())?;
+            if found.len() >= page.size {
+                break;
+            }
+        }
+        let mut entries = Vec::with_capacity(found.len());
+        for fields in found {
+            let Some(hash) = composite_hash(&fields) else {
+                continue;
+            };
+            // 検索表を読んだあとに消えていれば、飛ばす
+            if let Some(entry) = self
+                .metadata(&hash, None)
+                .map_err(|error| error.to_string())?
+            {
+                entries.push(entry);
+            }
+        }
+        Ok(Some(entries))
     }
 
     fn state_path(
@@ -495,5 +636,87 @@ impl heika_api::Reader for DbReader {
 
     fn network(&self) -> NetworkIdentifier {
         self.network
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filter() -> MetadataFilter {
+        MetadataFilter::default()
+    }
+
+    #[test]
+    fn picks_the_search_order_from_the_filter() {
+        let (a, b) = (Address([0xAA; 24]), Address([0xBB; 24]));
+        let head = |prefix: &[u8]| prefix.to_vec();
+        // 送り主があれば送り主から。決まっている項目は、途中が抜けたらそこまで
+        let source = MetadataFilter {
+            source: Some(a),
+            target: Some(b),
+            ..filter()
+        };
+        assert_eq!(
+            metadata_prefixes(&source),
+            vec![[&[METADATA_BY_SOURCE][..], &a.0].concat()]
+        );
+        let source = MetadataFilter {
+            metadata_type: Some(0),
+            ..source
+        };
+        assert_eq!(
+            metadata_prefixes(&source),
+            vec![[&[METADATA_BY_SOURCE][..], &a.0, &[0], &b.0].concat()]
+        );
+        // 宛先から
+        let target = MetadataFilter {
+            target: Some(b),
+            scoped_key: Some(7),
+            ..filter()
+        };
+        assert_eq!(
+            metadata_prefixes(&target),
+            vec![[&[METADATA_BY_TARGET][..], &b.0].concat()]
+        );
+        // 対象からは、種類がなければモザイクとネームスペースの両方
+        let target_id = MetadataFilter {
+            target_id: Some(0x55),
+            ..filter()
+        };
+        let id = 0x55u64.to_be_bytes();
+        assert_eq!(
+            metadata_prefixes(&target_id),
+            vec![
+                [&[METADATA_BY_TARGET_ID, 1][..], &id].concat(),
+                [&[METADATA_BY_TARGET_ID, 2][..], &id].concat()
+            ]
+        );
+        // アカウントのメタデータと、何も決まっていないときは、宛先からを全部
+        for filter in [
+            MetadataFilter {
+                metadata_type: Some(0),
+                ..filter()
+            },
+            MetadataFilter {
+                target_id: Some(0),
+                ..filter()
+            },
+            filter(),
+        ] {
+            assert_eq!(
+                metadata_prefixes(&filter),
+                vec![head(&[METADATA_BY_TARGET])]
+            );
+        }
+        let fields = MetadataFields {
+            source: a.0,
+            target: b.0,
+            scoped_key: 7,
+            target_id: 0,
+            metadata_type: 0,
+        };
+        assert!(matches(&target, &fields));
+        assert!(!matches(&target_id, &fields));
     }
 }

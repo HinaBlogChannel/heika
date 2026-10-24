@@ -228,6 +228,16 @@ fn catch_up_if_behind(
     let mut db = Db::open(&spec.data_directory)?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     check_storage_mode(&db, spec.storage.mode)?;
+    // 足した検索表は、今の状態の行から作る
+    let searches = spec.storage.searches();
+    if db.searches() != searches {
+        let started = Instant::now();
+        db.set_search(searches)?;
+        eprintln!(
+            "検索表を storage.search に合わせました（{:.1} 秒）",
+            started.elapsed().as_secs_f64()
+        );
+    }
     let executed = match db.meta(EXECUTOR_META)? {
         Some(meta) => height_of_meta(&meta)?,
         None => 0,

@@ -12,6 +12,7 @@
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
+//! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
@@ -91,6 +92,18 @@ pub enum StateError {
     Other(String),
 }
 
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ahead { height, tip } => {
+                write!(f, "高さ {height} は、実行した高さ {tip} より上です")
+            }
+            Self::NoHistory { height } => write!(f, "高さ {height} の状態の差分を持っていません"),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
 impl From<String> for StateError {
     fn from(message: String) -> Self {
         Self::Other(message)
@@ -117,6 +130,12 @@ pub trait Reader: Send + Sync {
         composite_hash: &Hash256,
         at: Option<u64>,
     ) -> Result<Option<MetadataEntryJson>, StateError>;
+    /// メタデータを `filter` で絞り、`page` の分を返す。検索表を作っていなければ `None`
+    fn search_metadata(
+        &self,
+        filter: &MetadataFilter,
+        page: PageRequest,
+    ) -> Result<Option<Vec<MetadataEntryJson>>, String>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
     fn state_path(
         &self,
@@ -144,6 +163,42 @@ pub trait Reader: Send + Sync {
     fn partial_transactions(&self, filter: &PartialFilter) -> Result<Vec<TransactionInfo>, String>;
     /// 公開鍵からアドレスを出すときのネットワーク
     fn network(&self) -> NetworkIdentifier;
+}
+
+/// メタデータの検索の絞り込み（catapult の REST の `/metadata` と同じ意味）。全部を満たすものを返す
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetadataFilter {
+    pub source: Option<Address>,
+    pub target: Option<Address>,
+    pub scoped_key: Option<u64>,
+    pub target_id: Option<u64>,
+    pub metadata_type: Option<u8>,
+}
+
+/// 一覧のどのページを返すか。並びは検索表のキーの順（`descending` なら逆）。catapult の REST は登録の順なので違う
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRequest {
+    /// 1 ページの件数（10 から 100）
+    pub size: usize,
+    /// 1 から
+    pub number: usize,
+    pub descending: bool,
+}
+
+/// `/metadata` のクエリ文字列
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataQuery {
+    source_address: Option<String>,
+    target_address: Option<String>,
+    scoped_metadata_key: Option<String>,
+    target_id: Option<String>,
+    metadata_type: Option<u8>,
+    page_size: Option<usize>,
+    page_number: Option<usize>,
+    order: Option<String>,
+    offset: Option<String>,
+    height: Option<String>,
 }
 
 /// 連署を待つものの一覧の絞り込み（catapult の REST と同じ意味）
@@ -702,6 +757,75 @@ async fn partial_transaction(State(api): State<Api>, Path(hash): Path<String>) -
 }
 
 /// 連署を待つものの一覧。ページの大きさは catapult と同じく 10 から 100（既定 10）、ページは 1 から
+/// アドレス（Base32 か16進）。公開鍵は受け付けない（catapult の REST の検索と同じ）
+fn address_only(id: &str, network: NetworkIdentifier) -> Option<Address> {
+    (id.len() != 64)
+        .then(|| account_address(id, network))
+        .flatten()
+}
+
+async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQuery>) -> Response {
+    let network = api.node.reader.network();
+    // 読めなければ、どの項目かを返す
+    let address = |value: &Option<String>, name: &'static str| match value.as_deref() {
+        None => Ok(None),
+        Some(id) => address_only(id, network).map(Some).ok_or(name),
+    };
+    let id = |value: &Option<String>, name: &'static str| match value.as_deref() {
+        None => Ok(None),
+        Some(id) => hex_id(id).map(Some).ok_or(name),
+    };
+    let filter = (|| {
+        Ok::<_, &str>(MetadataFilter {
+            source: address(&query.source_address, "sourceAddress")?,
+            target: address(&query.target_address, "targetAddress")?,
+            scoped_key: id(&query.scoped_metadata_key, "scopedMetadataKey")?,
+            target_id: id(&query.target_id, "targetId")?,
+            metadata_type: query.metadata_type,
+        })
+    })();
+    let filter = match filter {
+        Ok(filter) => filter,
+        Err(name) => return invalid(format!("{name} has an invalid format")),
+    };
+    // 昔の高さの検索と、MongoDB の ID から続けるページ送りはしない
+    if query.height.is_some() {
+        return invalid("height is not supported for searches".to_owned());
+    }
+    if query.offset.is_some() {
+        return invalid("offset is not supported; use pageNumber".to_owned());
+    }
+    let descending = match query.order.as_deref() {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(_) => return invalid("order has an invalid format".to_owned()),
+    };
+    let page = PageRequest {
+        size: query.page_size.unwrap_or(10).clamp(10, 100),
+        number: query.page_number.unwrap_or(1).max(1),
+        descending,
+    };
+    match api.node.reader.search_metadata(&filter, page) {
+        Ok(Some(entries)) => Json(Page {
+            data: entries
+                .into_iter()
+                .map(|metadata_entry| MetadataInfo { metadata_entry })
+                .collect(),
+            pagination: Pagination {
+                page_number: page.number,
+                page_size: page.size,
+            },
+        })
+        .into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "this node does not keep the metadata search (storage.search)".to_owned(),
+        ),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+    }
+}
+
 async fn partial_transactions(
     State(api): State<Api>,
     Query(query): Query<PartialQuery>,
@@ -843,6 +967,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
         .route("/namespaces/{id}", get(namespace))
         .route("/namespaces/{id}/merkle", get(namespace_merkle))
+        .route("/metadata", get(search_metadata))
         .route("/metadata/{hash}", get(metadata))
         .route("/metadata/{hash}/merkle", get(metadata_merkle))
         .route("/blocks/{height}", get(block))
@@ -1058,6 +1183,18 @@ mod tests {
         Address::from_public_key(&PublicKey([0x11; 32]), NetworkIdentifier::TESTNET)
     }
 
+    /// 偽の読み役にあるメタデータの1件を指すハッシュ
+    fn metadata_composite() -> Hash256 {
+        heika_transaction::MetadataKey {
+            source_address: known(),
+            target_address: known(),
+            scoped_metadata_key: 1,
+            target_id: 0,
+            metadata_type: heika_transaction::MetadataType::Account,
+        }
+        .unique_key()
+    }
+
     /// 偽の読み役は高さ 10 まで実行していて、5 より前の状態の履歴は持っていない
     fn check_at(at: Option<u64>) -> Result<(), StateError> {
         match at {
@@ -1120,14 +1257,7 @@ mod tests {
             at: Option<u64>,
         ) -> Result<Option<MetadataEntryJson>, StateError> {
             check_at(at)?;
-            let key = heika_transaction::MetadataKey {
-                source_address: known(),
-                target_address: known(),
-                scoped_metadata_key: 1,
-                target_id: 0,
-                metadata_type: heika_transaction::MetadataType::Account,
-            };
-            if *composite_hash != key.unique_key() {
+            if *composite_hash != metadata_composite() {
                 return Ok(None);
             }
             let mut bytes = vec![1, 0];
@@ -1139,6 +1269,33 @@ mod tests {
             bytes.extend_from_slice(&2u16.to_le_bytes());
             bytes.extend_from_slice(b"hi");
             Ok(Some(MetadataEntryJson::from_state_bytes(&bytes).unwrap()))
+        }
+
+        fn search_metadata(
+            &self,
+            filter: &MetadataFilter,
+            page: PageRequest,
+        ) -> Result<Option<Vec<MetadataEntryJson>>, String> {
+            // 対象の ID 0xDEAD は、検索表を作っていないことにする
+            if filter.target_id == Some(0xDEAD) {
+                return Ok(None);
+            }
+            // 絞り込みとページが届いたことを、返す件数と値で確かめる。送り主が known() なら1件、ほかの送り主なら 0 件、
+            // 指定なしなら1ページ分。値はページの番号と、逆順なら "d"
+            let count = match filter.source {
+                Some(source) if source == known() => 1,
+                Some(_) => 0,
+                None => page.size,
+            };
+            let entry = self.metadata(&metadata_composite(), None).unwrap().unwrap();
+            let value = format!("{}{}", page.number, if page.descending { "d" } else { "" });
+            Ok(Some(vec![
+                MetadataEntryJson {
+                    value: value.clone(),
+                    ..entry
+                };
+                count
+            ]))
         }
 
         fn state_path(
@@ -1286,6 +1443,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn searches_metadata_like_catapult() {
+        let source = known();
+        let (status, body) = get_status(&format!("/metadata?sourceAddress={source}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["data"][0]["metadataEntry"]["compositeHash"],
+            metadata_composite().to_string().as_str()
+        );
+        assert_eq!(body["pagination"]["pageNumber"], 1);
+        assert_eq!(body["pagination"]["pageSize"], 10);
+        let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
+        let (_, body) = get_status(&format!("/metadata?sourceAddress={}", other.to_hex())).await;
+        assert!(body["data"].as_array().unwrap().is_empty());
+
+        // ページの大きさは 10 から 100 に収め、番号と並びを渡す
+        let (_, body) =
+            get_status("/metadata?pageSize=500&pageNumber=3&order=desc&metadataType=1").await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 100);
+        assert_eq!(body["data"][0]["metadataEntry"]["value"], "3d");
+        assert_eq!(body["pagination"]["pageSize"], 100);
+
+        // 読めない形、公開鍵、昔の高さ、MongoDB の ID からのページ送りは 409
+        for query in [
+            "sourceAddress=zzz".to_owned(),
+            format!("targetAddress={}", "11".repeat(32)),
+            "scopedMetadataKey=12".to_owned(),
+            "targetId=xyz".to_owned(),
+            "order=up".to_owned(),
+            "height=5".to_owned(),
+            "offset=6962CF6A2976BBB47C1054BC".to_owned(),
+        ] {
+            let (status, body) = get_status(&format!("/metadata?{query}")).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{query}");
+            assert_eq!(body["code"], "InvalidArgument");
+        }
+
+        // 検索表を作っていなければ 501
+        let (status, body) = get_status("/metadata?targetId=000000000000DEAD").await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "NotImplemented");
+    }
+
+    #[tokio::test]
     async fn reads_states_at_a_height() {
         // 高さを指定したら、答えにその高さを添える。指定しなければ添えない
         let response = get_response("/mosaics/6BED913FA20223F8?height=7").await;
@@ -1325,14 +1526,7 @@ mod tests {
         // 高さは読み役まで届く
         let (_, body) = get_status("/mosaics/6BED913FA20223F8/merkle?height=6").await;
         assert!(body["raw"].as_str().unwrap().ends_with("@6"));
-        let composite = heika_transaction::MetadataKey {
-            source_address: known(),
-            target_address: known(),
-            scoped_metadata_key: 1,
-            target_id: 0,
-            metadata_type: heika_transaction::MetadataType::Account,
-        }
-        .unique_key();
+        let composite = metadata_composite();
         assert_eq!(
             get_status(&format!("/metadata/{composite}?height=6"))
                 .await
@@ -1420,14 +1614,7 @@ mod tests {
         );
 
         // メタデータは、1件を指すハッシュで引く
-        let composite = heika_transaction::MetadataKey {
-            source_address: known(),
-            target_address: known(),
-            scoped_metadata_key: 1,
-            target_id: 0,
-            metadata_type: heika_transaction::MetadataType::Account,
-        }
-        .unique_key();
+        let composite = metadata_composite();
         let (status, body) = get_status(&format!("/metadata/{composite}")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(

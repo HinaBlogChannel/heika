@@ -16,6 +16,7 @@
 //! - `statements`: 高さ → ブロックのステートメント
 //! - `orphans`: （高さ、ハッシュ）→ 枝の取り替えで外れた元の枝のブロック
 //! - `peers`: アドレス → 知っているノードの記録
+//! - `search`: 検索表（[`search`]）。REST の検索のために、今の状態の行を別の切り口で並べ直したキー → なし
 //!
 //! `meta` の `format` に、この形の版（[`FORMAT`]）を書く。違う版の DB は開かない。
 //!
@@ -27,6 +28,7 @@
 //! まだ作っていない高さがあるあいだは、昔の値は引けない。
 
 mod chain_store;
+pub mod search;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,6 +36,8 @@ use std::path::Path;
 
 use heika_state_transition::executor::ExecError;
 use heika_state_transition::executor::source::StateSource;
+
+pub use search::{MetadataFields, Searches};
 
 use redb::{
     AccessGuard, Database, Durability, Key, ReadOnlyDatabase, ReadOnlyTable, ReadTransaction,
@@ -55,6 +59,10 @@ const ORPHANS: TableDefinition<(u64, &[u8]), &[u8]> = TableDefinition::new("orph
 /// ノードのアドレス → 住所録の記録（最後につながった時刻と、続けて失敗した回数）。チェーンのものではないので、
 /// [`Db::copy_to`] では写さない
 const PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("peers");
+/// 検索表（[`search`]）
+const SEARCH: TableDefinition<&[u8], ()> = TableDefinition::new("search");
+/// 作る検索（[`Searches`] のビット）をしまう `meta` の名前
+const SEARCH_META: &str = "search";
 
 /// 今の値、差分、索引の3つの表と、差分を残し始めた高さをしまう `meta` の名前
 #[derive(Clone, Copy)]
@@ -224,6 +232,8 @@ pub struct Db {
     defer_history: bool,
     /// [`Batch`] で、状態と木のノードのそれぞれ、この高さ以下では差分も索引も書かない（刈り込んで実行する）
     quiet_through: [Option<u64>; 2],
+    /// 作る検索。`meta` の `search` と同じ
+    search: Searches,
 }
 
 impl Db {
@@ -249,6 +259,7 @@ impl Db {
         transaction.open_table(CHECKPOINTS).map_err(db_error)?;
         transaction.open_table(ORPHANS).map_err(db_error)?;
         transaction.open_table(PEERS).map_err(db_error)?;
+        transaction.open_table(SEARCH).map_err(db_error)?;
         for tables in [STATE_TABLES, TRIE_TABLES] {
             transaction.open_table(tables.current).map_err(db_error)?;
             transaction
@@ -277,6 +288,7 @@ impl Db {
                 format => check_format(format.as_deref())?,
             }
         }
+        let search = read_searches(&transaction.open_table(META).map_err(db_error)?)?;
         transaction.commit().map_err(db_error)?;
         Ok(Self {
             handle: Handle::Write(database),
@@ -284,18 +296,21 @@ impl Db {
             min_free: 0,
             defer_history: false,
             quiet_through: [None; 2],
+            search,
         })
     }
 
     /// 読むだけに開く。
     pub fn open_read_only(directory: &Path) -> Result<Self, DbError> {
         let database = ReadOnlyDatabase::open(directory.join(FILE_NAME)).map_err(db_error)?;
-        let format = {
+        let (format, search) = {
             let transaction = database.begin_read().map_err(db_error)?;
             let meta = transaction.open_table(META).map_err(db_error)?;
-            meta.get(FORMAT_META)
+            let format = meta
+                .get(FORMAT_META)
                 .map_err(db_error)?
-                .map(|value| value.value().to_vec())
+                .map(|value| value.value().to_vec());
+            (format, read_searches(&meta)?)
         };
         check_format(format.as_deref())?;
         Ok(Self {
@@ -304,7 +319,96 @@ impl Db {
             min_free: 0,
             defer_history: false,
             quiet_through: [None; 2],
+            search,
         })
+    }
+
+    /// 作っている検索
+    pub fn searches(&self) -> Searches {
+        self.search
+    }
+
+    /// 作る検索を `searches` にする。足した検索は今の状態の行から作り、外した検索の行は消す。
+    /// 1つのトランザクションでコミットする。外して小さくなった DB を詰めるなら [`Db::copy_to`]
+    pub fn set_search(&mut self, searches: Searches) -> Result<(), DbError> {
+        if searches == self.search {
+            return Ok(());
+        }
+        let Handle::Write(database) = &self.handle else {
+            return Err(DbError::ReadOnly);
+        };
+        self.check_space()?;
+        let transaction = database.begin_write().map_err(db_error)?;
+        {
+            let mut table = transaction.open_table(SEARCH).map_err(db_error)?;
+            let removed = Searches::from_bits(self.search.bits() & !searches.bits());
+            for prefix in removed.prefixes() {
+                table
+                    .extract_from_if(&[prefix][..]..&[prefix + 1][..], |_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+            }
+            let added = Searches::from_bits(searches.bits() & !self.search.bits());
+            let state = transaction.open_table(STATE).map_err(db_error)?;
+            for cache in search::caches(added) {
+                for row in state
+                    .range(&[cache][..]..&[cache + 1][..])
+                    .map_err(db_error)?
+                {
+                    let (key, value) = row.map_err(db_error)?;
+                    for search_key in search::keys_of(added, key.value(), Some(value.value())) {
+                        table.insert(search_key.as_slice(), ()).map_err(db_error)?;
+                    }
+                }
+            }
+            let mut meta = transaction.open_table(META).map_err(db_error)?;
+            meta.insert(SEARCH_META, &[searches.bits()][..])
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)?;
+        self.search = searches;
+        Ok(())
+    }
+
+    /// 検索表のキーが `prefix` で始まるものを、キーの順に（`reverse` なら逆に）`visit` に渡す。
+    /// `visit` が `false` を返したら止める
+    pub fn for_each_search_key(
+        &self,
+        prefix: &[u8],
+        reverse: bool,
+        visit: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<(), DbError> {
+        let transaction = self.begin_read()?;
+        let Some(table) = open_if_exists(&transaction, SEARCH)? else {
+            return Ok(());
+        };
+        let range = table.range(prefix..).map_err(db_error)?;
+        let mut visit_row = |row: Result<(AccessGuard<&[u8]>, AccessGuard<()>), StorageError>| {
+            let (key, _) = row.map_err(db_error)?;
+            let key = key.value();
+            Ok::<_, DbError>(key.starts_with(prefix) && visit(key))
+        };
+        if reverse {
+            // `prefix` の次のキーより前から、逆に
+            let end = search::prefix_end(prefix);
+            let range = match &end {
+                Some(end) => table.range(prefix..end.as_slice()),
+                None => table.range(prefix..),
+            }
+            .map_err(db_error)?;
+            for row in range.rev() {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        } else {
+            for row in range {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 書く前と詰める前に、ディスクの空きが `bytes` 以上あるかを確かめる。
@@ -658,15 +762,7 @@ impl Db {
         prefix: &[u8],
         height: u64,
     ) -> Result<Vec<StateRow>, DbError> {
-        // `prefix` の次。全部が 0xFF なら上を区切らない
-        let mut end = prefix.to_vec();
-        while let Some(last) = end.pop() {
-            if last < 0xFF {
-                end.push(last + 1);
-                break;
-            }
-        }
-        let high = (!end.is_empty()).then_some(end);
+        let high = search::prefix_end(prefix);
         let mut rows = self.state_rows_in(&[height], height, prefix, high.as_deref())?;
         Ok(rows.pop().unwrap_or_default())
     }
@@ -1171,6 +1267,7 @@ impl Db {
             copier.table(CHECKPOINTS, progress)?,
             copier.table(ORPHANS, progress)?,
             copier.table(PEERS, progress)?,
+            copier.table(SEARCH, progress)?,
         ];
         if whole.contains(&false) {
             return Ok(false);
@@ -1310,7 +1407,12 @@ impl Db {
             }
         }
         for tables in [STATE_TABLES, TRIE_TABLES] {
-            undo_above(&transaction, tables, checkpoint)?;
+            let search = if tables.current.name() == STATE.name() {
+                self.search
+            } else {
+                Searches::NONE
+            };
+            undo_above(&transaction, tables, checkpoint, search)?;
             // 索引を後回しにしていたなら、できているのはチェックポイントまで
             if let Some(indexed) = read_u64(&transaction, tables.indexed)?
                 && indexed > checkpoint
@@ -1360,6 +1462,7 @@ impl Db {
             transaction: database.begin_write().map_err(db_error)?,
             defer_history: self.defer_history,
             quiet_through: self.quiet_through,
+            search: self.search,
         })
     }
 }
@@ -1371,13 +1474,54 @@ fn read_u64(transaction: &WriteTransaction, name: &str) -> Result<Option<u64>, D
     Ok(value.map(|value| u64_from(value.value())))
 }
 
+/// `meta` に覚えた、作る検索
+fn read_searches(
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Searches, DbError> {
+    Ok(meta
+        .get(SEARCH_META)
+        .map_err(db_error)?
+        .and_then(|value| value.value().first().copied())
+        .map(Searches::from_bits)
+        .unwrap_or_default())
+}
+
+/// 状態の行 `key` が `before` から `after` に変わったので、検索表を直す
+fn update_search(
+    table: &mut redb::Table<&[u8], ()>,
+    search: Searches,
+    key: &[u8],
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+) -> Result<(), DbError> {
+    if search == Searches::NONE {
+        return Ok(());
+    }
+    let (removed, added) = (
+        search::keys_of(search, key, before),
+        search::keys_of(search, key, after),
+    );
+    if removed == added {
+        return Ok(());
+    }
+    for search_key in &removed {
+        table.remove(search_key.as_slice()).map_err(db_error)?;
+    }
+    for search_key in &added {
+        table.insert(search_key.as_slice(), ()).map_err(db_error)?;
+    }
+    Ok(())
+}
+
 /// `tables` を、上の高さから1つずつ、変わる前の値に戻す。`height` より上の差分と索引は消える
 fn undo_above(
     transaction: &WriteTransaction,
     tables: Versioned,
     height: u64,
+    search: Searches,
 ) -> Result<(), DbError> {
     let mut current = transaction.open_table(tables.current).map_err(db_error)?;
+    let mut search_table = transaction.open_table(SEARCH).map_err(db_error)?;
     let mut changesets = transaction
         .open_table(tables.changesets)
         .map_err(db_error)?;
@@ -1399,11 +1543,17 @@ fn undo_above(
             rows.push((key.value().1.to_vec(), before.value().to_vec()));
         }
         for (key, before) in rows {
-            match before.as_slice() {
-                [PRESENT, value @ ..] => current.insert(key.as_slice(), value),
-                _ => current.remove(key.as_slice()),
+            let restored = match before.as_slice() {
+                [PRESENT, value @ ..] => Some(value),
+                _ => None,
+            };
+            let undone = match restored {
+                Some(value) => current.insert(key.as_slice(), value),
+                None => current.remove(key.as_slice()),
             }
-            .map_err(db_error)?;
+            .map_err(db_error)?
+            .map(|value| value.value().to_vec());
+            update_search(&mut search_table, search, &key, undone.as_deref(), restored)?;
             history
                 .remove((key.as_slice(), changed))
                 .map_err(db_error)?;
@@ -1600,6 +1750,8 @@ pub struct Batch {
     defer_history: bool,
     /// 状態と木のノードのそれぞれ、この高さ以下では差分も索引も書かない（[`Db::quiet_history_through`]）
     quiet_through: [Option<u64>; 2],
+    /// 作る検索（[`Db::set_search`]）
+    search: Searches,
 }
 
 impl Batch {
@@ -1660,14 +1812,28 @@ impl Batch {
 
     pub fn put_state(&mut self, key: &[u8], value: &[u8]) -> Result<(), DbError> {
         let mut table = self.transaction.open_table(STATE).map_err(db_error)?;
-        table.insert(key, value).map_err(db_error)?;
-        Ok(())
+        let before = table
+            .insert(key, value)
+            .map_err(db_error)?
+            .map(|before| before.value().to_vec());
+        let mut search = self.transaction.open_table(SEARCH).map_err(db_error)?;
+        update_search(
+            &mut search,
+            self.search,
+            key,
+            before.as_deref(),
+            Some(value),
+        )
     }
 
     pub fn delete_state(&mut self, key: &[u8]) -> Result<(), DbError> {
         let mut table = self.transaction.open_table(STATE).map_err(db_error)?;
-        table.remove(key).map_err(db_error)?;
-        Ok(())
+        let before = table
+            .remove(key)
+            .map_err(db_error)?
+            .map(|before| before.value().to_vec());
+        let mut search = self.transaction.open_table(SEARCH).map_err(db_error)?;
+        update_search(&mut search, self.search, key, before.as_deref(), None)
     }
 
     /// `height` のブロックで、状態の行をキーごとに値にする（`None` なら消す）。
@@ -1679,7 +1845,7 @@ impl Batch {
         writes: impl IntoIterator<Item = (K, Option<V>)>,
     ) -> Result<(), DbError> {
         let quiet = self.quiet_through[0].is_some_and(|through| height <= through);
-        self.set_at(STATE_TABLES, height, quiet, writes)
+        self.set_at(STATE_TABLES, height, quiet, self.search, writes)
     }
 
     /// [`Batch::set_state_at`] と同じことを、木のノードで。
@@ -1689,15 +1855,16 @@ impl Batch {
         writes: impl IntoIterator<Item = (K, Option<V>)>,
     ) -> Result<(), DbError> {
         let quiet = self.quiet_through[1].is_some_and(|through| height <= through);
-        self.set_at(TRIE_TABLES, height, quiet, writes)
+        self.set_at(TRIE_TABLES, height, quiet, Searches::NONE, writes)
     }
 
-    /// `quiet` なら、今の値だけを書く
+    /// `quiet` なら、今の値だけを書く。検索表は `search` の分を直す
     fn set_at<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &mut self,
         tables: Versioned,
         height: u64,
         quiet: bool,
+        search: Searches,
         writes: impl IntoIterator<Item = (K, Option<V>)>,
     ) -> Result<(), DbError> {
         // 表を開くのは1回にする。開くたびに表の根を読み直すので
@@ -1713,6 +1880,7 @@ impl Batch {
             .transaction
             .open_table(tables.history)
             .map_err(db_error)?;
+        let mut search_table = self.transaction.open_table(SEARCH).map_err(db_error)?;
         for (key, value) in writes {
             let key = key.as_ref();
             let value = value.as_ref().map(AsRef::as_ref);
@@ -1722,6 +1890,7 @@ impl Batch {
             }
             .map_err(db_error)?
             .map(|before| before.value().to_vec());
+            update_search(&mut search_table, search, key, before.as_deref(), value)?;
             if quiet || before.as_deref() == value {
                 continue;
             }
@@ -2021,6 +2190,104 @@ mod tests {
             db.state_rows_with_prefix_at(b"\x02", 2).unwrap(),
             vec![(b"\x02z".to_vec(), b"z1".to_vec())]
         );
+    }
+
+    /// メタデータの状態の行のキーと値。値の中身だけ違うものを `value` で作る
+    fn metadata_row(source: u8, value: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut row = vec![source; 24];
+        row.extend_from_slice(&[0x69; 24]);
+        row.extend_from_slice(&7u64.to_le_bytes());
+        row.extend_from_slice(&0u64.to_le_bytes());
+        row.push(0);
+        row.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        row.extend_from_slice(value);
+        let key = vec![
+            heika_core::patricia::SubCache::Metadata.index() as u8,
+            source,
+        ];
+        (key, row)
+    }
+
+    fn search_keys(db: &Db, prefix: &[u8]) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        db.for_each_search_key(prefix, false, &mut |key| {
+            keys.push(key.to_vec());
+            true
+        })
+        .unwrap();
+        keys
+    }
+
+    #[test]
+    fn search_follows_the_state_and_its_rollback() {
+        let dir = TempDir::new();
+        let mut db = Db::open(&dir.0).unwrap();
+        let (a, a1) = metadata_row(0x01, b"a1");
+        let (_, a2) = metadata_row(0x01, b"a2");
+        let (b, b1) = metadata_row(0x02, b"b1");
+        let mut batch = db.batch().unwrap();
+        batch.start_history(1).unwrap();
+        batch.start_trie(1).unwrap();
+        batch.set_state_at(1, [(&a, Some(&a1))]).unwrap();
+        batch.put_checkpoint(1, b"one").unwrap();
+        batch.commit().unwrap();
+
+        // 足したときに、今の状態の行から作る
+        assert!(search_keys(&db, &[]).is_empty());
+        db.set_search(Searches::METADATA).unwrap();
+        let by_source = |source: u8| {
+            let mut prefix = vec![search::METADATA_BY_SOURCE];
+            prefix.extend_from_slice(&[source; 24]);
+            search_keys(&db, &prefix)
+        };
+        assert_eq!(by_source(0x01).len(), 1);
+        // アカウントのメタデータなので、送り主と宛先からの2本だけ
+        assert_eq!(search_keys(&db, &[]).len(), 2);
+        assert_eq!(
+            MetadataFields::from_search_key(&by_source(0x01)[0])
+                .unwrap()
+                .source,
+            [0x01; 24]
+        );
+
+        // 値が変わっても検索表は変わらず、行ができたら足し、消えたら消す
+        let mut batch = db.batch().unwrap();
+        batch
+            .set_state_at(2, [(&a, Some(&a2)), (&b, Some(&b1))])
+            .unwrap();
+        batch.set_state_at(3, [(&a, None::<&Vec<u8>>)]).unwrap();
+        batch.commit().unwrap();
+        assert!(by_source(0x01).is_empty());
+        assert_eq!(by_source(0x02).len(), 1);
+
+        // 巻き戻したら、差分から元に戻る
+        db.rollback(1, u32::MAX, "executor", false, &[]).unwrap();
+        assert_eq!(by_source(0x01).len(), 1);
+        assert!(by_source(0x02).is_empty());
+
+        // 逆の順でも引ける
+        let mut reversed = Vec::new();
+        db.for_each_search_key(&[], true, &mut |key| {
+            reversed.push(key.to_vec());
+            true
+        })
+        .unwrap();
+        let mut forward = search_keys(&db, &[]);
+        forward.reverse();
+        assert_eq!(reversed, forward);
+
+        // 写しにも入り、外したら消える。開き直しても覚えている
+        let copy = TempDir::new();
+        let target = Db::open(&copy.0).unwrap();
+        assert!(db.copy_to(&target, None, |_, _| true).unwrap());
+        drop(target);
+        let target = Db::open_read_only(&copy.0).unwrap();
+        assert_eq!(target.searches(), Searches::METADATA);
+        assert_eq!(search_keys(&target, &[]).len(), 2);
+        db.set_search(Searches::NONE).unwrap();
+        assert!(search_keys(&db, &[]).is_empty());
+        drop(db);
+        assert_eq!(Db::open(&dir.0).unwrap().searches(), Searches::NONE);
     }
 
     #[test]

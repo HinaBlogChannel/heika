@@ -49,6 +49,45 @@ pub struct Decisions {
     pub fee_multiplier: u32,
 }
 
+/// 組む前に決まっていること。[`Assemble`] に渡す
+#[derive(Clone, Debug)]
+pub struct Slot {
+    pub height: u64,
+    /// Nemesis からのミリ秒
+    pub timestamp: u64,
+    /// ブロックに署名する鍵（リモートならリモートの鍵）
+    pub signer: PublicKey,
+    /// 報酬を受け取るアカウント（リモートなら、リンクしたメインのアカウント）
+    pub harvester: Address,
+    pub beneficiary: Address,
+    pub fee_multiplier: u32,
+    /// この高さのインフレの額
+    pub inflation: u64,
+    /// 手数料とインフレの合計のうち、受取先に入る割合（`harvestBeneficiaryPercentage`）。署名した鍵のアドレスが
+    /// 受取先と同じなら、受取先の分はなく 0
+    pub beneficiary_percentage: u64,
+}
+
+impl Slot {
+    /// `transactions` を入れたときに、受取先に入る額。catapult の `HarvestFeeObserver` と同じに、手数料（大きさ ×
+    /// ブロックの手数料の倍率）の合計にインフレを足して、割合を掛ける
+    pub fn beneficiary_amount(&self, transactions: &[Vec<u8>]) -> u64 {
+        let fee: u64 = transactions
+            .iter()
+            .map(|bytes| bytes.len() as u64 * u64::from(self.fee_multiplier))
+            .sum();
+        (fee + self.inflation) * self.beneficiary_percentage / 100
+    }
+}
+
+/// 入れるトランザクションを、決まったことを見て直す口。中核が手数料で選んだあとに呼ぶ。足しても外しても
+/// 並べ替えてもいい。ハーベストの鍵は渡さない。返したものが状態に依る確かめで弾かれたら、このブロックでは
+/// 口を使わずに、選んだものだけで組み直す
+pub trait Assemble: Send + Sync {
+    /// `chosen`（入れる順）の代わりに、入れるもの（入れる順）を返す
+    fn assemble(&self, slot: &Slot, chosen: Vec<Vec<u8>>) -> Vec<Vec<u8>>;
+}
+
 /// 親のブロックと、そこまでのチェーンから決まるもの
 pub struct Parent<'a> {
     pub block: &'a Block,
@@ -347,6 +386,29 @@ mod tests {
             count: 1,
             hash: Hash256([tag; 32]),
         }
+    }
+
+    #[test]
+    fn beneficiary_amount_matches_the_harvest_fee_split() {
+        let slot = Slot {
+            height: 2,
+            timestamp: 0,
+            signer: PublicKey([1; 32]),
+            harvester: Address([2; 24]),
+            beneficiary: Address([3; 24]),
+            fee_multiplier: 100,
+            inflation: 73_210_170,
+            beneficiary_percentage: 25,
+        };
+        // 手数料は 176 × 100 と 200 × 100。インフレと合わせた 73,247,770 の 25% を切り捨てる
+        let transactions = [vec![0; 176], vec![0; 200]];
+        assert_eq!(slot.beneficiary_amount(&transactions), 18_311_942);
+        // 受取先の分がなければ 0
+        let alone = Slot {
+            beneficiary_percentage: 0,
+            ..slot
+        };
+        assert_eq!(alone.beneficiary_amount(&transactions), 0);
     }
 
     #[test]

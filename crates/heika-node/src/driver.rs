@@ -15,7 +15,7 @@ use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
-use heika_chain::produce::Pending;
+use heika_chain::produce::{Assemble, Pending};
 use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::nemesis_hash;
 use heika_core::address::Address;
@@ -73,7 +73,26 @@ pub fn run_with(
     stopping: &(dyn Fn() -> bool + Sync),
     memory: &MemoryHarvesters,
 ) -> Result<(), NodeError> {
-    let setup = Setup::new(&manifest.spec, memory)?;
+    run_inner(manifest, stopping, memory, None)
+}
+
+/// [`run_with`] と同じで、ブロックを作るときに、手数料で選んだトランザクションを `assemble` に渡して直してもらう
+pub fn run_with_assemble(
+    manifest: &Manifest,
+    stopping: &(dyn Fn() -> bool + Sync),
+    memory: &MemoryHarvesters,
+    assemble: Arc<dyn Assemble>,
+) -> Result<(), NodeError> {
+    run_inner(manifest, stopping, memory, Some(assemble))
+}
+
+fn run_inner(
+    manifest: &Manifest,
+    stopping: &(dyn Fn() -> bool + Sync),
+    memory: &MemoryHarvesters,
+    assemble: Option<Arc<dyn Assemble>>,
+) -> Result<(), NodeError> {
+    let setup = Setup::new(&manifest.spec, memory, assemble)?;
     loop {
         catch_up_if_behind(&setup, stopping)?;
         if stopping() {
@@ -99,10 +118,16 @@ struct Setup<'a> {
     harvesters: Vec<KeyPair>,
     /// メモリだけで渡された鍵
     memory: &'a MemoryHarvesters,
+    /// 入れるトランザクションを、選んだあとに直す口
+    assemble: Option<Arc<dyn Assemble>>,
 }
 
 impl<'a> Setup<'a> {
-    fn new(spec: &'a NodeConfig, memory: &'a MemoryHarvesters) -> Result<Self, NodeError> {
+    fn new(
+        spec: &'a NodeConfig,
+        memory: &'a MemoryHarvesters,
+        assemble: Option<Arc<dyn Assemble>>,
+    ) -> Result<Self, NodeError> {
         let parameters = network_parameters(spec)?;
         let nemesis = match &spec.network.nemesis_hash {
             Some(hash) => hash
@@ -118,6 +143,7 @@ impl<'a> Setup<'a> {
             identity: Arc::new(load_identity(&spec.certificates.directory)?),
             harvesters: read_harvesters(spec)?,
             memory,
+            assemble,
         })
     }
 
@@ -375,6 +401,9 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         heika_mempool::Config::default(),
     )));
     chain.set_pending(Arc::clone(&mempool) as Arc<dyn Pending>);
+    if let Some(assemble) = &setup.assemble {
+        chain.set_assemble(Arc::clone(assemble));
+    }
     // 連署を待つアグリゲートボンデッド。揃ったら未承認の置き場に移す
     let partials = Arc::new(SharedPartialPool::new(PartialPool::new(
         parameters,
@@ -892,9 +921,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     Ok(outcome)
 }
 
-pub(crate) fn network_parameters(
-    spec: &NodeConfig,
-) -> Result<&'static NetworkParameters, NodeError> {
+/// 設定 `spec` のネットワークの定数。プライベートなネットワークなら `network.resources` から読む
+pub fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, NodeError> {
     Ok(match spec.network.network_type {
         NetworkType::Mainnet => &NetworkParameters::MAINNET,
         NetworkType::Testnet => &NetworkParameters::TESTNET,

@@ -220,20 +220,77 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 self.parameters.identifier,
             )
         });
+        let signer = PublicKey::from_private_key(signing);
+        let mut assemble = self.assemble.clone();
+        let harvester = match &assemble {
+            Some(_) => match self.executor.harvester_address(&signer) {
+                Ok(address) => Some(Address(address)),
+                Err(error) => {
+                    self.executor.take_missed();
+                    self.progress(format!(
+                        "高さ {} は、トランザクションを直す口を使わずに作ります: {error}",
+                        self.tip.height + 1
+                    ));
+                    assemble = None;
+                    None
+                }
+            },
+            None => None,
+        };
         let mut drops = 0;
         loop {
             // 手数料の下限は、置き場が受け付けるときに絞っている
             let (chosen, fee_multiplier) = produce::choose(&candidates, 0);
+            let chosen_bytes: Vec<Vec<u8>> = chosen
+                .iter()
+                .map(|candidate| candidate.bytes.clone())
+                .collect();
+            let transactions = match (&assemble, harvester) {
+                (Some(assemble), Some(harvester)) => {
+                    let shares = Address::from_public_key(&signer, self.parameters.identifier)
+                        != beneficiary;
+                    let slot = produce::Slot {
+                        height: self.tip.height + 1,
+                        timestamp,
+                        signer,
+                        harvester,
+                        beneficiary,
+                        fee_multiplier,
+                        inflation: self.config.inflation_at(self.tip.height + 1),
+                        beneficiary_percentage: if shares {
+                            self.config.harvest_beneficiary_percentage
+                        } else {
+                            0
+                        },
+                    };
+                    assemble.assemble(&slot, chosen_bytes)
+                }
+                _ => chosen_bytes,
+            };
             let decisions = produce::Decisions {
                 timestamp,
-                transactions: chosen
-                    .iter()
-                    .map(|candidate| candidate.bytes.clone())
-                    .collect(),
+                transactions,
                 beneficiary,
                 fee_multiplier,
             };
-            let draft = produce::draft(self.parameters, &context, signing, vrf_key, &decisions)?;
+            let draft = match produce::draft(
+                self.parameters,
+                &context,
+                signing,
+                vrf_key,
+                &decisions,
+            ) {
+                Ok(draft) => draft,
+                Err(error) if assemble.is_some() => {
+                    self.progress(format!(
+                        "高さ {} は、直したトランザクションで組めないので、直す前のもので作ります: {error}",
+                        self.tip.height + 1
+                    ));
+                    assemble = None;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             // アカウントを全部はメモリに持たないなら、要りそうなものを先に読み、足りなければ戻して読み足す
             if self.executor.is_partial() {
                 let wanted = self.executor.wanted_for(&draft);
@@ -271,24 +328,38 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 }
                 Err(error) => error,
             };
-            let Some(failed) = self
+            // 弾かれたのが手数料で選んだものなら外して選び直す。直す口が足したものか、どれか分からなければ、
+            // 口を使わずに組み直す
+            let failed = self
                 .executor
                 .failed_transaction()
-                .and_then(|index| chosen.get(index))
-            else {
-                return Err(error.into());
-            };
-            if drops == MAX_DROPS {
-                return Err(format!("{MAX_DROPS} 件外しても、まだ弾かれます: {error}").into());
+                .and_then(|index| decisions.transactions.get(index))
+                .and_then(|bytes| chosen.iter().find(|candidate| &candidate.bytes == bytes));
+            match failed {
+                Some(failed) => {
+                    if drops == MAX_DROPS {
+                        return Err(
+                            format!("{MAX_DROPS} 件外しても、まだ弾かれます: {error}").into()
+                        );
+                    }
+                    drops += 1;
+                    let hash = failed.hash();
+                    self.progress(format!(
+                        "高さ {} に入れようとしたトランザクション {hash} を外します: {error}",
+                        self.tip.height + 1
+                    ));
+                    self.actions.push(Action::Dropped(hash));
+                    candidates.retain(|candidate| candidate.hash() != hash);
+                }
+                None if assemble.is_some() => {
+                    self.progress(format!(
+                        "高さ {} は、直したトランザクションが弾かれたので、直す前のもので作ります: {error}",
+                        self.tip.height + 1
+                    ));
+                    assemble = None;
+                }
+                None => return Err(error.into()),
             }
-            drops += 1;
-            let hash = failed.hash();
-            self.progress(format!(
-                "高さ {} に入れようとしたトランザクション {hash} を外します: {error}",
-                self.tip.height + 1
-            ));
-            self.actions.push(Action::Dropped(hash));
-            candidates.retain(|candidate| candidate.hash() != hash);
             if self.executor.is_partial() {
                 self.undo_and_load(&draft, Wanted::default()).await?;
             } else {

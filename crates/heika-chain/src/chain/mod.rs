@@ -649,6 +649,8 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     pending: Option<Arc<dyn produce::Pending>>,
     /// 作るブロックの受取先。なければ、署名した鍵のアドレス
     beneficiary: Option<Address>,
+    /// 入れるトランザクションを、選んだあとに直す口
+    assemble: Option<Arc<dyn produce::Assemble>>,
     /// 駆動役にまだ渡していない指示
     actions: Vec<Action>,
 }
@@ -701,6 +703,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
             harvest_warning: None,
             pending: None,
             beneficiary: None,
+            assemble: None,
             actions: Vec::new(),
         })
     }
@@ -722,6 +725,11 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
     /// 委任を引き受けるノードは、運営者のアドレスにする
     pub fn set_beneficiary(&mut self, beneficiary: Option<Address>) {
         self.beneficiary = beneficiary;
+    }
+
+    /// ブロックを作るときに、手数料で選んだトランザクションを `assemble` に渡して直してもらう
+    pub fn set_assemble(&mut self, assemble: Arc<dyn produce::Assemble>) {
+        self.assemble = Some(assemble);
     }
 
     /// 確定を上げるたびに、残す分より下の差分を消す

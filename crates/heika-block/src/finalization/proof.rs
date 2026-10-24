@@ -58,7 +58,7 @@ impl VotingSet {
         self.voters.values().sum()
     }
 
-    /// しまう形。投票者の数 u32 と、（鍵 [32]、重み u64）の並び
+    /// しまう形。投票者の数 u32 と、（鍵 `[32]`、重み u64）の並び
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + self.voters.len() * 40);
         out.extend_from_slice(&(self.voters.len() as u32).to_le_bytes());

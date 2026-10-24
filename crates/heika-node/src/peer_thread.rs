@@ -42,7 +42,7 @@ pub enum Request {
         known: Vec<u32>,
     },
     /// ラウンド `min` から `max` までの投票のメッセージのうち、`known`（短いハッシュ）にないものを頼む。
-    /// [`NodeEvent::PulledVotes`] で返す
+    /// [`NodeEvent::Votes`] で返す
     PullVotes {
         min: FinalizationRound,
         max: FinalizationRound,

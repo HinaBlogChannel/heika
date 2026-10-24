@@ -537,7 +537,7 @@ impl Gate {
         }
     }
 
-    /// 鍵 `key` を [`BAN`] の長さだけ受けず、今受けているその鍵の接続も切る。状態を見ない確かめに落ちるものを
+    /// 鍵 `key` を `BAN`（12 時間）のあいだ受けず、今受けているその鍵の接続も切る。状態を見ない確かめに落ちるものを
     /// 送ってきたとき
     pub fn ban(&self, key: PublicKey) {
         let mut state = self.state.lock().expect("not poisoned");

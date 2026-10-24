@@ -88,7 +88,7 @@ impl ChainStore for Db {
         Ok(())
     }
 
-    /// 1回で刈り込むのは [`PRUNE_BUDGET`] まで。アーカイブからライトにしたときなど、消すものが多くても先端を追うのを
+    /// 1回で刈り込むのは `PRUNE_BUDGET`（2 秒）まで。アーカイブからライトにしたときなど、消すものが多くても先端を追うのを
     /// 長く止めないように、残りは次に呼ばれたとき（次の確定）に続ける。どの刈り込みも、続きから消せる
     async fn prune(&self, prune: Prune) -> Result<Pruned, ChainError> {
         let checkpoints = self.prune_checkpoints(prune.checkpoints_below)?;

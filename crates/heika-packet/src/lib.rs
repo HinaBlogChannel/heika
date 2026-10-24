@@ -47,9 +47,9 @@ pub fn encode(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, usize> {
     Ok(packet)
 }
 
-/// catapult の `ionet::PacketType` のうち使うもの。
 pub mod partial;
 
+/// catapult の `ionet::PacketType` のうち使うもの。
 pub mod packet_type {
     pub const PUSH_BLOCK: u32 = 3;
     pub const PULL_BLOCK: u32 = 4;

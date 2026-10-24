@@ -269,6 +269,8 @@ pub struct Storage {
 pub enum Search {
     /// `/metadata` の検索（送り主、宛先、対象から）
     Metadata,
+    /// `/namespaces` の検索（持ち主、別名から）と、名前（`/namespaces/names` など）
+    Namespaces,
 }
 
 /// `full` と `light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
@@ -306,6 +308,7 @@ impl Storage {
             .iter()
             .fold(Searches::NONE, |searches, search| match search {
                 Search::Metadata => searches.union(Searches::METADATA),
+                Search::Namespaces => searches.union(Searches::NAMESPACES),
             });
         if self.mode == Mode::Archive && searches != Searches::NONE {
             searches.union(Searches::PAST)
@@ -637,6 +640,12 @@ spec:
         let storage = Manifest::parse(&search).unwrap().spec.storage;
         assert_eq!(storage.searches(), Searches::METADATA);
         assert!(Manifest::parse(&search.replace("metadata", "accounts")).is_err());
+        let both = search.replace("[metadata]", "[metadata, namespaces]");
+        let storage = Manifest::parse(&both).unwrap().spec.storage;
+        assert_eq!(
+            storage.searches(),
+            Searches::METADATA.union(Searches::NAMESPACES)
+        );
         let archive = search.replace("storage:\n", "storage:\n    mode: archive\n");
         let storage = Manifest::parse(&archive).unwrap().spec.storage;
         assert_eq!(storage.searches(), Searches::METADATA.union(Searches::PAST));

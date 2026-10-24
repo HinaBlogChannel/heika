@@ -456,8 +456,37 @@ impl MetadataEntryJson {
 /// `NamespaceInfoDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct NamespaceInfo {
+    /// 検索のページ送り（`offset`）に渡す位置。catapult の REST では MongoDB の ID、heika では検索表のキー
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub meta: NamespaceMetaJson,
     pub namespace: NamespaceJson,
+}
+
+/// `NamespaceNameDTO`。`POST /namespaces/names` が返す1件。名前は自分の部分だけ（`xym` など）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamespaceNameJson {
+    pub id: String,
+    pub name: String,
+    /// 子のときだけ
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// `AccountNamesDTO`。`POST /namespaces/account/names` の1件。名前はルートからつないだもの（`symbol.xym` など）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct AccountNamesJson {
+    pub address: String,
+    pub names: Vec<String>,
+}
+
+/// `MosaicNamesDTO`。`POST /namespaces/mosaic/names` の1件
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicNamesJson {
+    pub mosaic_id: String,
+    pub names: Vec<String>,
 }
 
 /// `NamespaceMetaDTO`。
@@ -674,6 +703,7 @@ impl RootNamespaceState {
             }
         };
         Ok(Some(NamespaceInfo {
+            id: None,
             meta: NamespaceMetaJson {
                 active: number(&self.root.end_height, "endHeight")? > height,
             },

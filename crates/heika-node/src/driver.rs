@@ -238,6 +238,17 @@ fn catch_up_if_behind(
             started.elapsed().as_secs_f64()
         );
     }
+    // ネームスペースの名前の表を足したなら、しまってあるブロックから拾う。止める合図を見たら、続きは次の起動で
+    let mut last_report = Instant::now();
+    let done = db.backfill_names(stopping, &mut |at, through| {
+        if last_report.elapsed() >= Duration::from_secs(10) || at >= through {
+            eprintln!("ネームスペースの名前を、しまってあるブロックから拾っています（高さ {at} / {through}）");
+            last_report = Instant::now();
+        }
+    })?;
+    if !done {
+        return Ok(());
+    }
     let executed = match db.meta(EXECUTOR_META)? {
         Some(meta) => height_of_meta(&meta)?,
         None => 0,

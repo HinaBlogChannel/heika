@@ -16,7 +16,7 @@
 
 use heika_core::address::Address;
 use heika_core::patricia::SubCache;
-use heika_transaction::{MetadataKey, MetadataType};
+use heika_transaction::{Body, MetadataKey, MetadataType, NamespaceId, NamespaceRegistrationType};
 
 /// 作る検索。ビットの組
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,6 +26,10 @@ impl Searches {
     pub const NONE: Self = Self(0);
     /// メタデータを、送り主、宛先、対象（モザイクかネームスペース）から引く
     pub const METADATA: Self = Self(1);
+    /// ネームスペースを、持ち主と別名（アドレスかモザイク）から引く。名前の表（[`Db::namespace_name`]）も作る
+    ///
+    /// [`Db::namespace_name`]: crate::Db::namespace_name
+    pub const NAMESPACES: Self = Self(2);
     /// 作る検索を、昔の高さでも引けるようにする。状態の差分を全部残すアーカイブのためのもの
     pub const PAST: Self = Self(0x80);
 
@@ -60,7 +64,161 @@ impl Searches {
                 METADATA_BY_TARGET_ID,
             ]);
         }
+        if self.contains(Self::NAMESPACES) {
+            out.extend([
+                NAMESPACE_BY_OWNER,
+                NAMESPACE_BY_ADDRESS,
+                NAMESPACE_BY_MOSAIC,
+            ]);
+        }
         out
+    }
+}
+
+/// `(持ち主, ルートの ID, ネームスペースの ID)`。ルートもその子も、持ち主はルートのもの
+pub const NAMESPACE_BY_OWNER: u8 = 4;
+/// `(別名のアドレス, ルートの ID, ネームスペースの ID)`
+pub const NAMESPACE_BY_ADDRESS: u8 = 5;
+/// `(別名のモザイクの ID, ルートの ID, ネームスペースの ID)`
+pub const NAMESPACE_BY_MOSAIC: u8 = 6;
+
+/// ネームスペースの状態の行（ルートごと）から読んだもの
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceRow {
+    pub owner: [u8; 24],
+    pub start: u64,
+    pub end: u64,
+    /// ルートと子の、ID と別名。ルートが先
+    pub entries: Vec<(u64, Alias)>,
+}
+
+/// ネームスペースの別名
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alias {
+    None,
+    Mosaic(u64),
+    Address([u8; 24]),
+}
+
+impl NamespaceRow {
+    /// 状態の行の値（`execute::persist` の形。持ち主、始まりと終わりの高さ、別名、子の経路と別名）から
+    pub fn from_row(root_id: u64, value: &[u8]) -> Option<Self> {
+        let mut reader = RowReader(value);
+        let owner = reader.take(24)?.try_into().ok()?;
+        let start = reader.u64()?;
+        let end = reader.u64()?;
+        let mut entries = vec![(root_id, reader.alias()?)];
+        for _ in 0..reader.u64()? {
+            let depth = reader.take(1)?[0];
+            let mut last = None;
+            for _ in 0..depth {
+                last = Some(reader.u64()?);
+            }
+            entries.push((last?, reader.alias()?));
+        }
+        reader.0.is_empty().then_some(Self {
+            owner,
+            start,
+            end,
+            entries,
+        })
+    }
+
+    /// 検索表のキー
+    pub fn search_keys(&self, root_id: u64) -> Vec<Vec<u8>> {
+        let tail = |id: u64| [root_id.to_be_bytes(), id.to_be_bytes()].concat();
+        let mut keys = Vec::new();
+        for &(id, alias) in &self.entries {
+            keys.push([&[NAMESPACE_BY_OWNER][..], &self.owner, &tail(id)].concat());
+            match alias {
+                Alias::None => {}
+                Alias::Address(address) => {
+                    keys.push([&[NAMESPACE_BY_ADDRESS][..], &address, &tail(id)].concat())
+                }
+                Alias::Mosaic(mosaic) => keys
+                    .push([&[NAMESPACE_BY_MOSAIC][..], &mosaic.to_be_bytes(), &tail(id)].concat()),
+            }
+        }
+        keys
+    }
+}
+
+/// ブロック `block` のネームスペースの登録（アグリゲートの中も）から、ID、親の ID（ルートは 0）、名前。
+/// ID が親と名前から決まるものと合うものだけを返すので、どのブロックから拾っても名前の表は正しい
+pub(crate) fn names_in_block(block: &[u8]) -> Vec<(u64, u64, Vec<u8>)> {
+    let Ok(block) = heika_block::Block::from_bytes(block) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for transaction in block.transactions() {
+        // 中身を読むのは、登録とアグリゲートだけ
+        let Some(kind) = transaction.get(110..112) else {
+            continue;
+        };
+        if !matches!(
+            u16::from_le_bytes([kind[0], kind[1]]),
+            0x414E | 0x4141 | 0x4241
+        ) {
+            continue;
+        }
+        let Ok(scanned) = heika_transaction::scan(transaction) else {
+            continue;
+        };
+        for scanned in scanned {
+            let Body::NamespaceRegistration(registration) = scanned.body else {
+                continue;
+            };
+            let parent = match registration.registration_type {
+                NamespaceRegistrationType::Root { .. } => None,
+                NamespaceRegistrationType::Child { parent_id } => Some(parent_id),
+            };
+            if NamespaceId::generate(parent, &registration.name) == registration.id {
+                names.push((
+                    registration.id.0,
+                    parent.map_or(0, |parent| parent.0),
+                    registration.name.to_vec(),
+                ));
+            }
+        }
+    }
+    names
+}
+
+/// 状態の行を前から読む。足りなければ `None`
+struct RowReader<'a>(&'a [u8]);
+
+impl<'a> RowReader<'a> {
+    fn take(&mut self, size: usize) -> Option<&'a [u8]> {
+        let (head, rest) = self.0.split_at_checked(size)?;
+        self.0 = rest;
+        Some(head)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn alias(&mut self) -> Option<Alias> {
+        Some(match self.take(1)?[0] {
+            0 => Alias::None,
+            1 => Alias::Mosaic(self.u64()?),
+            2 => Alias::Address(self.take(24)?.try_into().ok()?),
+            _ => return None,
+        })
+    }
+}
+
+/// ネームスペースの検索表のキーの、ルートの ID とネームスペースの ID（最後の 16 バイト）
+pub fn namespace_ids(key: &[u8]) -> Option<(u64, u64)> {
+    match *key.first()? {
+        NAMESPACE_BY_OWNER | NAMESPACE_BY_ADDRESS | NAMESPACE_BY_MOSAIC if key.len() >= 17 => {
+            let tail = &key[key.len() - 16..];
+            Some((
+                u64::from_be_bytes(tail[..8].try_into().expect("8 bytes")),
+                u64::from_be_bytes(tail[8..].try_into().expect("8 bytes")),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -187,8 +345,25 @@ pub fn row_key_of(key: &[u8]) -> Option<Vec<u8>> {
             row.extend_from_slice(&fields.composite_hash()?);
             Some(row)
         }
+        NAMESPACE_BY_OWNER | NAMESPACE_BY_ADDRESS | NAMESPACE_BY_MOSAIC => {
+            let (root, _) = namespace_ids(key)?;
+            let mut row = vec![SubCache::Namespace.index() as u8];
+            row.extend_from_slice(&root.to_le_bytes());
+            Some(row)
+        }
         _ => None,
     }
+}
+
+/// 検索表のキー `key` が、その状態の行の値 `value` から出るか。昔の高さの候補を確かめる
+pub fn row_yields(key: &[u8], value: &[u8]) -> bool {
+    let Some(row) = row_key_of(key) else {
+        return false;
+    };
+    let all = Searches(Searches::METADATA.0 | Searches::NAMESPACES.0);
+    keys_of(all, &row, Some(value))
+        .iter()
+        .any(|yielded| yielded == key)
 }
 
 /// 状態の行 `key` の値 `value` から出る、検索表のキー
@@ -203,6 +378,17 @@ pub(crate) fn keys_of(searches: Searches, key: &[u8], value: Option<&[u8]>) -> V
         {
             MetadataFields::from_row(value)
                 .map(|fields| fields.search_keys())
+                .unwrap_or_default()
+        }
+        Some(&cache)
+            if usize::from(cache) == SubCache::Namespace.index()
+                && searches.contains(Searches::NAMESPACES) =>
+        {
+            let Ok(root) = <[u8; 8]>::try_from(&key[1..]).map(u64::from_le_bytes) else {
+                return Vec::new();
+            };
+            NamespaceRow::from_row(root, value)
+                .map(|row| row.search_keys(root))
                 .unwrap_or_default()
         }
         _ => Vec::new(),
@@ -227,6 +413,9 @@ pub(crate) fn caches(searches: Searches) -> Vec<u8> {
     if searches.contains(Searches::METADATA) {
         out.push(SubCache::Metadata.index() as u8);
     }
+    if searches.contains(Searches::NAMESPACES) {
+        out.push(SubCache::Namespace.index() as u8);
+    }
     out
 }
 
@@ -242,6 +431,71 @@ mod tests {
             target_id: if metadata_type == 0 { 0 } else { 0xAA },
             metadata_type,
         }
+    }
+
+    /// ルート 0xA1（持ち主 0x68、別名なし）に、子 [0xB2]（アドレスの別名）と [0xB2, 0xC3]（モザイクの別名）
+    pub(crate) fn namespace_row() -> Vec<u8> {
+        let mut row = vec![0x68; 24];
+        row.extend_from_slice(&1u64.to_le_bytes());
+        row.extend_from_slice(&100u64.to_le_bytes());
+        row.push(0);
+        row.extend_from_slice(&2u64.to_le_bytes());
+        row.push(1);
+        row.extend_from_slice(&0xB2u64.to_le_bytes());
+        row.push(2);
+        row.extend_from_slice(&[0x69; 24]);
+        row.push(2);
+        row.extend_from_slice(&0xB2u64.to_le_bytes());
+        row.extend_from_slice(&0xC3u64.to_le_bytes());
+        row.push(1);
+        row.extend_from_slice(&0x6BEDu64.to_le_bytes());
+        row
+    }
+
+    #[test]
+    fn reads_a_namespace_row_and_its_search_keys() {
+        let row = NamespaceRow::from_row(0xA1, &namespace_row()).unwrap();
+        assert_eq!(row.owner, [0x68; 24]);
+        assert_eq!(row.end, 100);
+        assert_eq!(
+            row.entries,
+            vec![
+                (0xA1, Alias::None),
+                (0xB2, Alias::Address([0x69; 24])),
+                (0xC3, Alias::Mosaic(0x6BED))
+            ]
+        );
+        assert_eq!(NamespaceRow::from_row(0xA1, &namespace_row()[1..]), None);
+
+        let mut key = vec![SubCache::Namespace.index() as u8];
+        key.extend_from_slice(&0xA1u64.to_le_bytes());
+        let keys = keys_of(Searches::NAMESPACES, &key, Some(&namespace_row()));
+        // 持ち主から3つ、アドレスとモザイクの別名から1つずつ
+        assert_eq!(keys.len(), 5);
+        let prefixes: Vec<u8> = keys.iter().map(|key| key[0]).collect();
+        assert_eq!(
+            prefixes
+                .iter()
+                .filter(|&&p| p == NAMESPACE_BY_OWNER)
+                .count(),
+            3
+        );
+        for search_key in &keys {
+            assert_eq!(row_key_of(search_key), Some(key.clone()));
+            assert_eq!(namespace_ids(search_key).unwrap().0, 0xA1);
+            assert!(row_yields(search_key, &namespace_row()));
+        }
+        let mosaic = keys
+            .iter()
+            .find(|key| key[0] == NAMESPACE_BY_MOSAIC)
+            .unwrap();
+        assert_eq!(namespace_ids(mosaic), Some((0xA1, 0xC3)));
+        // 別名が外れた行からは出ない
+        let mut unaliased = namespace_row();
+        let len = unaliased.len();
+        unaliased.truncate(len - 9);
+        unaliased.push(0);
+        assert!(!row_yields(mosaic, &unaliased));
     }
 
     #[test]

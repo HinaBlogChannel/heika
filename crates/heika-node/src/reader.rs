@@ -15,7 +15,10 @@
 
 use std::sync::Arc;
 
-use heika_api::{MetadataFilter, MetadataPosition, PageRequest, PartialFilter, StateError};
+use heika_api::{
+    AliasTarget, MetadataFilter, MetadataPosition, NamespaceFilter, PageRequest, PartialFilter,
+    StateError,
+};
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
 use heika_chain::store::EXECUTOR_META;
@@ -31,13 +34,15 @@ use heika_rest::merkle::{MerklePathItem, MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::TransactionFeesJson;
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
-    AccountJson, MetadataEntryJson, MosaicStateJson, NamespaceInfo, RootNamespaceState,
+    AccountJson, MetadataEntryJson, MosaicStateJson, NamespaceInfo, NamespaceNameJson,
+    RootNamespaceState,
 };
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
 use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
 use heika_store_redb::search::{
-    METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID, row_key_of,
+    METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID, NAMESPACE_BY_ADDRESS,
+    NAMESPACE_BY_MOSAIC, NAMESPACE_BY_OWNER, NamespaceRow, namespace_ids, row_key_of, row_yields,
 };
 use heika_store_redb::{At, Db, DbError, MetadataFields, Searches};
 use heika_transaction::{Body, Transaction};
@@ -279,6 +284,16 @@ fn matches(filter: &MetadataFilter, fields: &MetadataFields) -> bool {
             .is_none_or(|kind| kind == fields.metadata_type)
 }
 
+/// 検索表の候補 `key` が、昔の高さの状態 `past` で、その行から出るか
+fn existed(past: &At, key: &[u8]) -> Result<bool, DbError> {
+    let Some(row) = row_key_of(key) else {
+        return Ok(false);
+    };
+    Ok(past
+        .state(&row)?
+        .is_some_and(|value| row_yields(key, &value)))
+}
+
 /// 状態を引く先
 enum View {
     /// 今の状態
@@ -430,17 +445,7 @@ impl heika_api::Reader for DbReader {
                 }
                 // 昔の高さでは、候補がその高さにあったかを状態の行で確かめる
                 if let View::At(past) = &view {
-                    let existed =
-                        row_key_of(key)
-                            .map(|row| past.state(&row))
-                            .transpose()
-                            .map(|value| {
-                                value
-                                    .flatten()
-                                    .and_then(|value| MetadataFields::from_row(&value))
-                                    == Some(fields)
-                            });
-                    match existed {
+                    match existed(past, key) {
                         Ok(true) => {}
                         Ok(false) => return true,
                         Err(error) => {
@@ -488,6 +493,204 @@ impl heika_api::Reader for DbReader {
             }
         }
         Ok(Some(entries))
+    }
+
+    fn search_namespaces(
+        &self,
+        filter: &NamespaceFilter,
+        page: PageRequest,
+        after: Option<&[u8]>,
+        at: Option<u64>,
+    ) -> Result<Option<Vec<(String, NamespaceInfo)>>, StateError> {
+        let wanted = match at {
+            None => Searches::NAMESPACES,
+            Some(_) => Searches::NAMESPACES.union(Searches::PAST),
+        };
+        if !self.db.searches().contains(wanted) {
+            return Ok(None);
+        }
+        let (view, height) = self.view(at)?;
+        let root_row =
+            |root: u64| self.row(&view, &row_key(SubCache::Namespace, &root.to_le_bytes()));
+        // 決まっている項目から、なめる並べ方と頭を選ぶ。ルートだけ決まっていれば、その持ち主から
+        let prefix = match (filter.owner, filter.level0, filter.alias_type) {
+            (Some(owner), level0, _) => {
+                let mut prefix = [&[NAMESPACE_BY_OWNER][..], &owner.0].concat();
+                if let Some(root) = level0 {
+                    prefix.extend_from_slice(&root.to_be_bytes());
+                }
+                prefix
+            }
+            (None, Some(root), _) => {
+                let Some(row) = root_row(root)?.and_then(|row| NamespaceRow::from_row(root, &row))
+                else {
+                    return Ok(Some(Vec::new()));
+                };
+                [&[NAMESPACE_BY_OWNER][..], &row.owner, &root.to_be_bytes()].concat()
+            }
+            (None, None, Some(1)) => vec![NAMESPACE_BY_MOSAIC],
+            (None, None, Some(2)) => vec![NAMESPACE_BY_ADDRESS],
+            (None, None, _) => vec![NAMESPACE_BY_OWNER],
+        };
+        if after.is_some_and(|after| after.first() != prefix.first()) {
+            return Err(StateError::Invalid(
+                "offset is not a position of this search".to_owned(),
+            ));
+        }
+        let mut skip = (page.number - 1) * page.size;
+        let mut found = Vec::new();
+        let mut failed = None;
+        // 同じルートの行は続けて出るので、最後に読んだものを覚えておく
+        let mut last_root: Option<(u64, Option<Vec<u8>>)> = None;
+        let mut visit = |key: &[u8]| {
+            let Some((root, id)) = namespace_ids(key) else {
+                return true;
+            };
+            if filter.level0.is_some_and(|level0| level0 != root)
+                || filter
+                    .registration_type
+                    .is_some_and(|kind| kind != u8::from(id != root))
+            {
+                return true;
+            }
+            if last_root.as_ref().is_none_or(|(last, _)| *last != root) {
+                match root_row(root) {
+                    Ok(row) => last_root = Some((root, row)),
+                    Err(error) => {
+                        failed = Some(error);
+                        return false;
+                    }
+                }
+            }
+            let Some((_, Some(row))) = &last_root else {
+                return true;
+            };
+            // 昔の高さでは、候補がその高さの行から出るかを確かめる。今の検索表は今の行と合っている
+            if matches!(view, View::At(_)) && !row_yields(key, row) {
+                return true;
+            }
+            let info = RootNamespaceState::from_state_bytes(&state_bytes(&root.to_le_bytes(), row))
+                .ok()
+                .and_then(|state| state.info(id, height).ok().flatten());
+            let Some(info) = info else {
+                return true;
+            };
+            if filter
+                .alias_type
+                .is_some_and(|kind| kind != info.namespace.alias.alias_type)
+            {
+                return true;
+            }
+            if skip > 0 {
+                skip -= 1;
+                return true;
+            }
+            found.push((hex(key), info));
+            found.len() < page.size
+        };
+        match &view {
+            View::Now => self
+                .db
+                .for_each_search_key(&prefix, after, page.descending, &mut visit),
+            View::At(_) => {
+                self.db
+                    .for_each_search_key_with_past(&prefix, after, page.descending, &mut visit)
+            }
+        }
+        .map_err(|error| error.to_string())?;
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        Ok(Some(found))
+    }
+
+    fn namespace_names(&self, ids: &[u64]) -> Result<Option<Vec<NamespaceNameJson>>, String> {
+        if !self.db.searches().contains(Searches::NAMESPACES) {
+            return Ok(None);
+        }
+        // catapult の REST と同じく、頼まれた ID の分を並べ、その親の分を次に並べる
+        let mut out: Vec<NamespaceNameJson> = Vec::new();
+        let mut next: Vec<u64> = ids.to_vec();
+        while !next.is_empty() {
+            let mut parents = Vec::new();
+            for id in next {
+                let text = format!("{id:016X}");
+                if out.iter().any(|name| name.id == text) {
+                    continue;
+                }
+                let Some((parent, name)) = self
+                    .db
+                    .namespace_name(id)
+                    .map_err(|error| error.to_string())?
+                else {
+                    continue;
+                };
+                out.push(NamespaceNameJson {
+                    id: text,
+                    name: String::from_utf8_lossy(&name).into_owned(),
+                    parent_id: (parent != 0).then(|| format!("{parent:016X}")),
+                });
+                if parent != 0 {
+                    parents.push(parent);
+                }
+            }
+            next = parents;
+        }
+        Ok(Some(out))
+    }
+
+    fn alias_names(&self, target: AliasTarget) -> Result<Option<Vec<String>>, String> {
+        if !self.db.searches().contains(Searches::NAMESPACES) {
+            return Ok(None);
+        }
+        let prefix = match target {
+            AliasTarget::Address(address) => [&[NAMESPACE_BY_ADDRESS][..], &address.0].concat(),
+            AliasTarget::Mosaic(id) => [&[NAMESPACE_BY_MOSAIC][..], &id.to_be_bytes()].concat(),
+        };
+        let mut ids = Vec::new();
+        self.db
+            .for_each_search_key(&prefix, None, false, &mut |key| {
+                ids.extend(namespace_ids(key));
+                true
+            })
+            .map_err(|error| error.to_string())?;
+        let height = self.executed()?;
+        let mut names = Vec::new();
+        for (root, id) in ids {
+            // catapult の REST と同じく、今有効な（期限の高さが今より後の）ものだけ
+            let row = self
+                .db
+                .state_row(&row_key(SubCache::Namespace, &root.to_le_bytes()))
+                .map_err(|error| error.to_string())?
+                .and_then(|row| NamespaceRow::from_row(root, &row));
+            if row.is_none_or(|row| row.end <= height) {
+                continue;
+            }
+            // ルートまでたどってつなぐ。どこかの名前を知らなければ出さない
+            let mut parts = Vec::new();
+            let mut at = id;
+            let full = loop {
+                let Some((parent, name)) = self
+                    .db
+                    .namespace_name(at)
+                    .map_err(|error| error.to_string())?
+                else {
+                    break None;
+                };
+                parts.push(String::from_utf8_lossy(&name).into_owned());
+                if parent == 0 {
+                    parts.reverse();
+                    break Some(parts.join("."));
+                }
+                at = parent;
+            };
+            if let Some(full) = full
+                && !names.contains(&full)
+            {
+                names.push(full);
+            }
+        }
+        Ok(Some(names))
     }
 
     fn state_path(

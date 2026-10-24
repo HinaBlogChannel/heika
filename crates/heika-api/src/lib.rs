@@ -6,7 +6,8 @@
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
-//! - `PUT /blocks`: 外で組んだブロックを受け取って、先端につながれば足し、ネットワークに流す（heika だけ）
+//! - `PUT /blocks`: 外で組んだブロック（16進の JSON か、`application/octet-stream` のバイト列）を受け取って、
+//!   先端につながれば足し、ネットワークに流す（heika だけ）
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
@@ -25,13 +26,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::Request;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     CONTENT_DISPOSITION, CONTENT_TYPE,
 };
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{Next, from_fn, map_response};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -300,13 +302,33 @@ async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Res
     }
 }
 
-/// 16進のブロックを受け取る。`PUT /transactions` と同じく、受け取ったら 202、受け取らなければ 409。足したかは
-/// あとでチェーンが決めるので、`/chain/info` かノードのログで見る
-async fn announce_block(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Response {
-    let result = match decode_hex(&body.payload) {
-        Some(bytes) => (api.node.submit_block)(bytes),
-        None => Err("payload が16進ではありません".to_owned()),
+/// ブロックを受け取る。本文は、`Content-Type` が `application/json` なら `PUT /transactions` と同じ16進の JSON、
+/// `application/octet-stream` ならブロックのバイト列そのまま。ほか（書いていないものも）は 415。受け取ったら 202、
+/// 受け取らなければ 409。足したかはあとでチェーンが決めるので、`/chain/info` かノードのログで見る
+async fn announce_block(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Response {
+    let media = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let bytes = match media.as_deref() {
+        Some("application/octet-stream") => Ok(body.to_vec()),
+        Some("application/json") => match Json::<AnnounceJson>::from_bytes(&body) {
+            Ok(Json(body)) => decode_hex(&body.payload).ok_or("payload が16進ではありません"),
+            Err(rejection) => return rejection.into_response(),
+        },
+        _ => {
+            return error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "UnsupportedMediaType",
+                "Content-Type は application/json か application/octet-stream にしてください"
+                    .to_owned(),
+            );
+        }
     };
+    let result = bytes
+        .map_err(str::to_owned)
+        .and_then(|bytes| (api.node.submit_block)(bytes));
     match result {
         Ok(()) => (
             StatusCode::ACCEPTED,
@@ -1183,6 +1205,49 @@ mod tests {
         let (status, _) = put_to(&received, "/blocks", r#"{"payload":"01XY"}"#).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
+    }
+
+    #[tokio::test]
+    async fn takes_raw_blocks_as_octet_stream() {
+        let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let put_raw = |content_type: &'static str, body: &'static [u8]| {
+            let app = router(snapshot(), node(submit(Arc::clone(&received))));
+            async move {
+                app.oneshot(
+                    Request::put("/blocks")
+                        .header("Content-Type", content_type)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+        };
+        assert_eq!(
+            put_raw("application/octet-stream", &[1, 2]).await,
+            StatusCode::ACCEPTED
+        );
+        // 頭の書き方の揺れ（大文字、引数付き）も同じに読む
+        assert_eq!(
+            put_raw("Application/Octet-Stream; charset=binary", &[1, 2]).await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            put_raw("application/octet-stream", &[10, 11, 3]).await,
+            StatusCode::CONFLICT
+        );
+        // JSON と書いてバイト列を送ったら、口に渡さない
+        assert!(put_raw("application/json", &[1, 2]).await.is_client_error());
+        // どちらでもないものは 415（JSON でも、Content-Type を書かなければ読まない）
+        assert_eq!(
+            put_raw("text/plain", br#"{"payload":"0102"}"#).await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            *received.lock().unwrap(),
+            [vec![1, 2], vec![1, 2], vec![10, 11, 3]]
+        );
     }
 
     #[tokio::test]

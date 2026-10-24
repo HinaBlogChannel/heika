@@ -743,6 +743,11 @@ impl Executor {
         Ok(self.importance_of(self.harvester(signer)?, height))
     }
 
+    /// `signer` の鍵でブロックを出したときに、報酬を受け取るアカウントのアドレス（リモートならメインアカウント）
+    pub fn harvester_address(&self, signer: &PublicKey) -> Result<[u8; 24], ExecError> {
+        Ok(self.harvester(signer)?.address)
+    }
+
     /// `signer` の鍵でブロックを出すアカウント。リモートなら、リンクしたメインアカウント
     fn harvester(&self, signer: &PublicKey) -> Result<&AccountState, ExecError> {
         let account = self

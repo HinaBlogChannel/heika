@@ -79,7 +79,15 @@ heika_node::driver::run_with_assemble(&manifest, &stopping, &memory, Arc::new(Pr
 
 - 設定の読み方とシグナルの受け方は、`src/main.rs` を見てください。`heika experimental peer start` と同じことをしています
 - 署名に要るネットワークの定数（generation hash seed など）は、`heika_node::driver::network_parameters(&manifest.spec)` で引けます。プライベートなネットワークなら、設定の `network.resources` から読みます
-- heika は crates.io に出していません。リポジトリの外から使うなら、`git = "https://github.com/HinaBlogChannel/heika"` で依存します。`Assemble` は 0.10.0 のあとに入りました
+- heika は crates.io に出していません。リポジトリの外から使うなら、リリースのタグで git に依存します。`Assemble` は 0.10.0 より後の版に入ります。そのタグの API の文書は、[Pages](https://hinablogchannel.github.io/heika/crates/) にあります
+
+  ```toml
+  [dependencies]
+  heika-chain = { git = "https://github.com/HinaBlogChannel/heika", tag = "<タグ>" }
+  heika-node = { git = "https://github.com/HinaBlogChannel/heika", tag = "<タグ>" }
+  ```
+
+  タグを付けないと master に依存することになり、文書とずれます
 
 ### 守ること
 

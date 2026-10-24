@@ -260,6 +260,36 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         common: u64,
         blocks: Vec<(Block, Vec<u8>)>,
     ) -> Result<(), ChainError> {
+        let old_tip = self.tip;
+        match self.replace(common, blocks, false).await? {
+            Replaced::Done => self.notify(Notice::Switched {
+                common,
+                old: old_tip,
+                new: self.tip,
+                peer,
+            }),
+            Replaced::Failed { message, penalty } => {
+                self.notify(Notice::PeerDropped {
+                    peer,
+                    message: format!(
+                        "ピア {} の枝に取り替えられないので、元の枝に戻してピアを外します: {message}",
+                        peer.0
+                    ),
+                });
+                self.forget_peer(peer, penalty);
+            }
+        }
+        Ok(())
+    }
+
+    /// 分かれ目 `common` から先を `blocks` に取り替えてみる。通って、スコアが元より真に高くなれば取り替えたまま
+    /// にする。そうでなければ元の枝に戻し、わけと、送ってきた相手への罰を返す。`pushed` は [`Self::accept`] に渡す
+    pub(super) async fn replace(
+        &mut self,
+        common: u64,
+        blocks: Vec<(Block, Vec<u8>)>,
+        pushed: bool,
+    ) -> Result<Replaced, ChainError> {
         let (old_tip, old_score) = (self.tip, self.executor.score().unwrap_or(0));
         let mut originals = Vec::new();
         for height in common + 1..=old_tip.height {
@@ -296,7 +326,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         // 枝が正しくないか、スコアが高くないなら罰する。こちらの都合で取り替えられなかったなら罰さない
         let mut penalty = Penalty::Failure;
         for (block, bytes) in blocks {
-            if let Err(error) = self.accept(&block, bytes, false).await {
+            if let Err(error) = self.accept(&block, bytes, pushed).await {
                 penalty = if is_invalid(&error) {
                     Penalty::Failure
                 } else {
@@ -308,31 +338,19 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         }
         let new_score = self.executor.score().unwrap_or(0);
         if failure.is_none() && new_score > old_score {
-            self.notify(Notice::Switched {
-                common,
-                old: old_tip,
-                new: self.tip,
-                peer,
-            });
-            return Ok(());
+            return Ok(Replaced::Done);
         }
-        self.notify(Notice::PeerDropped {
-            peer,
-            message: format!(
-                "ピア {} の枝に取り替えられないので、元の枝に戻してピアを外します: {}",
-                peer.0,
-                failure.unwrap_or_else(|| format!(
-                    "スコアが {new_score} で、元の {old_score} より高くない"
-                ))
-            ),
-        });
         self.rewind(common, &[]).await?;
         for bytes in originals {
             let block = Block::from_bytes(&bytes)?;
             self.accept(&block, bytes, false).await?;
         }
-        self.forget_peer(peer, penalty);
-        Ok(())
+        Ok(Replaced::Failed {
+            message: failure.unwrap_or_else(|| {
+                format!("スコアが {new_score} で、元の {old_score} より高くない")
+            }),
+            penalty,
+        })
     }
 
     /// DB とメモリの状態を高さ `common` まで巻き戻す。DB の `common` より上のブロックは消え、`orphans` は

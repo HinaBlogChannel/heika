@@ -29,6 +29,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use heika_packet::NodeRoles;
+use heika_store_redb::Searches;
 use serde::Deserialize;
 
 /// 読める設定の版
@@ -257,6 +258,17 @@ pub struct Storage {
     pub partial_state: Option<bool>,
     #[serde(default)]
     pub cache: Cache,
+    /// REST の検索のために作る検索表。書かなければ作らない
+    #[serde(default)]
+    pub search: Vec<Search>,
+}
+
+/// `storage.search` に書ける検索
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Search {
+    /// `/metadata` の検索（送り主、宛先、対象から）
+    Metadata,
 }
 
 /// `full` と `light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
@@ -285,6 +297,15 @@ impl Storage {
 
     pub fn partial_state(&self) -> bool {
         self.partial_state.unwrap_or(true)
+    }
+
+    /// 作る検索表
+    pub fn searches(&self) -> Searches {
+        self.search
+            .iter()
+            .fold(Searches::NONE, |searches, search| match search {
+                Search::Metadata => searches.union(Searches::METADATA),
+            })
     }
 }
 
@@ -604,5 +625,11 @@ spec:
         let storage = Manifest::parse(&archive).unwrap().spec.storage;
         assert_eq!(storage.retention().state, None);
         assert!(!storage.partial_state());
+        assert_eq!(storage.searches(), Searches::NONE);
+        // 検索表は名前で選ぶ。知らない名前は読めない
+        let search = format!("{MINIMAL}  storage:\n    search: [metadata]\n");
+        let storage = Manifest::parse(&search).unwrap().spec.storage;
+        assert_eq!(storage.searches(), Searches::METADATA);
+        assert!(Manifest::parse(&search.replace("metadata", "accounts")).is_err());
     }
 }

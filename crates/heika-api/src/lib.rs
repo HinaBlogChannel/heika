@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::Request;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     CONTENT_DISPOSITION, CONTENT_TYPE,
@@ -302,16 +302,21 @@ async fn announce(State(api): State<Api>, Json(body): Json<AnnounceJson>) -> Res
     }
 }
 
+/// `PUT /blocks` で受け取るブロックの大きさの上限。待ち受けの P2P で受け取る本体（`Push_Block`）とそろえる。
+/// 6,000 件の送金にそれぞれ 1024 バイトのメッセージと 255 個のモザイクを入れると、30 MB ほどになる
+pub const MAX_BLOCK_BYTES: usize = 32 * 1024 * 1024;
+
 /// ブロックを受け取る。本文は、`Content-Type` が `application/json` なら `PUT /transactions` と同じ16進の JSON、
 /// `application/octet-stream` ならブロックのバイト列そのまま。ほか（書いていないものも）は 415。受け取ったら 202、
-/// 受け取らなければ 409。足したかはあとでチェーンが決めるので、`/chain/info` かノードのログで見る
+/// 受け取らなければ 409。ブロックが [`MAX_BLOCK_BYTES`]（JSON なら16進でその倍）を超えれば 413。足したかは
+/// あとでチェーンが決めるので、`/chain/info` かノードのログで見る
 async fn announce_block(State(api): State<Api>, headers: HeaderMap, body: Bytes) -> Response {
     let media = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .map(|value| value.trim().to_ascii_lowercase());
-    let bytes = match media.as_deref() {
+    let bytes: Result<Vec<u8>, &str> = match media.as_deref() {
         Some("application/octet-stream") => Ok(body.to_vec()),
         Some("application/json") => match Json::<AnnounceJson>::from_bytes(&body) {
             Ok(Json(body)) => decode_hex(&body.payload).ok_or("payload が16進ではありません"),
@@ -326,6 +331,16 @@ async fn announce_block(State(api): State<Api>, headers: HeaderMap, body: Bytes)
             );
         }
     };
+    if bytes
+        .as_ref()
+        .is_ok_and(|bytes| bytes.len() > MAX_BLOCK_BYTES)
+    {
+        return error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "PayloadTooLarge",
+            format!("ブロックは {MAX_BLOCK_BYTES} バイトまでです"),
+        );
+    }
     let result = bytes
         .map_err(str::to_owned)
         .and_then(|bytes| (api.node.submit_block)(bytes));
@@ -598,7 +613,13 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/heika/delegations", get(delegations))
         .route("/heika/sourcecode.zip", get(source_code))
         .route("/transactions", put(announce).options(preflight))
-        .route("/blocks", put(announce_block).options(preflight))
+        .route(
+            "/blocks",
+            put(announce_block)
+                .options(preflight)
+                // 16進の JSON は倍になる。JSON の囲みの分だけ少し足す
+                .layer(DefaultBodyLimit::max(2 * MAX_BLOCK_BYTES + 1024)),
+        )
         .route(
             "/transactions/partial",
             put(announce_partial)
@@ -1205,6 +1226,51 @@ mod tests {
         let (status, _) = put_to(&received, "/blocks", r#"{"payload":"01XY"}"#).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(*received.lock().unwrap(), [vec![1, 2], vec![10, 11, 3]]);
+    }
+
+    #[tokio::test]
+    async fn takes_blocks_up_to_the_p2p_size() {
+        let received: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let put_body = |content_type: &'static str, body: Vec<u8>| {
+            let app = router(snapshot(), node(submit(Arc::clone(&received))));
+            async move {
+                app.oneshot(
+                    Request::put("/blocks")
+                        .header("Content-Type", content_type)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+        };
+        let octets = "application/octet-stream";
+        // axum の既定（2 MB）より大きくても、上限までは口に渡す
+        assert_eq!(
+            put_body(octets, vec![0; MAX_BLOCK_BYTES]).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            put_body(octets, vec![0; MAX_BLOCK_BYTES + 1]).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let json = |size: usize| format!(r#"{{"payload":"{}"}}"#, "00".repeat(size)).into_bytes();
+        assert_eq!(
+            put_body("application/json", json(MAX_BLOCK_BYTES)).await,
+            StatusCode::CONFLICT
+        );
+        // 本文の上限の内でも、戻したブロックが上限を超えれば 413
+        assert_eq!(
+            put_body("application/json", json(MAX_BLOCK_BYTES + 1)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            put_body("application/json", json(MAX_BLOCK_BYTES + 1024)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let sizes: Vec<usize> = received.lock().unwrap().iter().map(Vec::len).collect();
+        assert_eq!(sizes, [MAX_BLOCK_BYTES, MAX_BLOCK_BYTES]);
     }
 
     #[tokio::test]

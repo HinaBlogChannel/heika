@@ -492,7 +492,8 @@ pub struct MosaicNamesJson {
 /// `NamespaceMetaDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct NamespaceMetaJson {
-    /// 持ち主が替わって履歴になったものは `false`
+    /// 期限の高さ（`endHeight`。catapult は猶予の期間を足した高さを持つ）が今の高さより後なら `true`。
+    /// `false` のものは状態には残るが、状態の木からは外れている
     pub active: bool,
 }
 
@@ -609,7 +610,8 @@ pub struct RootNamespaceState {
 }
 
 impl RootNamespaceState {
-    /// `root_id` のルートと、その子を集める。持ち主が替わって履歴になったもの（`meta.active` が `false`）は除く。
+    /// `root_id` のルートと、その子を集める。期限（猶予を含む）が過ぎたもの（`meta.active` が `false`）は、状態の木に
+    /// ないので除く。
     pub fn collect(root_id: u64, entries: &[NamespaceInfo]) -> Result<Self, RestError> {
         let mut root = None;
         let mut children = Vec::new();

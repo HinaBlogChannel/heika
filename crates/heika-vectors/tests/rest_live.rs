@@ -503,7 +503,7 @@ fn rest_states_are_in_the_state_tree() {
         checked[1] += 1;
     }
 
-    // ネームスペース：symbol と、ルートの検索の最初のページ
+    // ネームスペース：symbol と、ルートの検索の最初のページ。期限（猶予を含む）が過ぎたものは木にないので除く
     let mut roots = vec![NamespaceId::from_full_name("symbol").unwrap().0];
     for entry in rest(origin, "/namespaces?registrationType=0&pageSize=10")["data"]
         .as_array()

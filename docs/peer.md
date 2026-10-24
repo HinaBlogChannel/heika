@@ -130,7 +130,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |
 | `/accounts/{accountId}` | アカウントの今の状態。ID はアドレス（Base32 か16進）か公開鍵 |
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
-| `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限が切れて猶予の間のものは `active` が `false`。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
+| `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限の高さ（`endHeight`。catapult と同じく、猶予の 30 日を足した高さ）を過ぎたものも、状態に残っていれば返し、`active` が `false`（状態の木からは外れている）。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
 | `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
 | `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。1件ごとの `id` は MongoDB の ID ではなく、その件の位置（送り主、種類、宛先、対象の ID、キーをつないだ16進）。前のページの最後の `id` を `offset` に渡すと、その次から返す。飛ばす分をなめないので、`pageNumber` で送るより深いページが速い。`?height=` はアーカイブだけで、ほかは 501 |
 | `/namespaces` | ネームスペースの検索。`storage.search` に `namespaces` があるときだけで、なければ 501。catapult の REST と同じく `ownerAddress`、`level0`、`registrationType`、`aliasType` で絞る。ページ送り、`id` と `offset`、アーカイブでの `?height=` はメタデータの検索と同じ（`id` は検索表のキーの16進で、同じ絞り込みの検索の `offset` にだけ渡せる） |

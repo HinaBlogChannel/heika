@@ -11,7 +11,7 @@
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
-//!   それぞれの `/merkle`: 今の状態と、状態の木の道
+//!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
@@ -77,18 +77,53 @@ pub type Shared = Arc<RwLock<Snapshot>>;
 /// わけを返す。ネットワークに流すのも、この口の仕事
 pub type Submit = Arc<dyn Fn(Vec<u8>) -> Result<(), String> + Send + Sync>;
 
-/// チェーンの中身を読む口。エラーはわけの文（500 で返す）
+/// 状態を答える `?height=` の高さ（`X-Heika-Height`）
+const HEIGHT_HEADER: &str = "x-heika-height";
+
+/// 状態を読めなかったわけ
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StateError {
+    /// まだその高さのブロックを実行していない
+    Ahead { height: u64, tip: u64 },
+    /// その高さの状態の履歴を持っていない（刈り込んだか、もともと残していない）
+    NoHistory { height: u64 },
+    /// 読めなかった。わけの文
+    Other(String),
+}
+
+impl From<String> for StateError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+/// チェーンの中身を読む口。エラーはわけの文（500 で返す）。
+///
+/// 状態を読む口の `at` は、そのブロックを実行したあとの状態を引く高さ。`None` なら今の状態
 pub trait Reader: Send + Sync {
-    /// アカウントの今の状態。なければ `None`
-    fn account(&self, address: &Address) -> Result<Option<AccountJson>, String>;
-    /// モザイクの定義の今の状態。なければ `None`
-    fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String>;
-    /// ネームスペース（ルートか子）の今の状態。なければ（期限と猶予が過ぎて消えたものも）`None`
-    fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String>;
-    /// メタデータの今の状態。`composite_hash` は1件を指すハッシュ。なければ `None`
-    fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String>;
+    /// アカウントの状態。なければ `None`
+    fn account(
+        &self,
+        address: &Address,
+        at: Option<u64>,
+    ) -> Result<Option<AccountJson>, StateError>;
+    /// モザイクの定義の状態。なければ `None`
+    fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError>;
+    /// ネームスペース（ルートか子）の状態。なければ（期限と猶予が過ぎて消えたものも）`None`
+    fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError>;
+    /// メタデータの状態。`composite_hash` は1件を指すハッシュ。なければ `None`
+    fn metadata(
+        &self,
+        composite_hash: &Hash256,
+        at: Option<u64>,
+    ) -> Result<Option<MetadataEntryJson>, StateError>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
-    fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String>;
+    fn state_path(
+        &self,
+        cache: SubCache,
+        key: &Hash256,
+        at: Option<u64>,
+    ) -> Result<MerkleStateInfo, StateError>;
     /// `height` のブロック。なければ（まだないか、刈り込んだか、その高さの根がもうなければ）`None`
     fn block(&self, height: u64) -> Result<Option<BlockInfo>, String>;
     /// トランザクションの行方。知らなければ `None`
@@ -398,6 +433,59 @@ fn invalid(message: String) -> Response {
     error(StatusCode::CONFLICT, "InvalidArgument", message)
 }
 
+/// 状態を読む口の `?height=`（heika だけ）。そのブロックを実行したあとの状態を引く。なければ今の状態
+#[derive(Debug, Default, serde::Deserialize)]
+struct AtQuery {
+    height: Option<String>,
+}
+
+impl AtQuery {
+    /// 引く高さ
+    fn at(&self) -> Result<Option<u64>, InvalidHeight> {
+        self.height
+            .as_deref()
+            .map(|height| block_height(height).ok_or(InvalidHeight))
+            .transpose()
+    }
+}
+
+/// `?height=` が読めない形（409）
+struct InvalidHeight;
+
+impl IntoResponse for InvalidHeight {
+    fn into_response(self) -> Response {
+        invalid("height has an invalid format".to_owned())
+    }
+}
+
+/// 状態を読んだものを返す。なければ 404、まだ届いていない高さなら 409、履歴を持っていない高さなら 410、
+/// 読めなければ 500。`?height=` で引いたら、答えに `X-Heika-Height` でその高さを添える。catapult はこのクエリを
+/// 知らずに今の状態を返すので、受け取った側はこのヘッダーで、その高さの答えかを見分けられる
+fn found_at<T: serde::Serialize>(
+    id: &str,
+    at: Option<u64>,
+    read: Result<Option<T>, StateError>,
+) -> Response {
+    let mut response = match read {
+        Ok(read) => found(id, Ok(read)),
+        Err(StateError::Ahead { height, tip }) => {
+            invalid(format!("height {height} is above the chain height {tip}"))
+        }
+        Err(StateError::NoHistory { height }) => error(
+            StatusCode::GONE,
+            "Gone",
+            format!("this node keeps no state history at height {height}"),
+        ),
+        Err(StateError::Other(message)) => found::<T>(id, Err(message)),
+    };
+    if let Some(height) = at {
+        response
+            .headers_mut()
+            .insert(HEIGHT_HEADER, HeaderValue::from(height));
+    }
+    response
+}
+
 /// 読んだものを返す。なければ 404、読めなければ 500
 fn found<T: serde::Serialize>(id: &str, read: Result<Option<T>, String>) -> Response {
     match read {
@@ -428,97 +516,160 @@ fn hex_id(id: &str) -> Option<u64> {
         .flatten()
 }
 
-async fn account(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn account(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(address) = account_address(&id, api.node.reader.network()) else {
         return invalid("accountId has an invalid format".to_owned());
     };
-    let read = api.node.reader.account(&address);
-    found(
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.account(&address, at);
+    found_at(
         &id,
+        at,
         read.map(|account| account.map(|account| AccountInfo { account })),
     )
 }
 
-async fn account_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn account_merkle(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(address) = account_address(&id, api.node.reader.network()) else {
         return invalid("accountId has an invalid format".to_owned());
     };
-    let key = patricia::address_key(&address);
-    found(
+    state_path(
+        &api,
         &id,
-        api.node
-            .reader
-            .state_path(SubCache::AccountState, &key)
-            .map(Some),
+        &query,
+        SubCache::AccountState,
+        patricia::address_key(&address),
     )
 }
 
-async fn mosaic(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn mosaic(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(mosaic_id) = hex_id(&id) else {
         return invalid("mosaicId has an invalid format".to_owned());
     };
-    let read = api.node.reader.mosaic(mosaic_id);
-    found(
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.mosaic(mosaic_id, at);
+    found_at(
         &id,
+        at,
         read.map(|mosaic| mosaic.map(|mosaic| MosaicInfo { mosaic })),
     )
 }
 
-async fn mosaic_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn mosaic_merkle(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(mosaic_id) = hex_id(&id) else {
         return invalid("mosaicId has an invalid format".to_owned());
     };
-    let key = patricia::id_key(mosaic_id);
-    found(
+    state_path(
+        &api,
         &id,
-        api.node.reader.state_path(SubCache::Mosaic, &key).map(Some),
+        &query,
+        SubCache::Mosaic,
+        patricia::id_key(mosaic_id),
     )
 }
 
-async fn namespace(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn namespace(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(namespace_id) = hex_id(&id) else {
         return invalid("namespaceId has an invalid format".to_owned());
     };
-    found(&id, api.node.reader.namespace(namespace_id))
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at(&id, at, api.node.reader.namespace(namespace_id, at))
 }
 
 /// catapult と同じく、ID をそのまま木のキーにする。子の ID は木にないので、ないことを示す道になる
-async fn namespace_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+async fn namespace_merkle(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(namespace_id) = hex_id(&id) else {
         return invalid("namespaceId has an invalid format".to_owned());
     };
-    let key = patricia::id_key(namespace_id);
-    found(
+    state_path(
+        &api,
         &id,
-        api.node
-            .reader
-            .state_path(SubCache::Namespace, &key)
-            .map(Some),
+        &query,
+        SubCache::Namespace,
+        patricia::id_key(namespace_id),
     )
 }
 
-async fn metadata(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+async fn metadata(
+    State(api): State<Api>,
+    Path(hash): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(composite_hash) = hash256(&hash) else {
         return invalid("compositeHash has an invalid format".to_owned());
     };
-    let read = api.node.reader.metadata(&composite_hash);
-    found(
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.metadata(&composite_hash, at);
+    found_at(
         &hash,
+        at,
         read.map(|entry| entry.map(|metadata_entry| MetadataInfo { metadata_entry })),
     )
 }
 
-async fn metadata_merkle(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+async fn metadata_merkle(
+    State(api): State<Api>,
+    Path(hash): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
     let Some(composite_hash) = hash256(&hash) else {
         return invalid("compositeHash has an invalid format".to_owned());
     };
-    let key = patricia::hash_key(&composite_hash);
-    found(
+    state_path(
+        &api,
         &hash,
-        api.node
-            .reader
-            .state_path(SubCache::Metadata, &key)
-            .map(Some),
+        &query,
+        SubCache::Metadata,
+        patricia::hash_key(&composite_hash),
+    )
+}
+
+/// 状態の木 `cache` の、根から `key` の葉への道を返す
+fn state_path(api: &Api, id: &str, query: &AtQuery, cache: SubCache, key: Hash256) -> Response {
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at(
+        id,
+        at,
+        api.node.reader.state_path(cache, &key, at).map(Some),
     )
 }
 
@@ -907,8 +1058,22 @@ mod tests {
         Address::from_public_key(&PublicKey([0x11; 32]), NetworkIdentifier::TESTNET)
     }
 
+    /// 偽の読み役は高さ 10 まで実行していて、5 より前の状態の履歴は持っていない
+    fn check_at(at: Option<u64>) -> Result<(), StateError> {
+        match at {
+            Some(height) if height > 10 => Err(StateError::Ahead { height, tip: 10 }),
+            Some(height) if height < 5 => Err(StateError::NoHistory { height }),
+            _ => Ok(()),
+        }
+    }
+
     impl Reader for FakeReader {
-        fn account(&self, address: &Address) -> Result<Option<AccountJson>, String> {
+        fn account(
+            &self,
+            address: &Address,
+            at: Option<u64>,
+        ) -> Result<Option<AccountJson>, StateError> {
+            check_at(at)?;
             if *address != known() {
                 return Ok(None);
             }
@@ -921,7 +1086,8 @@ mod tests {
             Ok(Some(AccountJson::from_state_bytes(&bytes).unwrap()))
         }
 
-        fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String> {
+        fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError> {
+            check_at(at)?;
             if id != CURRENCY {
                 return Ok(None);
             }
@@ -931,7 +1097,8 @@ mod tests {
             Ok(Some(MosaicStateJson::from_state_bytes(&bytes).unwrap()))
         }
 
-        fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String> {
+        fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
+            check_at(at)?;
             // ルート 0xA1 に子 0xB2 だけがある
             let mut bytes = vec![1, 0];
             bytes.extend_from_slice(&0xA1u64.to_le_bytes());
@@ -944,10 +1111,15 @@ mod tests {
             bytes.extend_from_slice(&0xB2u64.to_le_bytes());
             bytes.push(0);
             let state = heika_rest::state::RootNamespaceState::from_state_bytes(&bytes).unwrap();
-            Ok(state.info(id, 7).unwrap())
+            Ok(state.info(id, at.unwrap_or(10)).unwrap())
         }
 
-        fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String> {
+        fn metadata(
+            &self,
+            composite_hash: &Hash256,
+            at: Option<u64>,
+        ) -> Result<Option<MetadataEntryJson>, StateError> {
+            check_at(at)?;
             let key = heika_transaction::MetadataKey {
                 source_address: known(),
                 target_address: known(),
@@ -969,10 +1141,17 @@ mod tests {
             Ok(Some(MetadataEntryJson::from_state_bytes(&bytes).unwrap()))
         }
 
-        fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String> {
-            // 問い合わせた木とキーを、そのまま返して確かめる
+        fn state_path(
+            &self,
+            cache: SubCache,
+            key: &Hash256,
+            at: Option<u64>,
+        ) -> Result<MerkleStateInfo, StateError> {
+            check_at(at)?;
+            // 問い合わせた木とキーと高さを、そのまま返して確かめる
+            let height = at.map(|height| format!("@{height}")).unwrap_or_default();
             Ok(MerkleStateInfo {
-                raw: format!("{:02X}{key}", cache.index()),
+                raw: format!("{:02X}{key}{height}", cache.index()),
             })
         }
 
@@ -1051,11 +1230,15 @@ mod tests {
         }
     }
 
-    async fn get_status(path: &str) -> (StatusCode, serde_json::Value) {
-        let response = router(snapshot(), node(submit(Arc::default())))
+    async fn get_response(path: &str) -> Response {
+        router(snapshot(), node(submit(Arc::default())))
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn get_status(path: &str) -> (StatusCode, serde_json::Value) {
+        let response = get_response(path).await;
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
@@ -1100,6 +1283,68 @@ mod tests {
         assert_eq!(response.headers()[CONTENT_TYPE], "application/zip");
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"PK\x05\x06");
+    }
+
+    #[tokio::test]
+    async fn reads_states_at_a_height() {
+        // 高さを指定したら、答えにその高さを添える。指定しなければ添えない
+        let response = get_response("/mosaics/6BED913FA20223F8?height=7").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        let response = get_response("/mosaics/6BED913FA20223F8").await;
+        assert!(response.headers().get(HEIGHT_HEADER).is_none());
+        // 見つからなくても添える
+        let response = get_response("/mosaics/0000000000000001?height=7").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+
+        let address = known();
+        for path in [
+            format!("/accounts/{address}"),
+            "/mosaics/6BED913FA20223F8".to_owned(),
+            "/namespaces/00000000000000A1".to_owned(),
+            format!("/accounts/{address}/merkle"),
+            "/namespaces/00000000000000B2/merkle".to_owned(),
+        ] {
+            assert_eq!(
+                get_status(&format!("{path}?height=5")).await.0,
+                StatusCode::OK,
+                "{path}"
+            );
+            // まだ届いていない高さと、読めない形は 409、履歴を持っていない高さは 410
+            for height in ["11", "0", "x", "-1"] {
+                let (status, body) = get_status(&format!("{path}?height={height}")).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{path} {height}");
+                assert_eq!(body["code"], "InvalidArgument");
+            }
+            let (status, body) = get_status(&format!("{path}?height=4")).await;
+            assert_eq!(status, StatusCode::GONE, "{path}");
+            assert_eq!(body["code"], "Gone");
+        }
+
+        // 高さは読み役まで届く
+        let (_, body) = get_status("/mosaics/6BED913FA20223F8/merkle?height=6").await;
+        assert!(body["raw"].as_str().unwrap().ends_with("@6"));
+        let composite = heika_transaction::MetadataKey {
+            source_address: known(),
+            target_address: known(),
+            scoped_metadata_key: 1,
+            target_id: 0,
+            metadata_type: heika_transaction::MetadataType::Account,
+        }
+        .unique_key();
+        assert_eq!(
+            get_status(&format!("/metadata/{composite}?height=6"))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_status(&format!("/metadata/{composite}/merkle?height=4"))
+                .await
+                .0,
+            StatusCode::GONE
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@
 //! ブロックの9本の根は DB にしまっていないので、その高さの木の根のノードを読んで求め直す。差分が残っていない高さの
 //! ブロックは、根を出せないので返さない。
 //!
+//! 状態は、`?height=` で指定された高さのものも、DB に残した差分から引く（[`Db::at`]）。
+//!
 //! ネームスペースの行はルートごとなので、子の ID で引かれたら、どのルートの子かを ID から求められないぶん、
 //! ネームスペースの行を全部見て探す。
 //!
@@ -13,7 +15,7 @@
 
 use std::sync::Arc;
 
-use heika_api::PartialFilter;
+use heika_api::{PartialFilter, StateError};
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
 use heika_chain::store::EXECUTOR_META;
@@ -34,7 +36,7 @@ use heika_rest::state::{
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
 use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
-use heika_store_redb::{Db, DbError};
+use heika_store_redb::{At, Db, DbError};
 use heika_transaction::{Body, Transaction};
 
 use crate::recent::SharedRecent;
@@ -151,6 +153,46 @@ impl DbReader {
             .map_err(|error| error.to_string())
     }
 
+    /// 実行した高さ
+    fn executed(&self) -> Result<u64, String> {
+        match self
+            .db
+            .meta(EXECUTOR_META)
+            .map_err(|error| error.to_string())?
+        {
+            Some(meta) => height_of_meta(&meta).map_err(|error| error.to_string()),
+            None => Ok(0),
+        }
+    }
+
+    /// `at` の高さの状態を引く先と、その高さ（`None` なら今と、実行した高さ）
+    fn view(&self, at: Option<u64>) -> Result<(View, u64), StateError> {
+        let tip = self.executed()?;
+        let Some(height) = at else {
+            return Ok((View::Now, tip));
+        };
+        // 実行した高さより上を引くと、DB は今の値を返してしまう
+        if height > tip {
+            return Err(StateError::Ahead { height, tip });
+        }
+        match self.db.at(height) {
+            Ok(past) => Ok((View::At(Box::new(past)), height)),
+            Err(DbError::NoHistory { .. } | DbError::NotIndexed { .. }) => {
+                Err(StateError::NoHistory { height })
+            }
+            Err(error) => Err(StateError::Other(error.to_string())),
+        }
+    }
+
+    /// 状態の行。なければ `None`
+    fn row(&self, view: &View, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
+        match view {
+            View::Now => self.db.state_row(key),
+            View::At(past) => past.state(key),
+        }
+        .map_err(|error| StateError::Other(error.to_string()))
+    }
+
     /// 高さ `height` の状態の木 `cache` の根。差分が残っていなければ `None`
     fn root_at(&self, cache: SubCache, height: u64) -> Result<Option<Hash256>, String> {
         match self
@@ -163,6 +205,14 @@ impl DbReader {
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+/// 状態を引く先
+enum View {
+    /// 今の状態
+    Now,
+    /// ある高さのブロックを実行したあとの状態
+    At(Box<At>),
 }
 
 /// 行は、葉のバイト列からバージョンを除いたもの（モザイクとネームスペースは ID も除く）
@@ -185,53 +235,59 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl heika_api::Reader for DbReader {
-    fn account(&self, address: &Address) -> Result<Option<AccountJson>, String> {
-        let Some(row) = self
-            .db
-            .state_row(&row_key(SubCache::AccountState, &address.0))
-            .map_err(|error| error.to_string())?
-        else {
+    fn account(
+        &self,
+        address: &Address,
+        at: Option<u64>,
+    ) -> Result<Option<AccountJson>, StateError> {
+        let (view, _) = self.view(at)?;
+        let Some(row) = self.row(&view, &row_key(SubCache::AccountState, &address.0))? else {
             return Ok(None);
         };
         let account = decode_account_row(&row).map_err(|error| error.to_string())?;
-        AccountJson::from_state_bytes(&account.to_state_bytes(self.currency))
-            .map(Some)
-            .map_err(|error| error.to_string())
+        Ok(Some(
+            AccountJson::from_state_bytes(&account.to_state_bytes(self.currency))
+                .map_err(|error| error.to_string())?,
+        ))
     }
 
-    fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String> {
-        let Some(row) = self
-            .db
-            .state_row(&row_key(SubCache::Mosaic, &id.to_le_bytes()))
-            .map_err(|error| error.to_string())?
-        else {
+    fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError> {
+        let (view, _) = self.view(at)?;
+        let Some(row) = self.row(&view, &row_key(SubCache::Mosaic, &id.to_le_bytes()))? else {
             return Ok(None);
         };
-        MosaicStateJson::from_state_bytes(&state_bytes(&id.to_le_bytes(), &row))
-            .map(Some)
-            .map_err(|error| error.to_string())
+        Ok(Some(
+            MosaicStateJson::from_state_bytes(&state_bytes(&id.to_le_bytes(), &row))
+                .map_err(|error| error.to_string())?,
+        ))
     }
 
-    fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String> {
+    fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
+        let (view, height) = self.view(at)?;
         let root_bytes = |root_id: u64, row: &[u8]| state_bytes(&root_id.to_le_bytes(), row);
         let mut found = self
-            .db
-            .state_row(&row_key(SubCache::Namespace, &id.to_le_bytes()))
-            .map_err(|error| error.to_string())?
+            .row(&view, &row_key(SubCache::Namespace, &id.to_le_bytes()))?
             .map(|row| root_bytes(id, &row));
         if found.is_none() {
             // 子。ID のバイト列を含む行だけを読んで確かめる
             let needle = id.to_le_bytes();
             let mut rows = Vec::new();
-            self.db
-                .for_each_state_row(&[SubCache::Namespace.index() as u8], &mut |key, row| {
-                    if row.windows(8).any(|window| window == needle)
-                        && let Ok(root_id) = key[1..].try_into().map(u64::from_le_bytes)
-                    {
-                        rows.push(root_bytes(root_id, row));
-                    }
-                })
-                .map_err(|error| error.to_string())?;
+            let mut keep = |key: &[u8], row: &[u8]| {
+                if row.windows(8).any(|window| window == needle)
+                    && let Ok(root_id) = key[1..].try_into().map(u64::from_le_bytes)
+                {
+                    rows.push(root_bytes(root_id, row));
+                }
+            };
+            let prefix = [SubCache::Namespace.index() as u8];
+            match view {
+                View::Now => self.db.for_each_state_row(&prefix, &mut keep),
+                View::At(_) => self
+                    .db
+                    .state_rows_with_prefix_at(&prefix, height)
+                    .map(|past| past.iter().for_each(|(key, row)| keep(key, row))),
+            }
+            .map_err(|error| error.to_string())?;
             found = rows.into_iter().find(|bytes| {
                 RootNamespaceState::from_state_bytes(bytes)
                     .is_ok_and(|state| state.info(id, 0).is_ok_and(|info| info.is_some()))
@@ -240,39 +296,42 @@ impl heika_api::Reader for DbReader {
         let Some(bytes) = found else {
             return Ok(None);
         };
-        let height = match self
-            .db
-            .meta(EXECUTOR_META)
-            .map_err(|error| error.to_string())?
-        {
-            Some(meta) => height_of_meta(&meta).map_err(|error| error.to_string())?,
-            None => 0,
-        };
-        RootNamespaceState::from_state_bytes(&bytes)
+        Ok(RootNamespaceState::from_state_bytes(&bytes)
             .and_then(|state| state.info(id, height))
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?)
     }
 
-    fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String> {
-        let Some(row) = self
-            .db
-            .state_row(&row_key(SubCache::Metadata, &composite_hash.0))
-            .map_err(|error| error.to_string())?
-        else {
+    fn metadata(
+        &self,
+        composite_hash: &Hash256,
+        at: Option<u64>,
+    ) -> Result<Option<MetadataEntryJson>, StateError> {
+        let (view, _) = self.view(at)?;
+        let Some(row) = self.row(&view, &row_key(SubCache::Metadata, &composite_hash.0))? else {
             return Ok(None);
         };
-        MetadataEntryJson::from_state_bytes(&state_bytes(&[], &row))
-            .map(Some)
-            .map_err(|error| error.to_string())
+        Ok(Some(
+            MetadataEntryJson::from_state_bytes(&state_bytes(&[], &row))
+                .map_err(|error| error.to_string())?,
+        ))
     }
 
-    fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String> {
+    fn state_path(
+        &self,
+        cache: SubCache,
+        key: &Hash256,
+        at: Option<u64>,
+    ) -> Result<MerkleStateInfo, StateError> {
+        let (view, _) = self.view(at)?;
         let nodes = walk(key, |position| {
-            self.db
-                .trie_node(&node_key(cache.index() as u8, position))
-                .map_err(|error| error.to_string())?
-                .map(|bytes| decode_node(&bytes))
-                .transpose()
+            let key = node_key(cache.index() as u8, position);
+            match &view {
+                View::Now => self.db.trie_node(&key),
+                View::At(past) => past.trie_node(&key),
+            }
+            .map_err(|error| error.to_string())?
+            .map(|bytes| decode_node(&bytes))
+            .transpose()
         })?;
         let raw: Vec<u8> = nodes.iter().flat_map(TreeNode::encode).collect();
         Ok(MerkleStateInfo { raw: hex(&raw) })

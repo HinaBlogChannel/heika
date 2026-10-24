@@ -642,6 +642,35 @@ impl Db {
         past.get(key)
     }
 
+    /// `height` のブロックを実行したあとの状態と木のノードを、1つの読み取りで引くもの。
+    /// その高さの履歴がなければ [`DbError::NoHistory`]。実行した高さより上かは確かめない（今の値が返る）
+    pub fn at(&self, height: u64) -> Result<At, DbError> {
+        let transaction = self.begin_read()?;
+        Ok(At {
+            state: Past::open(&transaction, STATE_TABLES, height)?,
+            trie: Past::open(&transaction, TRIE_TABLES, height)?,
+        })
+    }
+
+    /// `height` のブロックを実行したあとの、キーが `prefix` で始まる状態の行。キーの順
+    pub fn state_rows_with_prefix_at(
+        &self,
+        prefix: &[u8],
+        height: u64,
+    ) -> Result<Vec<StateRow>, DbError> {
+        // `prefix` の次。全部が 0xFF なら上を区切らない
+        let mut end = prefix.to_vec();
+        while let Some(last) = end.pop() {
+            if last < 0xFF {
+                end.push(last + 1);
+                break;
+            }
+        }
+        let high = (!end.is_empty()).then_some(end);
+        let mut rows = self.state_rows_in(&[height], height, prefix, high.as_deref())?;
+        Ok(rows.pop().unwrap_or_default())
+    }
+
     /// `height` のブロックを実行したあとの、`key`（[`heika_state_transition::tree::node_key`]）の木のノード。なければ `None`。
     pub fn trie_node_at(&self, key: &[u8], height: u64) -> Result<Option<Vec<u8>>, DbError> {
         let transaction = self.begin_read()?;
@@ -1477,6 +1506,24 @@ impl Copier<'_> {
     }
 }
 
+/// 昔の高さの状態と木のノードを引くもの（[`Db::at`]）。開いたときの読み取りのまま、あとから書いたものは見えない
+pub struct At {
+    state: Past,
+    trie: Past,
+}
+
+impl At {
+    /// 状態の行。なければ `None`
+    pub fn state(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        self.state.get(key)
+    }
+
+    /// 木のノード。なければ `None`
+    pub fn trie_node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        self.trie.get(key)
+    }
+}
+
 /// 昔の高さの状態を引くための、開いた表
 struct Past {
     height: u64,
@@ -1933,6 +1980,47 @@ mod tests {
         assert_eq!(db.block(2).unwrap().as_deref(), Some(&b"two"[..]));
         assert_eq!(db.block(3).unwrap(), None);
         assert!(db.batch().is_err());
+    }
+
+    #[test]
+    fn reads_state_and_trie_of_one_height_together() {
+        let dir = TempDir::new();
+        let db = Db::open(&dir.0).unwrap();
+        assert!(matches!(db.at(1), Err(DbError::NoHistory { .. })));
+        let mut batch = db.batch().unwrap();
+        batch.start_history(1).unwrap();
+        batch.start_trie(1).unwrap();
+        batch
+            .set_state_at(
+                1,
+                [(&b"\x01a"[..], Some(&b"a1"[..])), (b"\x02z", Some(b"z1"))],
+            )
+            .unwrap();
+        batch.set_trie_at(1, [(b"n", Some(b"n1"))]).unwrap();
+        batch
+            .set_state_at(2, [(&b"\x01a"[..], None), (b"\x01b", Some(&b"b2"[..]))])
+            .unwrap();
+        batch.set_trie_at(2, [(b"n", Some(b"n2"))]).unwrap();
+        batch.commit().unwrap();
+
+        let at = db.at(1).unwrap();
+        assert_eq!(at.state(b"\x01a").unwrap().as_deref(), Some(&b"a1"[..]));
+        assert_eq!(at.state(b"\x01b").unwrap(), None);
+        assert_eq!(at.trie_node(b"n").unwrap().as_deref(), Some(&b"n1"[..]));
+        assert_eq!(
+            db.at(2).unwrap().trie_node(b"n").unwrap().as_deref(),
+            Some(&b"n2"[..])
+        );
+        assert!(matches!(db.at(0), Err(DbError::NoHistory { .. })));
+
+        // 前方一致は、消えた行も昔の高さなら返し、ほかの前方の行は返さない
+        let rows = |height| db.state_rows_with_prefix_at(b"\x01", height).unwrap();
+        assert_eq!(rows(1), vec![(b"\x01a".to_vec(), b"a1".to_vec())]);
+        assert_eq!(rows(2), vec![(b"\x01b".to_vec(), b"b2".to_vec())]);
+        assert_eq!(
+            db.state_rows_with_prefix_at(b"\x02", 2).unwrap(),
+            vec![(b"\x02z".to_vec(), b"z1".to_vec())]
+        );
     }
 
     #[test]

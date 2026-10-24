@@ -281,7 +281,7 @@ fn rebuilds_a_root_namespace_from_its_children() {
             &[ROOT, "0000000000000002"],
             json!({ "type": 1, "mosaicId": "6BED913FA20223F8" }),
         ),
-        // 履歴になったものと、別のルートのものは入れない
+        // 期限（猶予を含む）が過ぎて木から外れたものと、別のルートのものは入れない
         namespace(false, &[ROOT, "0000000000000005"], json!({ "type": 0 })),
         namespace(true, &["0000000000000007"], json!({ "type": 0 })),
     ]
@@ -335,7 +335,7 @@ fn rebuilds_a_root_namespace_from_its_children() {
     assert_eq!(child.namespace.owner_address, hex(&[0x68; 24]));
     assert_eq!(child.namespace.end_height, u64::MAX.to_string());
     assert_eq!(rebuilt.info(5, 100), Ok(None));
-    // 終わりの高さに届いたら（猶予の間）、まだ返すが active ではない
+    // 期限（猶予を含む）に届いたら、状態には残るので返すが active ではない
     assert!(!rebuilt.info(9, u64::MAX).unwrap().unwrap().meta.active);
 
     assert_eq!(

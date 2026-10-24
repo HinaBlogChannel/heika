@@ -127,7 +127,8 @@ pub trait Reader: Send + Sync {
     ) -> Result<Option<AccountJson>, StateError>;
     /// モザイクの定義の状態。なければ `None`
     fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError>;
-    /// ネームスペース（ルートか子）の状態。なければ（期限と猶予が過ぎて消えたものも）`None`
+    /// ネームスペース（ルートか子）の状態。なければ `None`。期限（猶予を含む）が過ぎても状態に残っていれば返し、
+    /// `active` が `false` になる（catapult の REST と同じ）
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError>;
     /// メタデータの状態。`composite_hash` は1件を指すハッシュ。なければ `None`
     fn metadata(

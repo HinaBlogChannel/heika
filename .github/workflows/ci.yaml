@@ -117,6 +117,7 @@ jobs:
             examples/web-vanitygen
             examples/sunboru-kusa
             examples/sunboru-kusa/discover
+            examples/instant-rebate
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -135,6 +136,12 @@ jobs:
           cd discover
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
+      - name: 即時還元を確かめる
+        working-directory: examples/instant-rebate
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
       # 公開ノードの一覧は、リポジトリに入れずにここで作る。Secrets を読めない実行では一覧なしで作り、遊ぶ人が REST を入れる
       - name: すんぼる草不可避に埋め込む公開ノードを探す
         working-directory: examples/sunboru-kusa/discover

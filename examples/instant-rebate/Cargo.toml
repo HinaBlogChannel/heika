@@ -1,0 +1,19 @@
+[package]
+name = "instant-rebate"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "即時還元。委任してくれた人のブロックの中で、受取先の分の一部をその人に返す"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+heika-chain = { path = "../../crates/heika-chain" }
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"

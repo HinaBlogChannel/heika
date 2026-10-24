@@ -130,12 +130,14 @@ pub trait Reader: Send + Sync {
         composite_hash: &Hash256,
         at: Option<u64>,
     ) -> Result<Option<MetadataEntryJson>, StateError>;
-    /// メタデータを `filter` で絞り、`page` の分を返す。検索表を作っていなければ `None`
+    /// メタデータを `filter` で絞り、`page` の分を返す。`at` なら、その高さにあったものとその高さの値。
+    /// 検索表を作っていなければ（`at` なら、昔の高さの分も作っていなければ）`None`
     fn search_metadata(
         &self,
         filter: &MetadataFilter,
         page: PageRequest,
-    ) -> Result<Option<Vec<MetadataEntryJson>>, String>;
+        at: Option<u64>,
+    ) -> Result<Option<Vec<MetadataEntryJson>>, StateError>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
     fn state_path(
         &self,
@@ -788,10 +790,15 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
         Ok(filter) => filter,
         Err(name) => return invalid(format!("{name} has an invalid format")),
     };
-    // 昔の高さの検索と、MongoDB の ID から続けるページ送りはしない
-    if query.height.is_some() {
-        return invalid("height is not supported for searches".to_owned());
-    }
+    let at = match (AtQuery {
+        height: query.height.clone(),
+    })
+    .at()
+    {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    // MongoDB の ID から続けるページ送りはしない
     if query.offset.is_some() {
         return invalid("offset is not supported; use pageNumber".to_owned());
     }
@@ -805,25 +812,36 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
         number: query.page_number.unwrap_or(1).max(1),
         descending,
     };
-    match api.node.reader.search_metadata(&filter, page) {
-        Ok(Some(entries)) => Json(Page {
-            data: entries
-                .into_iter()
-                .map(|metadata_entry| MetadataInfo { metadata_entry })
-                .collect(),
-            pagination: Pagination {
-                page_number: page.number,
-                page_size: page.size,
-            },
-        })
-        .into_response(),
-        Ok(None) => error(
+    let read = api.node.reader.search_metadata(&filter, page, at);
+    if let Ok(None) = read {
+        let what = if at.is_some() {
+            "at past heights (storage.search on an archive node)"
+        } else {
+            "(storage.search)"
+        };
+        return error(
             StatusCode::NOT_IMPLEMENTED,
             "NotImplemented",
-            "this node does not keep the metadata search (storage.search)".to_owned(),
-        ),
-        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+            format!("this node does not keep the metadata search {what}"),
+        );
     }
+    // 見つからなくても空のページを返すので、404 にはならない
+    found_at(
+        "metadata",
+        at,
+        read.map(|entries| {
+            entries.map(|entries| Page {
+                data: entries
+                    .into_iter()
+                    .map(|metadata_entry| MetadataInfo { metadata_entry })
+                    .collect(),
+                pagination: Pagination {
+                    page_number: page.number,
+                    page_size: page.size,
+                },
+            })
+        }),
+    )
 }
 
 async fn partial_transactions(
@@ -1275,9 +1293,11 @@ mod tests {
             &self,
             filter: &MetadataFilter,
             page: PageRequest,
-        ) -> Result<Option<Vec<MetadataEntryJson>>, String> {
-            // 対象の ID 0xDEAD は、検索表を作っていないことにする
-            if filter.target_id == Some(0xDEAD) {
+            at: Option<u64>,
+        ) -> Result<Option<Vec<MetadataEntryJson>>, StateError> {
+            check_at(at)?;
+            // 対象の ID 0xDEAD は、検索表を作っていないことにする。高さ 6 は、昔の高さの分を作っていないことにする
+            if filter.target_id == Some(0xDEAD) || at == Some(6) {
                 return Ok(None);
             }
             // 絞り込みとページが届いたことを、返す件数と値で確かめる。送り主が known() なら1件、ほかの送り主なら 0 件、
@@ -1288,7 +1308,12 @@ mod tests {
                 None => page.size,
             };
             let entry = self.metadata(&metadata_composite(), None).unwrap().unwrap();
-            let value = format!("{}{}", page.number, if page.descending { "d" } else { "" });
+            let value = format!(
+                "{}{}{}",
+                page.number,
+                if page.descending { "d" } else { "" },
+                at.map(|height| format!("@{height}")).unwrap_or_default()
+            );
             Ok(Some(vec![
                 MetadataEntryJson {
                     value: value.clone(),
@@ -1472,7 +1497,8 @@ mod tests {
             "scopedMetadataKey=12".to_owned(),
             "targetId=xyz".to_owned(),
             "order=up".to_owned(),
-            "height=5".to_owned(),
+            "height=0".to_owned(),
+            "height=11".to_owned(),
             "offset=6962CF6A2976BBB47C1054BC".to_owned(),
         ] {
             let (status, body) = get_status(&format!("/metadata?{query}")).await;
@@ -1481,9 +1507,20 @@ mod tests {
         }
 
         // 検索表を作っていなければ 501
-        let (status, body) = get_status("/metadata?targetId=000000000000DEAD").await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(body["code"], "NotImplemented");
+        for query in ["targetId=000000000000DEAD", "height=6"] {
+            let (status, body) = get_status(&format!("/metadata?{query}")).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{query}");
+            assert_eq!(body["code"], "NotImplemented");
+        }
+
+        // 昔の高さは読み役まで届き、その高さを添える。差分を持っていなければ 410
+        let response = get_response("/metadata?height=7").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"][0]["metadataEntry"]["value"], "1@7");
+        assert_eq!(get_status("/metadata?height=4").await.0, StatusCode::GONE);
     }
 
     #[tokio::test]

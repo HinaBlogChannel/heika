@@ -95,7 +95,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 
 `storage.partialState` は、アカウントの表を全部はメモリに持たずに要るものだけを読むかで、`light` ではいつも真、ほかは書かなければ真。`storage.cache.stateMegabytes`（既定 64）と `storage.cache.databaseMegabytes`（既定 256）で、読んだ状態と DB のキャッシュの量を決める。
 
-`storage.search` に名前を並べると、REST の検索のための検索表を DB に作る（たとえば `search: [metadata]`）。書かなければ作らないので、ライトの軽さはそのまま。今の状態の行を別の切り口で並べ直しただけのもので、ブロックと同じ書き込みで直し、巻き戻しでは状態の差分から戻す。途中で足せば、起動したときに今の状態の行から作る（メインネットのメタデータ 12 万件なら数秒）。外せば、その行を消す（詰め直すなら `peer copy`）。今の状態だけを映すので、昔の高さの検索はできない。
+`storage.search` に名前を並べると、REST の検索のための検索表を DB に作る（たとえば `search: [metadata]`）。書かなければ作らないので、ライトの軽さはそのまま。今の状態の行を別の切り口で並べ直しただけのもので、ブロックと同じ書き込みで直し、巻き戻しでは状態の差分から戻す。途中で足せば、起動したときに今の状態の行から作る（メインネットのメタデータ 12 万件なら数秒）。外せば、その行を消す（詰め直すなら `peer copy`）。`storage.mode: archive` なら、検索表から消えたキーも残し、`?height=` 付きで昔の高さでも検索できる（候補を両方の表から取り、その高さの状態の行で確かめる）。アーカイブで途中から足せば、状態の差分の前の値から作る。ほかの残し方では、今の状態だけを検索できる。
 
 | 名前 | 答える検索 |
 |---|---|
@@ -129,7 +129,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
 | `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限が切れて猶予の間のものは `active` が `false`。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
 | `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
-| `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。MongoDB の `id` は返さず、`offset` と `height` は 409 |
+| `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。MongoDB の `id` は返さず、`offset` は 409。`?height=` はアーカイブだけで、ほかは 501 |
 | `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |

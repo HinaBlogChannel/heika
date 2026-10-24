@@ -124,6 +124,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
+| `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |
 | `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロックに入っていれば `confirmed` と高さ |
 | `/transactions/confirmed/{hash}` | 直近のブロックに入ったトランザクションと、入った高さ |
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |

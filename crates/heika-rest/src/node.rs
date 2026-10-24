@@ -1,5 +1,5 @@
 //! ノードとチェーンの様子。`/node/info`、`/node/peers`、`/chain/info`、`/node/unlockedaccount`、`/node/server`、`/node/health`、
-//! `/network` が返す JSON と、heika だけの
+//! `/network`、`/network/properties` が返す JSON と、heika だけの
 //! `/heika/delegations`（委任の様子）と、`PUT /transactions` の本文と答え。
 //!
 //! catapult の REST の `NodeInfoDTO`、`ChainInfoDTO`、`UnlockedAccountDTO` に合わせている。64ビットの数は、catapult の
@@ -31,6 +31,167 @@ pub struct NetworkJson {
     /// `mainnet`、`testnet` など
     pub name: String,
     pub description: String,
+}
+
+/// `NetworkConfigurationDTO`（`/network/properties`）。catapult の REST は、ノードの `config-network.properties` を
+/// そのまま返す。値は、ファイルに書いてあるとおりの文字列（`6h`、`0x6BED'913F'A202'23F8`、`10'000'000` など）で、
+/// `true` と `false` だけ真偽値にする。読む側は、桁の区切りの `'` を外して読む
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+pub struct NetworkPropertiesJson {
+    pub network: NetworkSectionJson,
+    pub chain: ChainSectionJson,
+    pub plugins: PluginsJson,
+}
+
+/// `[network]`
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSectionJson {
+    pub identifier: String,
+    pub nemesis_signer_public_key: String,
+    pub node_equality_strategy: String,
+    pub generation_hash_seed: String,
+    pub epoch_adjustment: String,
+}
+
+/// `[chain]`
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainSectionJson {
+    pub enable_verifiable_state: bool,
+    pub enable_verifiable_receipts: bool,
+    pub currency_mosaic_id: String,
+    pub harvesting_mosaic_id: String,
+    pub block_generation_target_time: String,
+    pub block_time_smoothing_factor: String,
+    pub importance_grouping: String,
+    pub importance_activity_percentage: String,
+    pub max_difficulty_blocks: String,
+    pub default_dynamic_fee_multiplier: String,
+    pub max_transaction_lifetime: String,
+    pub max_block_future_time: String,
+    pub max_mosaic_atomic_units: String,
+    pub total_chain_importance: String,
+    pub min_harvester_balance: String,
+    pub max_harvester_balance: String,
+    pub min_voter_balance: String,
+    pub voting_set_grouping: String,
+    pub max_voting_keys_per_account: String,
+    pub min_voting_key_lifetime: String,
+    pub max_voting_key_lifetime: String,
+    pub harvest_beneficiary_percentage: String,
+    pub harvest_network_percentage: String,
+    #[serde(rename = "harvestNetworkFeeSinkAddressV1")]
+    pub harvest_network_fee_sink_address_v1: String,
+    pub harvest_network_fee_sink_address: String,
+    pub max_transactions_per_block: String,
+}
+
+/// `[plugin:catapult.plugins.*]`
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+pub struct PluginsJson {
+    pub accountlink: AccountLinkPluginJson,
+    pub aggregate: AggregatePluginJson,
+    pub lockhash: LockHashPluginJson,
+    pub locksecret: LockSecretPluginJson,
+    pub metadata: MetadataPluginJson,
+    pub mosaic: MosaicPluginJson,
+    pub multisig: MultisigPluginJson,
+    pub namespace: NamespacePluginJson,
+    pub restrictionaccount: AccountRestrictionPluginJson,
+    pub restrictionmosaic: MosaicRestrictionPluginJson,
+    pub transfer: TransferPluginJson,
+}
+
+/// 設定のない plugin を読み込ませるための、中身のない値
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+pub struct AccountLinkPluginJson {
+    pub dummy: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregatePluginJson {
+    pub max_transactions_per_aggregate: String,
+    pub max_cosignatures_per_aggregate: String,
+    pub enable_strict_cosignature_check: bool,
+    pub enable_bonded_aggregate_support: bool,
+    pub max_bonded_transaction_lifetime: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockHashPluginJson {
+    pub locked_funds_per_aggregate: String,
+    pub max_hash_lock_duration: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockSecretPluginJson {
+    pub max_secret_lock_duration: String,
+    pub min_proof_size: String,
+    pub max_proof_size: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataPluginJson {
+    pub max_value_size: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicPluginJson {
+    pub max_mosaics_per_account: String,
+    pub max_mosaic_duration: String,
+    pub max_mosaic_divisibility: String,
+    #[serde(rename = "mosaicRentalFeeSinkAddressV1")]
+    pub mosaic_rental_fee_sink_address_v1: String,
+    pub mosaic_rental_fee_sink_address: String,
+    pub mosaic_rental_fee: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultisigPluginJson {
+    pub max_multisig_depth: String,
+    pub max_cosignatories_per_account: String,
+    pub max_cosigned_accounts_per_account: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamespacePluginJson {
+    pub max_name_size: String,
+    pub max_child_namespaces: String,
+    pub max_namespace_depth: String,
+    pub min_namespace_duration: String,
+    pub max_namespace_duration: String,
+    pub namespace_grace_period_duration: String,
+    #[serde(rename = "namespaceRentalFeeSinkAddressV1")]
+    pub namespace_rental_fee_sink_address_v1: String,
+    pub namespace_rental_fee_sink_address: String,
+    pub root_namespace_rental_fee_per_block: String,
+    pub child_namespace_rental_fee: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRestrictionPluginJson {
+    pub max_account_restriction_values: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicRestrictionPluginJson {
+    pub max_mosaic_restriction_values: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferPluginJson {
+    pub max_message_size: String,
 }
 
 /// `ServerInfoDTO`（`/node/server`）

@@ -511,6 +511,10 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     Arc::clone(recent),
                     Arc::clone(&partials),
                 )),
+                network_properties: Arc::new(crate::properties::network_properties(
+                    parameters,
+                    &setup.config,
+                )),
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {

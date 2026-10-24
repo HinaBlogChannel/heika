@@ -3,7 +3,8 @@
 use super::*;
 
 impl<S: ChainStore + StateSource> Chain<'_, S> {
-    /// 押し付けられたブロック。先端の次で先端につながり、同期の途中でないときだけ使う。時刻がまだ来ていなければ
+    /// 押し付けられたブロック。先端の次で先端につながり、同期の途中でないときだけ使う。先端と同じ親の上の別の
+    /// ブロックなら、[`Self::on_rival`] に回す。時刻がまだ来ていなければ
     /// （テストネットもメインネットも、ネットワークの時刻は UTC より数秒進んでいる）、来るまで1つだけ持っておく。
     /// ほかのもの（もう持っている高さ、枝の先、先の高さ）は、統計を聞いて追うのに任せる。弾いたら、押し付けた
     /// 鍵 `from` を待ち受けでしばらく受けない
@@ -14,6 +15,12 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         from: PublicKey,
     ) -> Result<(), ChainError> {
         let height = block.height;
+        if height == self.tip.height
+            && block.previous_block_hash == self.parent.previous_block_hash
+            && block.hash() != self.tip.hash
+        {
+            return self.on_rival(block, bytes, from).await;
+        }
         if height <= self.tip.height {
             let now = self.env.now();
             let late = self
@@ -56,6 +63,69 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             Ok(()) => self.pushes.used += 1,
             Err(error) => {
                 self.pushes.rejected += 1;
+                self.reject_push(height, from, &error);
+            }
+        }
+        Ok(())
+    }
+
+    /// 押し付けられた、先端と同じ親の上の別のブロック。catapult と同じく（`BlockchainSyncConsumer` の、押し付けで
+    /// 巻き戻してよいのは先端の 1 つだけ）、スコアが先端より真に高ければ先端と差し替える。巻き戻しは重いので、
+    /// 先に難易度とスコアをヘッダーだけで比べ、勝てないものは巻き戻さない。確定より下、同期の途中、時刻のまだ
+    /// 来ていないものは試さない（勝つものなら、統計を聞いて追うときに取り直す）
+    async fn on_rival(
+        &mut self,
+        block: Block,
+        bytes: Vec<u8>,
+        from: PublicKey,
+    ) -> Result<(), ChainError> {
+        let height = block.height;
+        let common = height - 1;
+        let grandparent = self.statistics.iter().rev().nth(1).copied();
+        let Some(grandparent) = grandparent.filter(|_| {
+            common >= self.finalized.height
+                && matches!(self.sync, Sync::Idle)
+                && self.not_yet(&block).is_none()
+        }) else {
+            self.pushes.rival_skipped += 1;
+            return Ok(());
+        };
+        match rival_verdict(
+            &grandparent,
+            &BlockStatistic::from(&self.parent),
+            &BlockStatistic::from(&block),
+        ) {
+            Verdict::WrongDifficulty => {
+                self.pushes.rival_rejected += 1;
+                let error = invalid(format!(
+                    "難易度が {} で、同じ親の上の先端の {} と違います",
+                    block.difficulty, self.parent.difficulty
+                ));
+                self.reject_push(height, from, &error);
+                return Ok(());
+            }
+            Verdict::Worse => {
+                self.pushes.rival_worse += 1;
+                return Ok(());
+            }
+            Verdict::Better => {}
+        }
+        let old = self.tip;
+        match self.replace(common, vec![(block, bytes)], true).await? {
+            Replaced::Done => {
+                self.pushes.replaced += 1;
+                self.progress(format!(
+                    "押し付けられた高さ {height} のブロックのほうがスコアが高いので、先端を差し替えました: {} → {}（鍵 {from}）",
+                    old.hash, self.tip.hash
+                ));
+            }
+            Replaced::Failed { message, penalty } => {
+                self.pushes.rival_rejected += 1;
+                let error = if penalty == Penalty::None {
+                    ChainError::from(message)
+                } else {
+                    invalid(message)
+                };
                 self.reject_push(height, from, &error);
             }
         }
@@ -136,5 +206,58 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         if counts.total() > 0 {
             self.progress(counts.to_string());
         }
+    }
+}
+
+/// 先端と同じ親の上の別のブロックを、ヘッダーだけで先端と比べた結果
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// スコアが先端より真に高い。当ててみる
+    Better,
+    /// スコアが先端より高くない
+    Worse,
+    /// 難易度は親までのブロックで決まるので、同じ親の上なら先端と同じはず。違えば規則に合わない
+    WrongDifficulty,
+}
+
+/// 親 `grandparent` の上の先端 `tip` と、同じ親の上の `rival` を比べる。難易度が同じなら、スコアの差は親からの
+/// 経過秒だけなので、時刻の早い方が勝つ（同じなら先端のまま）
+fn rival_verdict(
+    grandparent: &BlockStatistic,
+    tip: &BlockStatistic,
+    rival: &BlockStatistic,
+) -> Verdict {
+    if rival.difficulty != tip.difficulty {
+        Verdict::WrongDifficulty
+    } else if block_score(grandparent, rival) > block_score(grandparent, tip) {
+        Verdict::Better
+    } else {
+        Verdict::Worse
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn statistic(seconds: u64, difficulty: u64) -> BlockStatistic {
+        BlockStatistic {
+            timestamp: seconds * 1000,
+            difficulty,
+        }
+    }
+
+    #[test]
+    fn rival_wins_only_when_it_came_strictly_earlier() {
+        let grandparent = statistic(100, 90_000);
+        let tip = statistic(130, 100_000);
+        let verdict = |rival| rival_verdict(&grandparent, &tip, &rival);
+        assert_eq!(verdict(statistic(125, 100_000)), Verdict::Better);
+        // 同じ時刻なら、行ったり来たりしないように先端のまま
+        assert_eq!(verdict(statistic(130, 100_000)), Verdict::Worse);
+        assert_eq!(verdict(statistic(135, 100_000)), Verdict::Worse);
+        // 親より前の時刻はスコアが 0
+        assert_eq!(verdict(statistic(100, 100_000)), Verdict::Worse);
+        assert_eq!(verdict(statistic(125, 100_001)), Verdict::WrongDifficulty);
     }
 }

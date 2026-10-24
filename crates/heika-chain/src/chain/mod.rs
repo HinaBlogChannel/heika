@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use heika_block::Block;
 use heika_block::finalization::proof::{VotingSet, closes_epoch, proof_header, verify_proof};
 use heika_block::finalization::{FinalizationRound, FinalizedBlockHeader};
-use heika_block::scoring::{BlockStatistic, difficulty};
+use heika_block::scoring::{BlockStatistic, block_score, difficulty};
 use heika_block::statement::BlockStatement;
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
@@ -520,6 +520,14 @@ struct PushCounts {
     rejected_late: u64,
     /// 時刻がまだ来ていないが、もう 1 つ持っていたので捨てた
     future: u64,
+    /// 先端と同じ親の上の別のブロックで、スコアが高いので先端と差し替えた
+    replaced: u64,
+    /// 先端と同じ親の上の別のブロックだが、スコアが先端より高くない
+    rival_worse: u64,
+    /// 先端と同じ親の上の別のブロックで、スコアは高いが、弾いた
+    rival_rejected: u64,
+    /// 先端と同じ親の上の別のブロックだが、確定より下か、同期の途中か、時刻がまだなので試さなかった
+    rival_skipped: u64,
 }
 
 impl PushCounts {
@@ -532,6 +540,12 @@ impl PushCounts {
             + self.ahead
             + self.held
             + self.future
+            + self.rivals()
+    }
+
+    /// 先端と同じ親の上の別のブロックの数
+    fn rivals(&self) -> u64 {
+        self.replaced + self.rival_worse + self.rival_rejected + self.rival_skipped
     }
 }
 
@@ -562,7 +576,19 @@ impl fmt::Display for PushCounts {
             self.syncing,
             self.unlinked,
             self.ahead
-        )
+        )?;
+        if self.rivals() > 0 {
+            write!(
+                f,
+                "、先端と競う {}（差し替えた {}、スコアが高くない {}、弾いた {}、試さなかった {}）",
+                self.rivals(),
+                self.replaced,
+                self.rival_worse,
+                self.rival_rejected,
+                self.rival_skipped
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -597,6 +623,14 @@ impl std::error::Error for Invalid {}
 
 fn invalid(error: impl Into<ChainError>) -> ChainError {
     Box::new(Invalid(error.into()))
+}
+
+/// 枝を取り替えてみた結果（[`Chain::replace`]）
+enum Replaced {
+    /// 取り替えた
+    Done,
+    /// 元の枝に戻した。`penalty` は、枝を送ってきた相手への罰
+    Failed { message: String, penalty: Penalty },
 }
 
 fn is_invalid(error: &ChainError) -> bool {

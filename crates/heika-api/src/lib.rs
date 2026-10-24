@@ -13,6 +13,8 @@
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
 //! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
+//! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
+//!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
@@ -38,7 +40,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{Next, from_fn, map_response};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
@@ -55,8 +57,8 @@ use heika_rest::node::{
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
-    AccountInfo, AccountJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicStateJson,
-    NamespaceInfo,
+    AccountInfo, AccountJson, AccountNamesJson, MetadataEntryJson, MetadataInfo, MosaicInfo,
+    MosaicNamesJson, MosaicStateJson, NamespaceInfo, NamespaceNameJson,
 };
 use heika_rest::transaction::TransactionInfo;
 
@@ -88,6 +90,8 @@ pub enum StateError {
     Ahead { height: u64, tip: u64 },
     /// その高さの状態の履歴を持っていない（刈り込んだか、もともと残していない）
     NoHistory { height: u64 },
+    /// 頼み方が読めない（409）。わけの文
+    Invalid(String),
     /// 読めなかった。わけの文
     Other(String),
 }
@@ -99,6 +103,7 @@ impl std::fmt::Display for StateError {
                 write!(f, "高さ {height} は、実行した高さ {tip} より上です")
             }
             Self::NoHistory { height } => write!(f, "高さ {height} の状態の差分を持っていません"),
+            Self::Invalid(message) => f.write_str(message),
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -140,6 +145,21 @@ pub trait Reader: Send + Sync {
         after: Option<&MetadataPosition>,
         at: Option<u64>,
     ) -> Result<Option<Vec<MetadataEntryJson>>, StateError>;
+    /// ネームスペースを `filter` で絞り、`page` の分を、位置（検索表のキーの16進）と組で返す。`after` があれば、
+    /// 並びでその位置（前に返した位置のバイト列）より後から。`at` なら、その高さにあったものとその高さの状態。
+    /// 検索表を作っていなければ（`at` なら、昔の高さの分も作っていなければ）`None`
+    fn search_namespaces(
+        &self,
+        filter: &NamespaceFilter,
+        page: PageRequest,
+        after: Option<&[u8]>,
+        at: Option<u64>,
+    ) -> Result<Option<Vec<(String, NamespaceInfo)>>, StateError>;
+    /// ネームスペースの名前（自分の部分）と親の ID（ルートは `None`）。`ids` と、その親を全部。登録を見ていないものは
+    /// 返さない。名前の表を作っていなければ `None`
+    fn namespace_names(&self, ids: &[u64]) -> Result<Option<Vec<NamespaceNameJson>>, String>;
+    /// `target` を別名にしている、今有効なネームスペースの名前（ルートからつないだもの）。名前の表を作っていなければ `None`
+    fn alias_names(&self, target: AliasTarget) -> Result<Option<Vec<String>>, String>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
     fn state_path(
         &self,
@@ -178,6 +198,43 @@ pub struct MetadataFilter {
     pub target_id: Option<u64>,
     pub metadata_type: Option<u8>,
 }
+
+/// ネームスペースの検索の絞り込み（catapult の REST の `/namespaces` と同じ意味）。全部を満たすものを返す
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamespaceFilter {
+    pub owner: Option<Address>,
+    /// ルートの ID。そのルートと子
+    pub level0: Option<u64>,
+    /// 0 ならルート、1 なら子
+    pub registration_type: Option<u8>,
+    /// 0 なら別名なし、1 ならモザイク、2 ならアドレス
+    pub alias_type: Option<u8>,
+}
+
+/// 別名の向かう先
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasTarget {
+    Address(Address),
+    Mosaic(u64),
+}
+
+/// `/namespaces` のクエリ文字列
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamespaceQuery {
+    owner_address: Option<String>,
+    level0: Option<String>,
+    registration_type: Option<u8>,
+    alias_type: Option<u8>,
+    page_size: Option<usize>,
+    page_number: Option<usize>,
+    order: Option<String>,
+    offset: Option<String>,
+    height: Option<String>,
+}
+
+/// 名前を引く口に、1回で頼める数
+const MAX_NAME_IDS: usize = 100;
 
 /// メタデータの検索の、1件の位置（[`MetadataEntryJson::position`] を読んだもの）。ページ送りの `offset`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,6 +620,7 @@ fn found_at<T: serde::Serialize>(
             "Gone",
             format!("this node keeps no state history at height {height}"),
         ),
+        Err(StateError::Invalid(message)) => invalid(message),
         Err(StateError::Other(message)) => found::<T>(id, Err(message)),
     };
     if let Some(height) = at {
@@ -839,31 +897,16 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
         Some(Some(position)) => Some(position),
         Some(None) => return invalid("offset has an invalid format".to_owned()),
     };
-    let descending = match query.order.as_deref() {
-        None | Some("asc") => false,
-        Some("desc") => true,
-        Some(_) => return invalid("order has an invalid format".to_owned()),
-    };
-    let page = PageRequest {
-        size: query.page_size.unwrap_or(10).clamp(10, 100),
-        number: query.page_number.unwrap_or(1).max(1),
-        descending,
+    let page = match page_request(query.order.as_deref(), query.page_size, query.page_number) {
+        Ok(page) => page,
+        Err(message) => return invalid(message),
     };
     let read = api
         .node
         .reader
         .search_metadata(&filter, page, after.as_ref(), at);
     if let Ok(None) = read {
-        let what = if at.is_some() {
-            "at past heights (storage.search on an archive node)"
-        } else {
-            "(storage.search)"
-        };
-        return error(
-            StatusCode::NOT_IMPLEMENTED,
-            "NotImplemented",
-            format!("this node does not keep the metadata search {what}"),
-        );
+        return search_not_kept("metadata", at);
     }
     // 見つからなくても空のページを返すので、404 にはならない
     found_at(
@@ -885,6 +928,200 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
             })
         }),
     )
+}
+
+/// 一覧の並びとページ。読めなければ、409 で返すわけ
+fn page_request(
+    order: Option<&str>,
+    size: Option<usize>,
+    number: Option<usize>,
+) -> Result<PageRequest, String> {
+    let descending = match order {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(_) => return Err("order has an invalid format".to_owned()),
+    };
+    Ok(PageRequest {
+        size: size.unwrap_or(10).clamp(10, 100),
+        number: number.unwrap_or(1).max(1),
+        descending,
+    })
+}
+
+/// 検索表を作っていないときの 501
+fn search_not_kept(what: &str, at: Option<u64>) -> Response {
+    let scope = if at.is_some() {
+        "at past heights (storage.search on an archive node)"
+    } else {
+        "(storage.search)"
+    };
+    error(
+        StatusCode::NOT_IMPLEMENTED,
+        "NotImplemented",
+        format!("this node does not keep the {what} search {scope}"),
+    )
+}
+
+async fn search_namespaces(
+    State(api): State<Api>,
+    Query(query): Query<NamespaceQuery>,
+) -> Response {
+    let network = api.node.reader.network();
+    let owner = match query.owner_address.as_deref() {
+        None => None,
+        Some(id) => match address_only(id, network) {
+            Some(address) => Some(address),
+            None => return invalid("ownerAddress has an invalid format".to_owned()),
+        },
+    };
+    let level0 = match query.level0.as_deref() {
+        None => None,
+        Some(id) => match hex_id(id) {
+            Some(id) => Some(id),
+            None => return invalid("level0 has an invalid format".to_owned()),
+        },
+    };
+    let at = match (AtQuery {
+        height: query.height.clone(),
+    })
+    .at()
+    {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    // 前のページの最後の件の `id` から続ける
+    let after = match query.offset.as_deref().map(decode_hex) {
+        None => None,
+        Some(Some(after)) if !after.is_empty() => Some(after),
+        Some(_) => return invalid("offset has an invalid format".to_owned()),
+    };
+    let page = match page_request(query.order.as_deref(), query.page_size, query.page_number) {
+        Ok(page) => page,
+        Err(message) => return invalid(message),
+    };
+    let filter = NamespaceFilter {
+        owner,
+        level0,
+        registration_type: query.registration_type,
+        alias_type: query.alias_type,
+    };
+    let read = api
+        .node
+        .reader
+        .search_namespaces(&filter, page, after.as_deref(), at);
+    if let Ok(None) = read {
+        return search_not_kept("namespace", at);
+    }
+    found_at(
+        "namespaces",
+        at,
+        read.map(|entries| {
+            entries.map(|entries| Page {
+                data: entries
+                    .into_iter()
+                    .map(|(id, info)| NamespaceInfo {
+                        id: Some(id),
+                        ..info
+                    })
+                    .collect(),
+                pagination: Pagination {
+                    page_number: page.number,
+                    page_size: page.size,
+                },
+            })
+        }),
+    )
+}
+
+/// `POST /namespaces/names` などの本文。catapult の REST と同じ名前
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamesBody {
+    namespace_ids: Option<Vec<String>>,
+    addresses: Option<Vec<String>>,
+    mosaic_ids: Option<Vec<String>>,
+}
+
+/// 本文の ID の並び。なければ、多すぎれば、読めなければ、409 で返すわけ
+fn name_ids<T>(
+    values: Option<&[String]>,
+    name: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, String> {
+    let values = values.ok_or_else(|| format!("{name} is missing"))?;
+    if values.len() > MAX_NAME_IDS {
+        return Err(format!("{name} has more than {MAX_NAME_IDS} items"));
+    }
+    values
+        .iter()
+        .map(|value| parse(value).ok_or_else(|| format!("{name} has an invalid format")))
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountNamesPage {
+    account_names: Vec<AccountNamesJson>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MosaicNamesPage {
+    mosaic_names: Vec<MosaicNamesJson>,
+}
+
+fn names_response<T: serde::Serialize>(read: Result<Option<T>, String>) -> Response {
+    match read {
+        Ok(Some(value)) => Json(value).into_response(),
+        Ok(None) => search_not_kept("namespace name", None),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+    }
+}
+
+async fn namespace_names(State(api): State<Api>, Json(body): Json<NamesBody>) -> Response {
+    match name_ids(body.namespace_ids.as_deref(), "namespaceIds", hex_id) {
+        Ok(ids) => names_response(api.node.reader.namespace_names(&ids)),
+        Err(message) => invalid(message),
+    }
+}
+
+async fn account_names(State(api): State<Api>, Json(body): Json<NamesBody>) -> Response {
+    let network = api.node.reader.network();
+    let addresses = match name_ids(body.addresses.as_deref(), "addresses", |id| {
+        address_only(id, network)
+    }) {
+        Ok(addresses) => addresses,
+        Err(message) => return invalid(message),
+    };
+    let mut out = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        match api.node.reader.alias_names(AliasTarget::Address(address)) {
+            Ok(Some(names)) => out.push(AccountNamesJson {
+                address: address.to_hex(),
+                names,
+            }),
+            other => return names_response(other.map(|_| None::<()>)),
+        }
+    }
+    Json(AccountNamesPage { account_names: out }).into_response()
+}
+
+async fn mosaic_names(State(api): State<Api>, Json(body): Json<NamesBody>) -> Response {
+    let ids = match name_ids(body.mosaic_ids.as_deref(), "mosaicIds", hex_id) {
+        Ok(ids) => ids,
+        Err(message) => return invalid(message),
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        match api.node.reader.alias_names(AliasTarget::Mosaic(id)) {
+            Ok(Some(names)) => out.push(MosaicNamesJson {
+                mosaic_id: format!("{id:016X}"),
+                names,
+            }),
+            other => return names_response(other.map(|_| None::<()>)),
+        }
+    }
+    Json(MosaicNamesPage { mosaic_names: out }).into_response()
 }
 
 async fn partial_transactions(
@@ -981,7 +1218,7 @@ async fn allow_any_origin(mut response: Response) -> Response {
     headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
     headers.insert(
         ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, PUT, OPTIONS"),
+        HeaderValue::from_static("GET, PUT, POST, OPTIONS"),
     );
     headers.insert(
         ACCESS_CONTROL_ALLOW_HEADERS,
@@ -1026,6 +1263,19 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/accounts/{id}/merkle", get(account_merkle))
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
+        .route("/namespaces", get(search_namespaces))
+        .route(
+            "/namespaces/names",
+            post(namespace_names).options(preflight),
+        )
+        .route(
+            "/namespaces/account/names",
+            post(account_names).options(preflight),
+        )
+        .route(
+            "/namespaces/mosaic/names",
+            post(mosaic_names).options(preflight),
+        )
         .route("/namespaces/{id}", get(namespace))
         .route("/namespaces/{id}/merkle", get(namespace_merkle))
         .route("/metadata", get(search_metadata))
@@ -1371,6 +1621,75 @@ mod tests {
             ]))
         }
 
+        fn search_namespaces(
+            &self,
+            filter: &NamespaceFilter,
+            page: PageRequest,
+            after: Option<&[u8]>,
+            at: Option<u64>,
+        ) -> Result<Option<Vec<(String, NamespaceInfo)>>, StateError> {
+            check_at(at)?;
+            // 別名の種類 9 は、検索表を作っていないことにする
+            if filter.alias_type == Some(9) {
+                return Ok(None);
+            }
+            // 位置は、持ち主の並べ方（先頭 4）のものだけを読む
+            if after.is_some_and(|after| after[0] != 4) {
+                return Err(StateError::Invalid(
+                    "offset is not of this search".to_owned(),
+                ));
+            }
+            let _ = page;
+            Ok(Some(
+                [0xA1, 0xB2]
+                    .into_iter()
+                    .filter(|&id| {
+                        filter
+                            .registration_type
+                            .is_none_or(|kind| kind == u8::from(id != 0xA1))
+                    })
+                    .map(|id| {
+                        let info = self.namespace(id, at).unwrap().unwrap();
+                        (format!("04{id:02X}"), info)
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn namespace_names(&self, ids: &[u64]) -> Result<Option<Vec<NamespaceNameJson>>, String> {
+            // 0xA1 は hina、0xB2 はその子の xym。親もたどって返す
+            let mut out = Vec::new();
+            for &id in ids {
+                if id == 0xB2 {
+                    out.push(NamespaceNameJson {
+                        id: "00000000000000B2".to_owned(),
+                        name: "xym".to_owned(),
+                        parent_id: Some("00000000000000A1".to_owned()),
+                    });
+                }
+                if id == 0xA1 || id == 0xB2 {
+                    out.push(NamespaceNameJson {
+                        id: "00000000000000A1".to_owned(),
+                        name: "hina".to_owned(),
+                        parent_id: None,
+                    });
+                }
+            }
+            Ok(Some(out))
+        }
+
+        fn alias_names(&self, target: AliasTarget) -> Result<Option<Vec<String>>, String> {
+            Ok(match target {
+                AliasTarget::Address(address) if address == known() => {
+                    Some(vec!["hina.xym".to_owned()])
+                }
+                // モザイク 0xDEAD は、名前の表を作っていないことにする
+                AliasTarget::Mosaic(0xDEAD) => None,
+                AliasTarget::Mosaic(CURRENCY) => Some(vec!["symbol.xym".to_owned()]),
+                _ => Some(Vec::new()),
+            })
+        }
+
         fn state_path(
             &self,
             cache: SubCache,
@@ -1581,6 +1900,134 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["data"][0]["metadataEntry"]["value"], "1@7");
         assert_eq!(get_status("/metadata?height=4").await.0, StatusCode::GONE);
+    }
+
+    async fn post(path: &str, body: &str) -> (StatusCode, serde_json::Value) {
+        let response = router(snapshot(), node(submit(Arc::default())))
+            .oneshot(
+                Request::post(path)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn searches_namespaces_and_their_names_like_catapult() {
+        let (status, body) = get_status("/namespaces").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        assert_eq!(body["data"][0]["id"], "04A1");
+        assert_eq!(body["data"][1]["namespace"]["parentId"], "00000000000000A1");
+        let (_, body) = get_status(&format!(
+            "/namespaces?registrationType=1&ownerAddress={}&level0=00000000000000A1",
+            known()
+        ))
+        .await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            get_status("/namespaces?offset=04A1").await.0,
+            StatusCode::OK
+        );
+
+        // 読めない形と、ほかの検索の位置は 409、作っていなければ 501、昔の高さは添え、差分がなければ 410
+        for query in [
+            "ownerAddress=zzz",
+            "level0=A1",
+            "offset=zz",
+            "offset=05A1",
+            "order=up",
+            "height=0",
+        ] {
+            let (status, body) = get_status(&format!("/namespaces?{query}")).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{query}");
+            assert_eq!(body["code"], "InvalidArgument");
+        }
+        assert_eq!(
+            get_status("/namespaces?aliasType=9").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
+        let response = get_response("/namespaces?height=7").await;
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        assert_eq!(get_status("/namespaces?height=4").await.0, StatusCode::GONE);
+
+        // 名前は親もたどる
+        let (status, body) = post(
+            "/namespaces/names",
+            r#"{"namespaceIds": ["00000000000000B2"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!([
+                {"id": "00000000000000B2", "name": "xym", "parentId": "00000000000000A1"},
+                {"id": "00000000000000A1", "name": "hina"}
+            ])
+        );
+        let (status, body) = post(
+            "/namespaces/account/names",
+            &format!(
+                r#"{{"addresses": ["{}", "{}"]}}"#,
+                known(),
+                Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET)
+                    .to_hex()
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["accountNames"][0]["address"],
+            known().to_hex().as_str()
+        );
+        assert_eq!(
+            body["accountNames"][0]["names"],
+            serde_json::json!(["hina.xym"])
+        );
+        assert_eq!(body["accountNames"][1]["names"], serde_json::json!([]));
+        let (_, body) = post(
+            "/namespaces/mosaic/names",
+            r#"{"mosaicIds": ["6BED913FA20223F8"]}"#,
+        )
+        .await;
+        assert_eq!(
+            body,
+            serde_json::json!({"mosaicNames": [{"mosaicId": "6BED913FA20223F8", "names": ["symbol.xym"]}]})
+        );
+
+        // 本文がない、多すぎる、読めない並びは 409。名前の表を作っていなければ 501
+        let many: Vec<String> = (0..101).map(|id| format!("{id:016X}")).collect();
+        for (path, body) in [
+            ("/namespaces/names", "{}".to_owned()),
+            (
+                "/namespaces/names",
+                serde_json::json!({ "namespaceIds": many }).to_string(),
+            ),
+            (
+                "/namespaces/account/names",
+                r#"{"addresses": ["zzz"]}"#.to_owned(),
+            ),
+            (
+                "/namespaces/mosaic/names",
+                r#"{"mosaicIds": ["12"]}"#.to_owned(),
+            ),
+        ] {
+            let (status, response) = post(path, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
+            assert_eq!(response["code"], "InvalidArgument");
+        }
+        let (status, body) = post(
+            "/namespaces/mosaic/names",
+            r#"{"mosaicIds": ["000000000000DEAD"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "NotImplemented");
     }
 
     #[tokio::test]

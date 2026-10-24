@@ -100,6 +100,9 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | 名前 | 答える検索 |
 |---|---|
 | `metadata` | `/metadata` を、送り主、宛先、対象（モザイクかネームスペース）から引く |
+| `namespaces` | `/namespaces` を、持ち主と別名（アドレスかモザイク）から引く。ネームスペースの名前の表も作り、`/namespaces/names`、`/namespaces/account/names`、`/namespaces/mosaic/names` に答える |
+
+ネームスペースの名前は状態の木になく、登録のトランザクションにしかないので、名前の表はブロックから拾う。ID は親と名前から決まるので、ID と合う登録だけを入れ、足すだけで消さない（どのブロックから拾っても正しい）。`namespaces` を足したら、起動したときに、しまってあるブロックから拾う（止めても、次の起動で続きから）。ライトは古いブロックを持たないので、名前を知っているのは、しまってあるブロックとその後に登録されたものだけで、知らない名前は返さない。
 
 ## 委任を引き受ける
 
@@ -130,6 +133,9 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限が切れて猶予の間のものは `active` が `false`。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
 | `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
 | `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。1件ごとの `id` は MongoDB の ID ではなく、その件の位置（送り主、種類、宛先、対象の ID、キーをつないだ16進）。前のページの最後の `id` を `offset` に渡すと、その次から返す。飛ばす分をなめないので、`pageNumber` で送るより深いページが速い。`?height=` はアーカイブだけで、ほかは 501 |
+| `/namespaces` | ネームスペースの検索。`storage.search` に `namespaces` があるときだけで、なければ 501。catapult の REST と同じく `ownerAddress`、`level0`、`registrationType`、`aliasType` で絞る。ページ送り、`id` と `offset`、アーカイブでの `?height=` はメタデータの検索と同じ（`id` は検索表のキーの16進で、同じ絞り込みの検索の `offset` にだけ渡せる） |
+| `POST /namespaces/names` | `{"namespaceIds": [...]}` の ID と、その親の名前（自分の部分）。名前を知らないものは返さない。1回に 100 件まで |
+| `POST /namespaces/account/names`、`POST /namespaces/mosaic/names` | `{"addresses": [...]}` か `{"mosaicIds": [...]}` を別名にしている、今有効なネームスペースの名前（`symbol.xym` のようにルートからつないだもの）。1回に 100 件まで |
 | `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |

@@ -1,7 +1,9 @@
 # master への push と PR で、確かめることと、リリースに載せるもののビルドを全部する。
 #
-# - 確かめること: 整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧、examples
-# - リリースに載せるもの: CLI の4つのターゲット、GUI のデスクトップの3つと Android と iOS、Pages のサイト
+# - 確かめること: 整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧、examples、
+#   crate の API の文書
+# - リリースに載せるもの: CLI の4つのターゲット、GUI のデスクトップの3つと Android と iOS、Pages のサイト（examples と
+#   crate の API の文書）
 #
 # master への push では、ビルドしたジョブの中で来歴の証明を付ける。タグを打つと release.yaml が、
 # そのコミットのこの実行が通るのを待ち、ここで作ったものをそのまま Release と Pages に出す。
@@ -97,7 +99,7 @@ jobs:
           git diff --exit-code
 
   # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる。
-  # 通ったら、Pages に出すサイトの形に並べて Artifact に上げる
+  # 通ったら、crate の API の文書と合わせて、Pages に出すサイトの形に並べて Artifact に上げる
   examples:
     runs-on: ubuntu-24.04
     defaults:
@@ -114,6 +116,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
+            .
             examples/web-vanitygen
             examples/sunboru-kusa
             examples/sunboru-kusa/discover
@@ -162,12 +165,21 @@ jobs:
           KUSA_TARGET: ${{ vars.KUSA_TARGET }}
           KUSA_MIN_XYM: ${{ vars.KUSA_MIN_XYM }}
         run: trunk build --release --locked
+      # docs.rs の代わりに、ライブラリの crate の API の文書を Pages の crates/ に置く。CLI はライブラリではないので外す
+      - name: crate の API の文書を作る
+        working-directory: .
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --no-deps --lib --locked
+          cargo metadata --no-deps --format-version 1 --locked | python3 -I .github/scripts/crate-docs-index.py target/doc
       - name: サイトの形に並べる
         working-directory: .
         run: |
           mkdir -p site/examples
           cp -r examples/web-vanitygen/dist site/examples/web-vanitygen
           cp -r examples/sunboru-kusa/dist site/examples/sunboru-kusa
+          cp -r target/doc site/crates
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site

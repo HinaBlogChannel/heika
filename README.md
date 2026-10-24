@@ -31,6 +31,8 @@ Symbol（XYM。NEM の後継のブロックチェーン）の、鍵と証明書�
 
 ## 構成
 
+各 crate の API の文書は、リリースした版のものを [Pages](https://hinablogchannel.github.io/heika/crates/) に置いている。
+
 - `heika-core`: ノードと同じ計算をするもの。アドレス、鍵、署名（catapult と同じ判定の検証）、VRF の証明、Merkle ツリーとその経路、状態の Patricia Merkle の証明と StateHash、ネットワーク時刻、メインネットとテストネットで決まっている値
 - `heika-cert`: ノードの TLS で使う鍵と証明書のファイル。PEM、DER、X.509 の証明書。shoestring と symbol-bootstrap の証明書のフォルダー（feature の `shoestring-compat` と `bootstrap-compat`）
 - `heika-packet`: ノードどうしがやりとりするパケットの形。見出し、要求と応答の本体の組み立てと読み取りだけで、通信はしない

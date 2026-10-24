@@ -126,7 +126,8 @@ jobs:
           path: site
 
   # examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ に、
-  # examples/sunboru-kusa は https://hinablogchannel.github.io/heika/examples/sunboru-kusa/ になる
+  # examples/sunboru-kusa は https://hinablogchannel.github.io/heika/examples/sunboru-kusa/ に、
+  # crate の API の文書は https://hinablogchannel.github.io/heika/crates/ になる
   pages:
     needs: release
     runs-on: ubuntu-24.04

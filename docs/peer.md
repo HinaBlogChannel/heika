@@ -121,7 +121,9 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |
 | `/accounts/{accountId}` | アカウントの今の状態。ID はアドレス（Base32 か16進）か公開鍵 |
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
-| `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す |
+| `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限が切れて猶予の間のものは `active` が `false`。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
+| `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
+| `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |

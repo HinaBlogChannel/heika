@@ -10,7 +10,8 @@
 //!   先端につながれば足し、ネットワークに流す（heika だけ）
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
-//! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
+//! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
+//!   それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
@@ -52,7 +53,10 @@ use heika_rest::node::{
     UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
-use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
+use heika_rest::state::{
+    AccountInfo, AccountJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicStateJson,
+    NamespaceInfo,
+};
 use heika_rest::transaction::TransactionInfo;
 
 /// API が返す、ノードの今の様子
@@ -79,6 +83,10 @@ pub trait Reader: Send + Sync {
     fn account(&self, address: &Address) -> Result<Option<AccountJson>, String>;
     /// モザイクの定義の今の状態。なければ `None`
     fn mosaic(&self, id: u64) -> Result<Option<MosaicStateJson>, String>;
+    /// ネームスペース（ルートか子）の今の状態。なければ（期限と猶予が過ぎて消えたものも）`None`
+    fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String>;
+    /// メタデータの今の状態。`composite_hash` は1件を指すハッシュ。なければ `None`
+    fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
     fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String>;
     /// `height` のブロック。なければ（まだないか、刈り込んだか、その高さの根がもうなければ）`None`
@@ -413,8 +421,8 @@ fn account_address(id: &str, network: NetworkIdentifier) -> Option<Address> {
     (address.network() == network).then_some(address)
 }
 
-/// モザイクの ID。上位から16進
-fn mosaic_id(id: &str) -> Option<u64> {
+/// モザイクやネームスペースの ID。上位から16進
+fn hex_id(id: &str) -> Option<u64> {
     (id.len() == 16)
         .then(|| u64::from_str_radix(id, 16).ok())
         .flatten()
@@ -446,7 +454,7 @@ async fn account_merkle(State(api): State<Api>, Path(id): Path<String>) -> Respo
 }
 
 async fn mosaic(State(api): State<Api>, Path(id): Path<String>) -> Response {
-    let Some(mosaic_id) = mosaic_id(&id) else {
+    let Some(mosaic_id) = hex_id(&id) else {
         return invalid("mosaicId has an invalid format".to_owned());
     };
     let read = api.node.reader.mosaic(mosaic_id);
@@ -457,13 +465,60 @@ async fn mosaic(State(api): State<Api>, Path(id): Path<String>) -> Response {
 }
 
 async fn mosaic_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
-    let Some(mosaic_id) = mosaic_id(&id) else {
+    let Some(mosaic_id) = hex_id(&id) else {
         return invalid("mosaicId has an invalid format".to_owned());
     };
     let key = patricia::id_key(mosaic_id);
     found(
         &id,
         api.node.reader.state_path(SubCache::Mosaic, &key).map(Some),
+    )
+}
+
+async fn namespace(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(namespace_id) = hex_id(&id) else {
+        return invalid("namespaceId has an invalid format".to_owned());
+    };
+    found(&id, api.node.reader.namespace(namespace_id))
+}
+
+/// catapult と同じく、ID をそのまま木のキーにする。子の ID は木にないので、ないことを示す道になる
+async fn namespace_merkle(State(api): State<Api>, Path(id): Path<String>) -> Response {
+    let Some(namespace_id) = hex_id(&id) else {
+        return invalid("namespaceId has an invalid format".to_owned());
+    };
+    let key = patricia::id_key(namespace_id);
+    found(
+        &id,
+        api.node
+            .reader
+            .state_path(SubCache::Namespace, &key)
+            .map(Some),
+    )
+}
+
+async fn metadata(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(composite_hash) = hash256(&hash) else {
+        return invalid("compositeHash has an invalid format".to_owned());
+    };
+    let read = api.node.reader.metadata(&composite_hash);
+    found(
+        &hash,
+        read.map(|entry| entry.map(|metadata_entry| MetadataInfo { metadata_entry })),
+    )
+}
+
+async fn metadata_merkle(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(composite_hash) = hash256(&hash) else {
+        return invalid("compositeHash has an invalid format".to_owned());
+    };
+    let key = patricia::hash_key(&composite_hash);
+    found(
+        &hash,
+        api.node
+            .reader
+            .state_path(SubCache::Metadata, &key)
+            .map(Some),
     )
 }
 
@@ -478,8 +533,8 @@ async fn block(State(api): State<Api>, Path(height): Path<String>) -> Response {
     found(&height, api.node.reader.block(number))
 }
 
-/// トランザクションのハッシュ。16進
-fn transaction_hash(hash: &str) -> Option<Hash256> {
+/// トランザクションのハッシュや、メタデータの1件を指すハッシュ。16進
+fn hash256(hash: &str) -> Option<Hash256> {
     if hash.len() != 64 {
         return None;
     }
@@ -489,7 +544,7 @@ fn transaction_hash(hash: &str) -> Option<Hash256> {
 }
 
 async fn partial_transaction(State(api): State<Api>, Path(hash): Path<String>) -> Response {
-    let Some(key) = transaction_hash(&hash) else {
+    let Some(key) = hash256(&hash) else {
         return invalid("transactionId has an invalid format".to_owned());
     };
     found(&hash, api.node.reader.partial_transaction(&key))
@@ -547,14 +602,14 @@ async fn transaction_fees(State(api): State<Api>) -> Response {
 }
 
 async fn transaction_status(State(api): State<Api>, Path(hash): Path<String>) -> Response {
-    let Some(key) = transaction_hash(&hash) else {
+    let Some(key) = hash256(&hash) else {
         return invalid("hash has an invalid format".to_owned());
     };
     found(&hash, api.node.reader.transaction_status(&key))
 }
 
 async fn confirmed_transaction(State(api): State<Api>, Path(hash): Path<String>) -> Response {
-    let Some(key) = transaction_hash(&hash) else {
+    let Some(key) = hash256(&hash) else {
         return invalid("transactionId has an invalid format".to_owned());
     };
     found(&hash, api.node.reader.confirmed_transaction(&key))
@@ -564,7 +619,7 @@ async fn transaction_merkle(
     State(api): State<Api>,
     Path((height, hash)): Path<(String, String)>,
 ) -> Response {
-    let (Some(number), Some(key)) = (block_height(&height), transaction_hash(&hash)) else {
+    let (Some(number), Some(key)) = (block_height(&height), hash256(&hash)) else {
         return invalid("height or hash has an invalid format".to_owned());
     };
     found(&hash, api.node.reader.transaction_merkle(number, &key))
@@ -635,6 +690,10 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/accounts/{id}/merkle", get(account_merkle))
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
+        .route("/namespaces/{id}", get(namespace))
+        .route("/namespaces/{id}/merkle", get(namespace_merkle))
+        .route("/metadata/{hash}", get(metadata))
+        .route("/metadata/{hash}/merkle", get(metadata_merkle))
         .route("/blocks/{height}", get(block))
         .route("/network/fees/transaction", get(transaction_fees))
         .route("/transactionStatus/{hash}", get(transaction_status))
@@ -872,6 +931,44 @@ mod tests {
             Ok(Some(MosaicStateJson::from_state_bytes(&bytes).unwrap()))
         }
 
+        fn namespace(&self, id: u64) -> Result<Option<NamespaceInfo>, String> {
+            // ルート 0xA1 に子 0xB2 だけがある
+            let mut bytes = vec![1, 0];
+            bytes.extend_from_slice(&0xA1u64.to_le_bytes());
+            bytes.extend_from_slice(&[0x68; 24]);
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.push(1);
+            bytes.extend_from_slice(&0xB2u64.to_le_bytes());
+            bytes.push(0);
+            let state = heika_rest::state::RootNamespaceState::from_state_bytes(&bytes).unwrap();
+            Ok(state.info(id, 7).unwrap())
+        }
+
+        fn metadata(&self, composite_hash: &Hash256) -> Result<Option<MetadataEntryJson>, String> {
+            let key = heika_transaction::MetadataKey {
+                source_address: known(),
+                target_address: known(),
+                scoped_metadata_key: 1,
+                target_id: 0,
+                metadata_type: heika_transaction::MetadataType::Account,
+            };
+            if *composite_hash != key.unique_key() {
+                return Ok(None);
+            }
+            let mut bytes = vec![1, 0];
+            bytes.extend_from_slice(&known().0);
+            bytes.extend_from_slice(&known().0);
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(b"hi");
+            Ok(Some(MetadataEntryJson::from_state_bytes(&bytes).unwrap()))
+        }
+
         fn state_path(&self, cache: SubCache, key: &Hash256) -> Result<MerkleStateInfo, String> {
             // 問い合わせた木とキーを、そのまま返して確かめる
             Ok(MerkleStateInfo {
@@ -1048,6 +1145,65 @@ mod tests {
                 "{:02X}{}",
                 SubCache::Mosaic.index(),
                 patricia::id_key(CURRENCY)
+            )
+            .as_str()
+        );
+
+        // ネームスペースは、ルートでも子でも引ける
+        let (status, body) = get_status("/namespaces/00000000000000A1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["meta"]["active"], true);
+        assert_eq!(body["namespace"]["registrationType"], 0);
+        let (status, body) = get_status("/namespaces/00000000000000B2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["namespace"]["level1"], "00000000000000B2");
+        assert_eq!(body["namespace"]["parentId"], "00000000000000A1");
+        assert_eq!(
+            get_status("/namespaces/00000000000000C3").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(get_status("/namespaces/A1").await.0, StatusCode::CONFLICT);
+        let (_, body) = get_status("/namespaces/00000000000000A1/merkle").await;
+        assert_eq!(
+            body["raw"],
+            format!(
+                "{:02X}{}",
+                SubCache::Namespace.index(),
+                patricia::id_key(0xA1)
+            )
+            .as_str()
+        );
+
+        // メタデータは、1件を指すハッシュで引く
+        let composite = heika_transaction::MetadataKey {
+            source_address: known(),
+            target_address: known(),
+            scoped_metadata_key: 1,
+            target_id: 0,
+            metadata_type: heika_transaction::MetadataType::Account,
+        }
+        .unique_key();
+        let (status, body) = get_status(&format!("/metadata/{composite}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["metadataEntry"]["compositeHash"],
+            composite.to_string().as_str()
+        );
+        assert_eq!(body["metadataEntry"]["value"], "6869");
+        assert_eq!(
+            get_status(&format!("/metadata/{}", "00".repeat(32)))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(get_status("/metadata/00").await.0, StatusCode::CONFLICT);
+        let (_, body) = get_status(&format!("/metadata/{composite}/merkle")).await;
+        assert_eq!(
+            body["raw"],
+            format!(
+                "{:02X}{}",
+                SubCache::Metadata.index(),
+                patricia::hash_key(&composite)
             )
             .as_str()
         );

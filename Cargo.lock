@@ -581,6 +581,7 @@ dependencies = [
  "base16ct",
  "heika-core",
  "heika-rest",
+ "heika-transaction",
  "http-body-util",
  "serde",
  "serde_json",

@@ -780,6 +780,7 @@ dependencies = [
  "heika-chain",
  "heika-core",
  "heika-state-transition",
+ "heika-transaction",
  "libc",
  "rayon",
  "redb",

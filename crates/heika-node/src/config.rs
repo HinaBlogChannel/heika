@@ -299,13 +299,19 @@ impl Storage {
         self.partial_state.unwrap_or(true)
     }
 
-    /// 作る検索表
+    /// 作る検索表。アーカイブは状態の差分を全部残すので、昔の高さでも検索できるようにする
     pub fn searches(&self) -> Searches {
-        self.search
+        let searches = self
+            .search
             .iter()
             .fold(Searches::NONE, |searches, search| match search {
                 Search::Metadata => searches.union(Searches::METADATA),
-            })
+            });
+        if self.mode == Mode::Archive && searches != Searches::NONE {
+            searches.union(Searches::PAST)
+        } else {
+            searches
+        }
     }
 }
 
@@ -631,5 +637,8 @@ spec:
         let storage = Manifest::parse(&search).unwrap().spec.storage;
         assert_eq!(storage.searches(), Searches::METADATA);
         assert!(Manifest::parse(&search.replace("metadata", "accounts")).is_err());
+        let archive = search.replace("storage:\n", "storage:\n    mode: archive\n");
+        let storage = Manifest::parse(&archive).unwrap().spec.storage;
+        assert_eq!(storage.searches(), Searches::METADATA.union(Searches::PAST));
     }
 }

@@ -36,9 +36,11 @@ use heika_rest::state::{
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
 use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
-use heika_store_redb::search::{METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID};
+use heika_store_redb::search::{
+    METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID, row_key_of,
+};
 use heika_store_redb::{At, Db, DbError, MetadataFields, Searches};
-use heika_transaction::{Body, MetadataKey, MetadataType, Transaction};
+use heika_transaction::{Body, Transaction};
 
 use crate::recent::SharedRecent;
 
@@ -277,26 +279,6 @@ fn matches(filter: &MetadataFilter, fields: &MetadataFields) -> bool {
             .is_none_or(|kind| kind == fields.metadata_type)
 }
 
-/// 1件を指すハッシュ（compositeHash）
-fn composite_hash(fields: &MetadataFields) -> Option<Hash256> {
-    let metadata_type = match fields.metadata_type {
-        0 => MetadataType::Account,
-        1 => MetadataType::Mosaic,
-        2 => MetadataType::Namespace,
-        _ => return None,
-    };
-    Some(
-        MetadataKey {
-            source_address: Address(fields.source),
-            target_address: Address(fields.target),
-            scoped_metadata_key: fields.scoped_key,
-            target_id: fields.target_id,
-            metadata_type,
-        }
-        .unique_key(),
-    )
-}
-
 /// 状態を引く先
 enum View {
     /// 今の状態
@@ -410,47 +392,84 @@ impl heika_api::Reader for DbReader {
         &self,
         filter: &MetadataFilter,
         page: PageRequest,
-    ) -> Result<Option<Vec<MetadataEntryJson>>, String> {
-        if !self.db.searches().contains(Searches::METADATA) {
+        at: Option<u64>,
+    ) -> Result<Option<Vec<MetadataEntryJson>>, StateError> {
+        let searches = self.db.searches();
+        let wanted = match at {
+            None => Searches::METADATA,
+            Some(_) => Searches::METADATA.union(Searches::PAST),
+        };
+        if !searches.contains(wanted) {
             return Ok(None);
         }
+        let (view, _) = self.view(at)?;
         let mut prefixes = metadata_prefixes(filter);
         if page.descending {
             prefixes.reverse();
         }
         let mut skip = (page.number - 1) * page.size;
         let mut found = Vec::new();
+        let mut failed = None;
         for prefix in prefixes {
-            self.db
-                .for_each_search_key(&prefix, page.descending, &mut |key| {
-                    let Some(fields) = MetadataFields::from_search_key(key) else {
-                        return true;
-                    };
-                    if !matches(filter, &fields) {
-                        return true;
+            let mut visit = |key: &[u8]| {
+                let Some(fields) = MetadataFields::from_search_key(key) else {
+                    return true;
+                };
+                if !matches(filter, &fields) {
+                    return true;
+                }
+                // 昔の高さでは、候補がその高さにあったかを状態の行で確かめる
+                if let View::At(past) = &view {
+                    let existed =
+                        row_key_of(key)
+                            .map(|row| past.state(&row))
+                            .transpose()
+                            .map(|value| {
+                                value
+                                    .flatten()
+                                    .and_then(|value| MetadataFields::from_row(&value))
+                                    == Some(fields)
+                            });
+                    match existed {
+                        Ok(true) => {}
+                        Ok(false) => return true,
+                        Err(error) => {
+                            failed = Some(error);
+                            return false;
+                        }
                     }
-                    if skip > 0 {
-                        skip -= 1;
-                        return true;
-                    }
-                    found.push(fields);
-                    found.len() < page.size
-                })
-                .map_err(|error| error.to_string())?;
+                }
+                if skip > 0 {
+                    skip -= 1;
+                    return true;
+                }
+                found.push(fields);
+                found.len() < page.size
+            };
+            match view {
+                View::Now => self
+                    .db
+                    .for_each_search_key(&prefix, page.descending, &mut visit),
+                View::At(_) => {
+                    self.db
+                        .for_each_search_key_with_past(&prefix, page.descending, &mut visit)
+                }
+            }
+            .map_err(|error| error.to_string())?;
+            if let Some(error) = failed {
+                return Err(StateError::Other(error.to_string()));
+            }
             if found.len() >= page.size {
                 break;
             }
         }
         let mut entries = Vec::with_capacity(found.len());
         for fields in found {
-            let Some(hash) = composite_hash(&fields) else {
+            let Some(hash) = fields.composite_hash().map(Hash256) else {
                 continue;
             };
             // 検索表を読んだあとに消えていれば、飛ばす
-            if let Some(entry) = self
-                .metadata(&hash, None)
-                .map_err(|error| error.to_string())?
-            {
+            if let Some(entry) = self.metadata(&hash, at)? {
                 entries.push(entry);
             }
         }

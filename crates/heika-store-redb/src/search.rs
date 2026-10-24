@@ -6,9 +6,17 @@
 //!
 //! 作る検索は、DB の `meta` の `search` に覚える（[`Db::set_search`]）。途中で足せば、今の状態の行から作る。
 //!
+//! 昔の高さでも検索するなら（[`Searches::PAST`]）、今の検索表から消えたキーを表 `search_past` に残す。高さは持たない。
+//! 高さ N の検索では、両方の表のキーを候補にし、高さ N の状態の行から本当にそのキーが出るかで確かめる
+//! （[`Db::for_each_search_key_with_past`]）。いつからいつまであったかは、状態の差分が知っている。
+//! 巻き戻しで余分なキーが残っても、確かめで落ちる。途中で足せば、状態の差分の前の値から作る。
+//!
 //! [`Db::set_search`]: crate::Db::set_search
+//! [`Db::for_each_search_key_with_past`]: crate::Db::for_each_search_key_with_past
 
+use heika_core::address::Address;
 use heika_core::patricia::SubCache;
+use heika_transaction::{MetadataKey, MetadataType};
 
 /// 作る検索。ビットの組
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18,6 +26,8 @@ impl Searches {
     pub const NONE: Self = Self(0);
     /// メタデータを、送り主、宛先、対象（モザイクかネームスペース）から引く
     pub const METADATA: Self = Self(1);
+    /// 作る検索を、昔の高さでも引けるようにする。状態の差分を全部残すアーカイブのためのもの
+    pub const PAST: Self = Self(0x80);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -33,6 +43,11 @@ impl Searches {
 
     pub(crate) fn from_bits(bits: u8) -> Self {
         Self(bits)
+    }
+
+    /// `PAST` を除いた、検索の種類だけ
+    pub(crate) fn kinds(self) -> Self {
+        Self(self.0 & !Self::PAST.0)
     }
 
     /// 検索ごとの、検索表のキーの先頭の1バイト
@@ -112,6 +127,24 @@ impl MetadataFields {
         keys
     }
 
+    /// 1件を指すハッシュ（compositeHash）。知らない種類なら `None`
+    pub fn composite_hash(&self) -> Option<[u8; 32]> {
+        let metadata_type = match self.metadata_type {
+            0 => MetadataType::Account,
+            1 => MetadataType::Mosaic,
+            2 => MetadataType::Namespace,
+            _ => return None,
+        };
+        let key = MetadataKey {
+            source_address: Address(self.source),
+            target_address: Address(self.target),
+            scoped_metadata_key: self.scoped_key,
+            target_id: self.target_id,
+            metadata_type,
+        };
+        Some(key.unique_key().0)
+    }
+
     /// 検索表のキーから。[`MetadataFields::search_keys`] の逆
     pub fn from_search_key(key: &[u8]) -> Option<Self> {
         let (&prefix, rest) = key.split_first()?;
@@ -144,6 +177,19 @@ impl MetadataFields {
             },
             _ => return None,
         })
+    }
+}
+
+/// 検索表のキー `key` が、どの状態の行から出たか。その行のキー
+pub fn row_key_of(key: &[u8]) -> Option<Vec<u8>> {
+    match *key.first()? {
+        METADATA_BY_SOURCE | METADATA_BY_TARGET | METADATA_BY_TARGET_ID => {
+            let fields = MetadataFields::from_search_key(key)?;
+            let mut row = vec![SubCache::Metadata.index() as u8];
+            row.extend_from_slice(&fields.composite_hash()?);
+            Some(row)
+        }
+        _ => None,
     }
 }
 

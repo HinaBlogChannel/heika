@@ -17,6 +17,7 @@
 //! - `orphans`: （高さ、ハッシュ）→ 枝の取り替えで外れた元の枝のブロック
 //! - `peers`: アドレス → 知っているノードの記録
 //! - `search`: 検索表（[`search`]）。REST の検索のために、今の状態の行を別の切り口で並べ直したキー → なし
+//! - `search_past`: 検索表から消えたキー → なし。昔の高さで検索するときの候補（[`Searches::PAST`]）
 //!
 //! `meta` の `format` に、この形の版（[`FORMAT`]）を書く。違う版の DB は開かない。
 //!
@@ -61,6 +62,8 @@ const ORPHANS: TableDefinition<(u64, &[u8]), &[u8]> = TableDefinition::new("orph
 const PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("peers");
 /// 検索表（[`search`]）
 const SEARCH: TableDefinition<&[u8], ()> = TableDefinition::new("search");
+/// 検索表から消えたキー（[`search`]）
+const SEARCH_PAST: TableDefinition<&[u8], ()> = TableDefinition::new("search_past");
 /// 作る検索（[`Searches`] のビット）をしまう `meta` の名前
 const SEARCH_META: &str = "search";
 
@@ -260,6 +263,7 @@ impl Db {
         transaction.open_table(ORPHANS).map_err(db_error)?;
         transaction.open_table(PEERS).map_err(db_error)?;
         transaction.open_table(SEARCH).map_err(db_error)?;
+        transaction.open_table(SEARCH_PAST).map_err(db_error)?;
         for tables in [STATE_TABLES, TRIE_TABLES] {
             transaction.open_table(tables.current).map_err(db_error)?;
             transaction
@@ -329,6 +333,7 @@ impl Db {
     }
 
     /// 作る検索を `searches` にする。足した検索は今の状態の行から作り、外した検索の行は消す。
+    /// [`Searches::PAST`] なら、検索表から消えたキーも、状態の差分の前の値から作る。
     /// 1つのトランザクションでコミットする。外して小さくなった DB を詰めるなら [`Db::copy_to`]
     pub fn set_search(&mut self, searches: Searches) -> Result<(), DbError> {
         if searches == self.search {
@@ -338,18 +343,28 @@ impl Db {
             return Err(DbError::ReadOnly);
         };
         self.check_space()?;
+        let (old, new) = (self.search, searches);
         let transaction = database.begin_write().map_err(db_error)?;
         {
-            let mut table = transaction.open_table(SEARCH).map_err(db_error)?;
-            let removed = Searches::from_bits(self.search.bits() & !searches.bits());
+            let mut current = transaction.open_table(SEARCH).map_err(db_error)?;
+            let mut past = transaction.open_table(SEARCH_PAST).map_err(db_error)?;
+            // 外した検索の行と、昔の高さをやめたなら消えたキーを全部消す
+            let removed = Searches::from_bits(old.kinds().bits() & !new.kinds().bits());
             for prefix in removed.prefixes() {
-                table
-                    .extract_from_if(&[prefix][..]..&[prefix + 1][..], |_, _| true)
+                for table in [&mut current, &mut past] {
+                    table
+                        .extract_from_if(&[prefix][..]..&[prefix + 1][..], |_, _| true)
+                        .map_err(db_error)?
+                        .for_each(drop);
+                }
+            }
+            if !new.contains(Searches::PAST) {
+                past.extract_if(|_, _| true)
                     .map_err(db_error)?
                     .for_each(drop);
             }
-            let added = Searches::from_bits(searches.bits() & !self.search.bits());
             let state = transaction.open_table(STATE).map_err(db_error)?;
+            let added = Searches::from_bits(new.kinds().bits() & !old.kinds().bits());
             for cache in search::caches(added) {
                 for row in state
                     .range(&[cache][..]..&[cache + 1][..])
@@ -357,16 +372,56 @@ impl Db {
                 {
                     let (key, value) = row.map_err(db_error)?;
                     for search_key in search::keys_of(added, key.value(), Some(value.value())) {
-                        table.insert(search_key.as_slice(), ()).map_err(db_error)?;
+                        current
+                            .insert(search_key.as_slice(), ())
+                            .map_err(db_error)?;
+                    }
+                }
+            }
+            // 消えたキーは、状態の差分の前の値から。昔の高さを今始めたなら全部の検索の、もう始めていたなら足した検索の分
+            if new.contains(Searches::PAST) {
+                let backfill = if old.contains(Searches::PAST) {
+                    added
+                } else {
+                    new.kinds()
+                };
+                let history = transaction
+                    .open_table(STATE_TABLES.history)
+                    .map_err(db_error)?;
+                let changesets = transaction
+                    .open_table(STATE_TABLES.changesets)
+                    .map_err(db_error)?;
+                for cache in search::caches(backfill) {
+                    let range = history
+                        .range((&[cache][..], 0)..(&[cache + 1][..], 0))
+                        .map_err(db_error)?;
+                    for row in range {
+                        let (entry, _) = row.map_err(db_error)?;
+                        let (key, height) = entry.value();
+                        let Some(before) = changesets.get((height, key)).map_err(db_error)? else {
+                            continue;
+                        };
+                        let [PRESENT, value @ ..] = before.value() else {
+                            continue;
+                        };
+                        for search_key in search::keys_of(backfill, key, Some(value)) {
+                            if current
+                                .get(search_key.as_slice())
+                                .map_err(db_error)?
+                                .is_none()
+                            {
+                                past.insert(search_key.as_slice(), ()).map_err(db_error)?;
+                            }
+                        }
                     }
                 }
             }
             let mut meta = transaction.open_table(META).map_err(db_error)?;
-            meta.insert(SEARCH_META, &[searches.bits()][..])
+            meta.insert(SEARCH_META, &[new.bits()][..])
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
-        self.search = searches;
+        self.search = new;
         Ok(())
     }
 
@@ -409,6 +464,57 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// [`Db::for_each_search_key`] を、検索表から消えたキー（[`Searches::PAST`]）も混ぜて、キーの順に。
+    /// 昔の高さで検索するときの候補で、その高さにあったかは呼ぶ側が状態の行で確かめる
+    pub fn for_each_search_key_with_past(
+        &self,
+        prefix: &[u8],
+        reverse: bool,
+        visit: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<(), DbError> {
+        let transaction = self.begin_read()?;
+        let (Some(current), Some(past)) = (
+            open_if_exists(&transaction, SEARCH)?,
+            open_if_exists(&transaction, SEARCH_PAST)?,
+        ) else {
+            return Ok(());
+        };
+        let end = search::prefix_end(prefix);
+        let keys = |table: &ReadOnlyTable<&'static [u8], ()>| -> Result<_, DbError> {
+            let range = match &end {
+                Some(end) => table.range(prefix..end.as_slice()),
+                None => table.range(prefix..),
+            }
+            .map_err(db_error)?;
+            let rows: Box<dyn Iterator<Item = _>> = if reverse {
+                Box::new(range.rev())
+            } else {
+                Box::new(range)
+            };
+            Ok(rows
+                .map(|row| row.map(|(key, _)| key.value().to_vec()).map_err(db_error))
+                .peekable())
+        };
+        let (mut left, mut right) = (keys(&current)?, keys(&past)?);
+        loop {
+            // 2つの表の先頭のうち、順で先のほう。同じキーなら1回だけ
+            let take_left = match (left.peek(), right.peek()) {
+                (None, None) => return Ok(()),
+                (Some(Err(_)), _) | (Some(Ok(_)), None) => true,
+                (None, Some(_)) | (_, Some(Err(_))) => false,
+                (Some(Ok(l)), Some(Ok(r))) if l == r => {
+                    right.next();
+                    true
+                }
+                (Some(Ok(l)), Some(Ok(r))) => (l < r) != reverse,
+            };
+            let key = if take_left { left.next() } else { right.next() }.expect("peeked")?;
+            if !visit(&key) {
+                return Ok(());
+            }
+        }
     }
 
     /// 書く前と詰める前に、ディスクの空きが `bytes` 以上あるかを確かめる。
@@ -1268,6 +1374,7 @@ impl Db {
             copier.table(ORPHANS, progress)?,
             copier.table(PEERS, progress)?,
             copier.table(SEARCH, progress)?,
+            copier.table(SEARCH_PAST, progress)?,
         ];
         if whole.contains(&false) {
             return Ok(false);
@@ -1486,15 +1593,16 @@ fn read_searches(
         .unwrap_or_default())
 }
 
-/// 状態の行 `key` が `before` から `after` に変わったので、検索表を直す
+/// 状態の行 `key` が `before` から `after` に変わったので、検索表を直す。[`Searches::PAST`] なら、消えたキーを残す
 fn update_search(
     table: &mut redb::Table<&[u8], ()>,
+    past: &mut redb::Table<&[u8], ()>,
     search: Searches,
     key: &[u8],
     before: Option<&[u8]>,
     after: Option<&[u8]>,
 ) -> Result<(), DbError> {
-    if search == Searches::NONE {
+    if search.kinds() == Searches::NONE {
         return Ok(());
     }
     let (removed, added) = (
@@ -1506,6 +1614,9 @@ fn update_search(
     }
     for search_key in &removed {
         table.remove(search_key.as_slice()).map_err(db_error)?;
+        if search.contains(Searches::PAST) && !added.contains(search_key) {
+            past.insert(search_key.as_slice(), ()).map_err(db_error)?;
+        }
     }
     for search_key in &added {
         table.insert(search_key.as_slice(), ()).map_err(db_error)?;
@@ -1522,6 +1633,7 @@ fn undo_above(
 ) -> Result<(), DbError> {
     let mut current = transaction.open_table(tables.current).map_err(db_error)?;
     let mut search_table = transaction.open_table(SEARCH).map_err(db_error)?;
+    let mut past_table = transaction.open_table(SEARCH_PAST).map_err(db_error)?;
     let mut changesets = transaction
         .open_table(tables.changesets)
         .map_err(db_error)?;
@@ -1553,7 +1665,14 @@ fn undo_above(
             }
             .map_err(db_error)?
             .map(|value| value.value().to_vec());
-            update_search(&mut search_table, search, &key, undone.as_deref(), restored)?;
+            update_search(
+                &mut search_table,
+                &mut past_table,
+                search,
+                &key,
+                undone.as_deref(),
+                restored,
+            )?;
             history
                 .remove((key.as_slice(), changed))
                 .map_err(db_error)?;
@@ -1817,8 +1936,10 @@ impl Batch {
             .map_err(db_error)?
             .map(|before| before.value().to_vec());
         let mut search = self.transaction.open_table(SEARCH).map_err(db_error)?;
+        let mut past = self.transaction.open_table(SEARCH_PAST).map_err(db_error)?;
         update_search(
             &mut search,
+            &mut past,
             self.search,
             key,
             before.as_deref(),
@@ -1833,7 +1954,15 @@ impl Batch {
             .map_err(db_error)?
             .map(|before| before.value().to_vec());
         let mut search = self.transaction.open_table(SEARCH).map_err(db_error)?;
-        update_search(&mut search, self.search, key, before.as_deref(), None)
+        let mut past = self.transaction.open_table(SEARCH_PAST).map_err(db_error)?;
+        update_search(
+            &mut search,
+            &mut past,
+            self.search,
+            key,
+            before.as_deref(),
+            None,
+        )
     }
 
     /// `height` のブロックで、状態の行をキーごとに値にする（`None` なら消す）。
@@ -1881,6 +2010,7 @@ impl Batch {
             .open_table(tables.history)
             .map_err(db_error)?;
         let mut search_table = self.transaction.open_table(SEARCH).map_err(db_error)?;
+        let mut past_table = self.transaction.open_table(SEARCH_PAST).map_err(db_error)?;
         for (key, value) in writes {
             let key = key.as_ref();
             let value = value.as_ref().map(AsRef::as_ref);
@@ -1890,7 +2020,14 @@ impl Batch {
             }
             .map_err(db_error)?
             .map(|before| before.value().to_vec());
-            update_search(&mut search_table, search, key, before.as_deref(), value)?;
+            update_search(
+                &mut search_table,
+                &mut past_table,
+                search,
+                key,
+                before.as_deref(),
+                value,
+            )?;
             if quiet || before.as_deref() == value {
                 continue;
             }
@@ -2192,7 +2329,7 @@ mod tests {
         );
     }
 
-    /// メタデータの状態の行のキーと値。値の中身だけ違うものを `value` で作る
+    /// メタデータの状態の行のキー（木の番号と compositeHash）と値。値の中身だけ違うものを `value` で作る
     fn metadata_row(source: u8, value: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut row = vec![source; 24];
         row.extend_from_slice(&[0x69; 24]);
@@ -2201,10 +2338,13 @@ mod tests {
         row.push(0);
         row.extend_from_slice(&(value.len() as u16).to_le_bytes());
         row.extend_from_slice(value);
-        let key = vec![
-            heika_core::patricia::SubCache::Metadata.index() as u8,
-            source,
-        ];
+        let mut key = vec![heika_core::patricia::SubCache::Metadata.index() as u8];
+        key.extend_from_slice(
+            &MetadataFields::from_row(&row)
+                .unwrap()
+                .composite_hash()
+                .unwrap(),
+        );
         (key, row)
     }
 
@@ -2288,6 +2428,85 @@ mod tests {
         assert!(search_keys(&db, &[]).is_empty());
         drop(db);
         assert_eq!(Db::open(&dir.0).unwrap().searches(), Searches::NONE);
+    }
+
+    fn search_keys_with_past(db: &Db, reverse: bool) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        db.for_each_search_key_with_past(&[search::METADATA_BY_SOURCE], reverse, &mut |key| {
+            keys.push(key.to_vec());
+            true
+        })
+        .unwrap();
+        keys
+    }
+
+    #[test]
+    fn past_search_keeps_removed_keys() {
+        let rows: Vec<_> = (1..=3).map(|source| metadata_row(source, b"v")).collect();
+        let write = |db: &Db| {
+            let mut batch = db.batch().unwrap();
+            batch.start_history(1).unwrap();
+            batch.start_trie(1).unwrap();
+            batch
+                .set_state_at(
+                    1,
+                    [
+                        (&rows[0].0, Some(&rows[0].1)),
+                        (&rows[2].0, Some(&rows[2].1)),
+                    ],
+                )
+                .unwrap();
+            batch.put_checkpoint(1, b"one").unwrap();
+            batch
+                .set_state_at(2, [(&rows[1].0, Some(&rows[1].1))])
+                .unwrap();
+            batch
+                .set_state_at(3, [(&rows[0].0, None::<&Vec<u8>>)])
+                .unwrap();
+            batch.commit().unwrap();
+        };
+        let source_of = |key: &[u8]| MetadataFields::from_search_key(key).unwrap().source[0];
+        let sources =
+            |keys: Vec<Vec<u8>>| keys.iter().map(|key| source_of(key)).collect::<Vec<_>>();
+
+        // 書きながら残す
+        let dir = TempDir::new();
+        let mut db = Db::open(&dir.0).unwrap();
+        db.set_search(Searches::METADATA.union(Searches::PAST))
+            .unwrap();
+        write(&db);
+        assert_eq!(
+            sources(search_keys(&db, &[search::METADATA_BY_SOURCE])),
+            vec![2, 3]
+        );
+        assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 2, 3]);
+        assert_eq!(sources(search_keys_with_past(&db, true)), vec![3, 2, 1]);
+        // 巻き戻しで消えた2も候補に残るが、それは引くときに状態の行で落とす
+        db.rollback(1, u32::MAX, "executor", false, &[]).unwrap();
+        assert_eq!(
+            sources(search_keys(&db, &[search::METADATA_BY_SOURCE])),
+            vec![1, 3]
+        );
+        assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 2, 3]);
+        // 検索表のキーから、その状態の行が引ける
+        let row = search::row_key_of(&search_keys(&db, &[search::METADATA_BY_SOURCE])[0]).unwrap();
+        let fields = MetadataFields::from_row(&db.state_row(&row).unwrap().unwrap()).unwrap();
+        assert_eq!(fields.source, [1; 24]);
+        // やめたら消える
+        db.set_search(Searches::METADATA).unwrap();
+        assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 3]);
+
+        // あとから始めたら、状態の差分の前の値から作る
+        let dir = TempDir::new();
+        let mut db = Db::open(&dir.0).unwrap();
+        write(&db);
+        db.set_search(Searches::METADATA.union(Searches::PAST))
+            .unwrap();
+        assert_eq!(
+            sources(search_keys(&db, &[search::METADATA_BY_SOURCE])),
+            vec![2, 3]
+        );
+        assert_eq!(sources(search_keys_with_past(&db, false)), vec![1, 2, 3]);
     }
 
     #[test]

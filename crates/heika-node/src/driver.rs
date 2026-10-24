@@ -921,9 +921,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     Ok(outcome)
 }
 
-pub(crate) fn network_parameters(
-    spec: &NodeConfig,
-) -> Result<&'static NetworkParameters, NodeError> {
+/// 設定 `spec` のネットワークの定数。プライベートなネットワークなら `network.resources` から読む
+pub fn network_parameters(spec: &NodeConfig) -> Result<&'static NetworkParameters, NodeError> {
     Ok(match spec.network.network_type {
         NetworkType::Mainnet => &NetworkParameters::MAINNET,
         NetworkType::Testnet => &NetworkParameters::TESTNET,

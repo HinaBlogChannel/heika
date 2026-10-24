@@ -130,12 +130,14 @@ pub trait Reader: Send + Sync {
         composite_hash: &Hash256,
         at: Option<u64>,
     ) -> Result<Option<MetadataEntryJson>, StateError>;
-    /// メタデータを `filter` で絞り、`page` の分を返す。`at` なら、その高さにあったものとその高さの値。
+    /// メタデータを `filter` で絞り、`page` の分を返す。`after` があれば、並びでその位置より後から。
+    /// `at` なら、その高さにあったものとその高さの値。
     /// 検索表を作っていなければ（`at` なら、昔の高さの分も作っていなければ）`None`
     fn search_metadata(
         &self,
         filter: &MetadataFilter,
         page: PageRequest,
+        after: Option<&MetadataPosition>,
         at: Option<u64>,
     ) -> Result<Option<Vec<MetadataEntryJson>>, StateError>;
     /// 状態の木 `cache` の、根から `key` の葉への道。ないことを示す道もある
@@ -175,6 +177,34 @@ pub struct MetadataFilter {
     pub scoped_key: Option<u64>,
     pub target_id: Option<u64>,
     pub metadata_type: Option<u8>,
+}
+
+/// メタデータの検索の、1件の位置（[`MetadataEntryJson::position`] を読んだもの）。ページ送りの `offset`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetadataPosition {
+    pub source: Address,
+    pub metadata_type: u8,
+    pub target: Address,
+    pub target_id: u64,
+    pub scoped_key: u64,
+}
+
+impl MetadataPosition {
+    /// [`MetadataEntryJson::position`] の16進を読む
+    fn parse(text: &str) -> Option<Self> {
+        if text.len() != 48 + 2 + 48 + 16 + 16 || !text.is_ascii() {
+            return None;
+        }
+        let address = |at: usize| Address::from_hex(&text[at..at + 48]).ok();
+        let id = |at: usize| hex_id(&text[at..at + 16]);
+        Some(Self {
+            source: address(0)?,
+            metadata_type: u8::from_str_radix(&text[48..50], 16).ok()?,
+            target: address(50)?,
+            target_id: id(98)?,
+            scoped_key: id(114)?,
+        })
+    }
 }
 
 /// 一覧のどのページを返すか。並びは検索表のキーの順（`descending` なら逆）。catapult の REST は登録の順なので違う
@@ -696,7 +726,12 @@ async fn metadata(
     found_at(
         &hash,
         at,
-        read.map(|entry| entry.map(|metadata_entry| MetadataInfo { metadata_entry })),
+        read.map(|entry| {
+            entry.map(|metadata_entry| MetadataInfo {
+                id: Some(metadata_entry.position()),
+                metadata_entry,
+            })
+        }),
     )
 }
 
@@ -798,10 +833,12 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
         Ok(at) => at,
         Err(invalid) => return invalid.into_response(),
     };
-    // MongoDB の ID から続けるページ送りはしない
-    if query.offset.is_some() {
-        return invalid("offset is not supported; use pageNumber".to_owned());
-    }
+    // 前のページの最後の件の `id` から続ける。飛ばす分をなめないので、深いページでも速い
+    let after = match query.offset.as_deref().map(MetadataPosition::parse) {
+        None => None,
+        Some(Some(position)) => Some(position),
+        Some(None) => return invalid("offset has an invalid format".to_owned()),
+    };
     let descending = match query.order.as_deref() {
         None | Some("asc") => false,
         Some("desc") => true,
@@ -812,7 +849,10 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
         number: query.page_number.unwrap_or(1).max(1),
         descending,
     };
-    let read = api.node.reader.search_metadata(&filter, page, at);
+    let read = api
+        .node
+        .reader
+        .search_metadata(&filter, page, after.as_ref(), at);
     if let Ok(None) = read {
         let what = if at.is_some() {
             "at past heights (storage.search on an archive node)"
@@ -833,7 +873,10 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
             entries.map(|entries| Page {
                 data: entries
                     .into_iter()
-                    .map(|metadata_entry| MetadataInfo { metadata_entry })
+                    .map(|metadata_entry| MetadataInfo {
+                        id: Some(metadata_entry.position()),
+                        metadata_entry,
+                    })
                     .collect(),
                 pagination: Pagination {
                     page_number: page.number,
@@ -1293,6 +1336,7 @@ mod tests {
             &self,
             filter: &MetadataFilter,
             page: PageRequest,
+            after: Option<&MetadataPosition>,
             at: Option<u64>,
         ) -> Result<Option<Vec<MetadataEntryJson>>, StateError> {
             check_at(at)?;
@@ -1308,11 +1352,15 @@ mod tests {
                 None => page.size,
             };
             let entry = self.metadata(&metadata_composite(), None).unwrap().unwrap();
+            // 位置が届いたら、そのキーを値に足す
             let value = format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 page.number,
                 if page.descending { "d" } else { "" },
-                at.map(|height| format!("@{height}")).unwrap_or_default()
+                at.map(|height| format!("@{height}")).unwrap_or_default(),
+                after
+                    .map(|after| format!("+{:X}", after.scoped_key))
+                    .unwrap_or_default()
             );
             Ok(Some(vec![
                 MetadataEntryJson {
@@ -1479,6 +1527,17 @@ mod tests {
         );
         assert_eq!(body["pagination"]["pageNumber"], 1);
         assert_eq!(body["pagination"]["pageSize"], 10);
+        // 1件ごとの id は位置で、そのまま offset に渡せる
+        let id = body["data"][0]["id"].as_str().unwrap().to_owned();
+        let entry: MetadataEntryJson =
+            serde_json::from_value(body["data"][0]["metadataEntry"].clone()).unwrap();
+        assert_eq!(id, entry.position());
+        let (status, body) = get_status(&format!("/metadata?offset={id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"][0]["metadataEntry"]["value"], "1+1");
+        // 1件引きにも同じ id を付ける
+        let (_, body) = get_status(&format!("/metadata/{}", metadata_composite())).await;
+        assert_eq!(body["id"], id.as_str());
         let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
         let (_, body) = get_status(&format!("/metadata?sourceAddress={}", other.to_hex())).await;
         assert!(body["data"].as_array().unwrap().is_empty());
@@ -1500,6 +1559,7 @@ mod tests {
             "height=0".to_owned(),
             "height=11".to_owned(),
             "offset=6962CF6A2976BBB47C1054BC".to_owned(),
+            format!("offset={}", "G".repeat(130)),
         ] {
             let (status, body) = get_status(&format!("/metadata?{query}")).await;
             assert_eq!(status, StatusCode::CONFLICT, "{query}");

@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use heika_api::{MetadataFilter, PageRequest, PartialFilter, StateError};
+use heika_api::{MetadataFilter, MetadataPosition, PageRequest, PartialFilter, StateError};
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
 use heika_chain::store::EXECUTOR_META;
@@ -392,6 +392,7 @@ impl heika_api::Reader for DbReader {
         &self,
         filter: &MetadataFilter,
         page: PageRequest,
+        after: Option<&MetadataPosition>,
         at: Option<u64>,
     ) -> Result<Option<Vec<MetadataEntryJson>>, StateError> {
         let searches = self.db.searches();
@@ -407,10 +408,19 @@ impl heika_api::Reader for DbReader {
         if page.descending {
             prefixes.reverse();
         }
+        let after = after.map(|after| MetadataFields {
+            source: after.source.0,
+            target: after.target.0,
+            scoped_key: after.scoped_key,
+            target_id: after.target_id,
+            metadata_type: after.metadata_type,
+        });
         let mut skip = (page.number - 1) * page.size;
         let mut found = Vec::new();
         let mut failed = None;
         for prefix in prefixes {
+            // 位置は、この並べ方のキーにして渡す
+            let after = after.map(|after| after.search_key(prefix[0]));
             let mut visit = |key: &[u8]| {
                 let Some(fields) = MetadataFields::from_search_key(key) else {
                     return true;
@@ -446,14 +456,18 @@ impl heika_api::Reader for DbReader {
                 found.push(fields);
                 found.len() < page.size
             };
+            let after = after.as_deref();
             match view {
-                View::Now => self
-                    .db
-                    .for_each_search_key(&prefix, page.descending, &mut visit),
-                View::At(_) => {
+                View::Now => {
                     self.db
-                        .for_each_search_key_with_past(&prefix, page.descending, &mut visit)
+                        .for_each_search_key(&prefix, after, page.descending, &mut visit)
                 }
+                View::At(_) => self.db.for_each_search_key_with_past(
+                    &prefix,
+                    after,
+                    page.descending,
+                    &mut visit,
+                ),
             }
             .map_err(|error| error.to_string())?;
             if let Some(error) = failed {

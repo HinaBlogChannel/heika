@@ -143,7 +143,9 @@ impl Finalization {
 }
 
 impl NodeConfig {
-    /// 名乗るロール。`listen.roles` がなければ、Peer と IPv4 に、REST の口があれば Api を、投票するなら Voting を足す
+    /// 名乗るロール。`listen.roles` がなければ、Peer に、REST の口があれば Api を、投票するなら Voting を足す。
+    /// メインネットの catapult と同じく IPv4 は立てない（catapult は、IPv4 も IPv6 もなければ IPv4 とみなす。
+    /// ノードの一覧を作るクローラーには、IPv4 の立ったロールを読めないものがある）
     pub fn roles(&self) -> NodeRoles {
         self.listen
             .as_ref()
@@ -155,7 +157,7 @@ impl NodeConfig {
                     .as_ref()
                     .filter(|finalization| finalization.voting_keys.is_some())
                     .map_or(0, |_| NodeRoles::VOTING.0);
-                NodeRoles(NodeRoles::PEER.0 | 0x40 | api | voting)
+                NodeRoles(NodeRoles::PEER.0 | api | voting)
             })
     }
 }
@@ -525,7 +527,7 @@ spec:
         let finalization = spec.finalization.as_ref().unwrap();
         assert!(finalization.counts());
         assert_eq!(finalization.voting_keys, Some(PathBuf::from("/keys")));
-        assert_eq!(spec.roles().0, 0x45);
+        assert_eq!(spec.roles().0, 0x05);
         assert!(Manifest::parse(&format!("{MINIMAL}  finalization:\n    vote: true\n")).is_err());
     }
 
@@ -537,8 +539,8 @@ spec:
                 .map(|manifest| manifest.spec.roles().0)
                 .map_err(|error| error.to_string())
         };
-        assert_eq!(roles(""), Ok(0x41));
-        assert_eq!(roles("  rest:\n    - address: 127.0.0.1:3000\n"), Ok(0x43));
+        assert_eq!(roles(""), Ok(0x01));
+        assert_eq!(roles("  rest:\n    - address: 127.0.0.1:3000\n"), Ok(0x03));
         assert_eq!(roles("    roles: 0x45\n"), Ok(0x45));
         assert_eq!(roles("    roles: 67\n"), Ok(0x43));
         assert_eq!(roles("    roles: [Peer, Voting, IPv4]\n"), Ok(0x45));

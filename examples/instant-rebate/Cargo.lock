@@ -584,9 +584,11 @@ dependencies = [
 name = "heika-store-redb"
 version = "0.11.0"
 dependencies = [
+ "heika-block",
  "heika-chain",
  "heika-core",
  "heika-state-transition",
+ "heika-transaction",
  "libc",
  "rayon",
  "redb",

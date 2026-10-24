@@ -11,6 +11,7 @@
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}` と、それぞれの `/merkle`: 今の状態と、状態の木の道
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
+//! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
 //! - `/transactionStatus/{hash}`、`/transactions/confirmed/{hash}`、`/blocks/{height}/transactions/{hash}/merkle`:
 //!   送ったトランザクションの行方と、入ったブロックへの Merkle の経路
 //!
@@ -42,8 +43,9 @@ use heika_rest::block::BlockInfo;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
     AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson,
-    DeploymentJson, ErrorJson, HealthStatusJson, NetworkJson, NodeHealthJson, NodeInfoJson,
-    ServerInfoJson, ServerJson, TransactionFeesJson, UnlockedAccountJson,
+    DeploymentJson, ErrorJson, HealthStatusJson, NetworkJson, NetworkPropertiesJson,
+    NodeHealthJson, NodeInfoJson, ServerInfoJson, ServerJson, TransactionFeesJson,
+    UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{AccountInfo, AccountJson, MosaicInfo, MosaicStateJson};
@@ -140,6 +142,8 @@ pub struct Node {
     /// 切り離した連署（catapult の `DetachedCosignature` の 136 バイト）を受け付ける口
     pub submit_cosignature: Submit,
     pub reader: Arc<dyn Reader>,
+    /// `/network/properties` で返す、ネットワークの設定。動いている間は変わらない
+    pub network_properties: Arc<NetworkPropertiesJson>,
 }
 
 /// バイナリに埋め込んだソースの ZIP。`GET /heika/sourcecode.zip` で返す
@@ -187,6 +191,10 @@ async fn network(State(api): State<Api>) -> Json<NetworkJson> {
         name: name.to_owned(),
         description: description.to_owned(),
     })
+}
+
+async fn network_properties(State(api): State<Api>) -> Json<NetworkPropertiesJson> {
+    Json(NetworkPropertiesJson::clone(&api.node.network_properties))
 }
 
 /// REST の版。catapult の REST の版の代わりに heika の版を返し、配った道具として heika を名乗る
@@ -540,6 +548,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/node/peers", get(node_peers))
         .route("/chain/info", get(chain_info))
         .route("/network", get(network))
+        .route("/network/properties", get(network_properties))
         .route("/node/server", get(node_server))
         .route("/node/health", get(node_health))
         .route("/node/unlockedaccount", get(unlocked))
@@ -806,6 +815,7 @@ mod tests {
             submit_cosignature: Arc::clone(&submit),
             submit,
             reader: Arc::new(FakeReader),
+            network_properties: Arc::new(NetworkPropertiesJson::default()),
         }
     }
 
@@ -824,6 +834,10 @@ mod tests {
         let (status, body) = get_status("/network").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["name"].is_string() && body["description"].is_string());
+        let (status, body) = get_status("/network/properties").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["network"].is_object() && body["chain"].is_object());
+        assert!(body["plugins"]["aggregate"].is_object());
         let (status, body) = get_status("/node/server").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["serverInfo"]["restVersion"], env!("CARGO_PKG_VERSION"));

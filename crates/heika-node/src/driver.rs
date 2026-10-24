@@ -491,8 +491,14 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     let api_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let outcome = std::thread::scope(|scope| -> Result<Outcome, NodeError> {
         if let Some((shared, recent)) = &api {
-            let addresses: Vec<String> =
-                spec.rest.iter().map(|rest| rest.address.clone()).collect();
+            let listeners: Vec<heika_api::Listener> = spec
+                .rest
+                .iter()
+                .map(|rest| heika_api::Listener {
+                    address: rest.address.clone(),
+                    rate_limit: rest.rate_limit,
+                })
+                .collect();
             let node = heika_api::Node {
                 submit: submit(
                     parameters,
@@ -519,7 +525,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {
-                if let Err(error) = heika_api::serve(&addresses, shared, node, stop) {
+                if let Err(error) = heika_api::serve(&listeners, shared, node, stop) {
                     eprintln!("{error}");
                 }
             });

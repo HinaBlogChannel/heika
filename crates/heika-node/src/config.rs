@@ -168,6 +168,13 @@ impl NodeConfig {
 pub struct Rest {
     /// 待ち受けるアドレス（`127.0.0.1:3000` など）
     pub address: String,
+    /// この口で、1 秒あたりに答える要求の数。どの道への要求も数え、超えたら 429 で答える。0 なら絞らない
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit: u32,
+}
+
+fn default_rate_limit() -> u32 {
+    60
 }
 
 /// 委任ハーベストの引き受け方

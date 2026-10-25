@@ -424,6 +424,423 @@ impl MultisigJson {
     }
 }
 
+/// `HashLockInfoDTO`。
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct HashLockInfo {
+    pub lock: HashLockJson,
+}
+
+/// `HashLockEntryDTO`。`status` は 0 がまだ使っていない、1 が使った（catapult の `LockStatus`）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashLockJson {
+    pub version: u16,
+    pub owner_address: String,
+    pub mosaic_id: String,
+    pub amount: String,
+    pub end_height: String,
+    pub status: u8,
+    pub hash: String,
+}
+
+impl HashLockJson {
+    /// 状態のバイト列。catapult の `HashLockInfoSerializer`。
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
+        let mut out = header(self.version)?;
+        lock_head(
+            &mut out,
+            &self.owner_address,
+            &self.mosaic_id,
+            &self.amount,
+            &self.end_height,
+            self.status,
+        )?;
+        out.extend_from_slice(&hex_array::<32>(&self.hash, "hash")?);
+        Ok(out)
+    }
+
+    /// 状態のバイト列から、REST が返す形にする。[`HashLockJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let lock = Self {
+            version: STATE_VERSION,
+            owner_address: hex(reader.take(24)?),
+            mosaic_id: format!("{:016X}", reader.u64()?),
+            amount: reader.u64()?.to_string(),
+            end_height: reader.u64()?.to_string(),
+            status: reader.u8()?,
+            hash: hex(reader.take(32)?),
+        };
+        reader.finish()?;
+        Ok(lock)
+    }
+
+    pub fn state_hash(&self) -> Result<Hash256, RestError> {
+        Ok(sha3(&self.to_state_bytes()?))
+    }
+
+    /// 状態の木のキー。ロックしたアグリゲートのハッシュの SHA3-256。
+    pub fn tree_key(&self) -> Result<Hash256, RestError> {
+        Ok(patricia::hash_key(&Hash256(hex_array(&self.hash, "hash")?)))
+    }
+}
+
+/// `SecretLockInfoDTO`。
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct SecretLockInfo {
+    pub lock: SecretLockJson,
+}
+
+/// `SecretLockEntryDTO`。`compositeHash` は、シークレットと受取人から求めたハッシュ（木のキーのもと）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretLockJson {
+    pub version: u16,
+    pub owner_address: String,
+    pub mosaic_id: String,
+    pub amount: String,
+    pub end_height: String,
+    pub status: u8,
+    pub hash_algorithm: u8,
+    pub secret: String,
+    pub recipient_address: String,
+    pub composite_hash: String,
+}
+
+impl SecretLockJson {
+    /// 状態のバイト列。catapult の `SecretLockInfoSerializer`。`compositeHash` は入らない
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
+        let mut out = header(self.version)?;
+        lock_head(
+            &mut out,
+            &self.owner_address,
+            &self.mosaic_id,
+            &self.amount,
+            &self.end_height,
+            self.status,
+        )?;
+        out.push(self.hash_algorithm);
+        out.extend_from_slice(&hex_array::<32>(&self.secret, "secret")?);
+        out.extend_from_slice(&hex_array::<24>(
+            &self.recipient_address,
+            "recipientAddress",
+        )?);
+        Ok(out)
+    }
+
+    /// 状態のバイト列と、木のキーのもとのハッシュから、REST が返す形にする。[`SecretLockJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8], composite_hash: &Hash256) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let lock = Self {
+            version: STATE_VERSION,
+            owner_address: hex(reader.take(24)?),
+            mosaic_id: format!("{:016X}", reader.u64()?),
+            amount: reader.u64()?.to_string(),
+            end_height: reader.u64()?.to_string(),
+            status: reader.u8()?,
+            hash_algorithm: reader.u8()?,
+            secret: hex(reader.take(32)?),
+            recipient_address: hex(reader.take(24)?),
+            composite_hash: hex(&composite_hash.0),
+        };
+        reader.finish()?;
+        Ok(lock)
+    }
+
+    pub fn state_hash(&self) -> Result<Hash256, RestError> {
+        Ok(sha3(&self.to_state_bytes()?))
+    }
+
+    /// 状態の木のキー。`compositeHash` の SHA3-256。
+    pub fn tree_key(&self) -> Result<Hash256, RestError> {
+        Ok(patricia::hash_key(&Hash256(hex_array(
+            &self.composite_hash,
+            "compositeHash",
+        )?)))
+    }
+}
+
+/// ロック2種類に共通の頭
+fn lock_head(
+    out: &mut Vec<u8>,
+    owner_address: &str,
+    mosaic_id: &str,
+    amount: &str,
+    end_height: &str,
+    status: u8,
+) -> Result<(), RestError> {
+    out.extend_from_slice(&hex_array::<24>(owner_address, "ownerAddress")?);
+    out.extend_from_slice(&id(mosaic_id, "mosaicId")?.to_le_bytes());
+    out.extend_from_slice(&number(amount, "amount")?.to_le_bytes());
+    out.extend_from_slice(&number(end_height, "endHeight")?.to_le_bytes());
+    out.push(status);
+    Ok(())
+}
+
+/// `AccountRestrictionsInfoDTO`。
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRestrictionsInfo {
+    pub account_restrictions: AccountRestrictionsJson,
+}
+
+/// `AccountRestrictionsDTO`。値のある種類だけ
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRestrictionsJson {
+    pub version: u16,
+    pub address: String,
+    pub restrictions: Vec<AccountRestrictionJson>,
+}
+
+/// `AccountRestrictionDTO`。`restrictionFlags` は種類（1 アドレス、2 モザイク、4 トランザクションの種類）に、
+/// 向き（0x4000 送るほう）と拒む印（0x8000）を足したもの
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRestrictionJson {
+    pub restriction_flags: u16,
+    pub values: Vec<AccountRestrictionValue>,
+}
+
+/// 制限の値。アドレスは16進、モザイクは ID の16進、トランザクションの種類は数
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AccountRestrictionValue {
+    Operation(u16),
+    Text(String),
+}
+
+/// 制限の種類ごとの、値のバイト数
+fn restriction_value_size(flags: u16) -> Result<usize, RestError> {
+    match flags & 0x3FFF {
+        0x0001 => Ok(24),
+        0x0002 => Ok(8),
+        0x0004 => Ok(2),
+        _ => Err(RestError::InvalidValue {
+            field: "restrictionFlags",
+        }),
+    }
+}
+
+impl AccountRestrictionsJson {
+    /// 状態のバイト列。catapult の `AccountRestrictionsSerializer`。
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
+        let mut out = header(self.version)?;
+        out.extend_from_slice(&hex_array::<24>(&self.address, "address")?);
+        out.extend_from_slice(&(self.restrictions.len() as u64).to_le_bytes());
+        for restriction in &self.restrictions {
+            let flags = restriction.restriction_flags;
+            let size = restriction_value_size(flags)?;
+            out.extend_from_slice(&flags.to_le_bytes());
+            out.extend_from_slice(&(restriction.values.len() as u64).to_le_bytes());
+            for value in &restriction.values {
+                match (size, value) {
+                    (2, AccountRestrictionValue::Operation(kind)) => {
+                        out.extend_from_slice(&kind.to_le_bytes())
+                    }
+                    (8, AccountRestrictionValue::Text(mosaic)) => {
+                        out.extend_from_slice(&id(mosaic, "values")?.to_le_bytes())
+                    }
+                    (24, AccountRestrictionValue::Text(address)) => {
+                        out.extend_from_slice(&hex_array::<24>(address, "values")?)
+                    }
+                    _ => return Err(RestError::InvalidValue { field: "values" }),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 状態のバイト列から、REST が返す形にする。[`AccountRestrictionsJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let address = hex(reader.take(24)?);
+        let mut restrictions = Vec::new();
+        for _ in 0..reader.u64()? {
+            let restriction_flags = reader.u16()?;
+            let size = restriction_value_size(restriction_flags)?;
+            let mut values = Vec::new();
+            for _ in 0..reader.u64()? {
+                let value = reader.take(size)?;
+                values.push(match size {
+                    2 => {
+                        AccountRestrictionValue::Operation(u16::from_le_bytes([value[0], value[1]]))
+                    }
+                    8 => AccountRestrictionValue::Text(format!(
+                        "{:016X}",
+                        u64::from_le_bytes(value.try_into().expect("8 バイト"))
+                    )),
+                    _ => AccountRestrictionValue::Text(hex(value)),
+                });
+            }
+            restrictions.push(AccountRestrictionJson {
+                restriction_flags,
+                values,
+            });
+        }
+        reader.finish()?;
+        Ok(Self {
+            version: STATE_VERSION,
+            address,
+            restrictions,
+        })
+    }
+
+    pub fn state_hash(&self) -> Result<Hash256, RestError> {
+        Ok(sha3(&self.to_state_bytes()?))
+    }
+
+    /// 状態の木のキー。アドレスの SHA3-256。
+    pub fn tree_key(&self) -> Result<Hash256, RestError> {
+        Ok(patricia::address_key(&Address(hex_array(
+            &self.address,
+            "address",
+        )?)))
+    }
+}
+
+/// `MosaicRestrictionsInfoDTO`（catapult の REST は `id` も返す）。
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicRestrictionInfo {
+    pub mosaic_restriction_entry: MosaicRestrictionEntryJson,
+}
+
+/// `MosaicAddressRestrictionDTO` か `MosaicGlobalRestrictionDTO`。`entryType` が 0 ならアドレスごとの値で
+/// `targetAddress` があり、1 ならモザイク全体の決まり
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicRestrictionEntryJson {
+    pub version: u16,
+    pub composite_hash: String,
+    pub entry_type: u8,
+    pub mosaic_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_address: Option<String>,
+    pub restrictions: Vec<MosaicRestrictionJson>,
+}
+
+/// 1つのキーの値（アドレスごと）か決まり（全体）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicRestrictionJson {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restriction: Option<MosaicGlobalRuleJson>,
+}
+
+/// モザイク全体の決まり。`referenceMosaicId` の、このキーの値を、`restrictionValue` と `restrictionType` で比べる
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MosaicGlobalRuleJson {
+    pub reference_mosaic_id: String,
+    pub restriction_value: String,
+    pub restriction_type: u8,
+}
+
+impl MosaicRestrictionEntryJson {
+    /// 状態のバイト列。catapult の `MosaicRestrictionEntrySerializer`。`compositeHash` は入らない
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
+        let mut out = header(self.version)?;
+        out.push(self.entry_type);
+        out.extend_from_slice(&id(&self.mosaic_id, "mosaicId")?.to_le_bytes());
+        let address = self.entry_type == 0;
+        if address {
+            let target = self.target_address.as_deref().ok_or(RestError::Missing {
+                field: "targetAddress",
+            })?;
+            out.extend_from_slice(&hex_array::<24>(target, "targetAddress")?);
+        } else if self.entry_type != 1 {
+            return Err(RestError::InvalidValue { field: "entryType" });
+        }
+        out.push(
+            u8::try_from(self.restrictions.len()).map_err(|_| RestError::InvalidValue {
+                field: "restrictions",
+            })?,
+        );
+        for restriction in &self.restrictions {
+            out.extend_from_slice(&number(&restriction.key, "key")?.to_le_bytes());
+            match (address, &restriction.value, &restriction.restriction) {
+                (true, Some(value), None) => {
+                    out.extend_from_slice(&number(value, "value")?.to_le_bytes())
+                }
+                (false, None, Some(rule)) => {
+                    out.extend_from_slice(
+                        &id(&rule.reference_mosaic_id, "referenceMosaicId")?.to_le_bytes(),
+                    );
+                    out.extend_from_slice(
+                        &number(&rule.restriction_value, "restrictionValue")?.to_le_bytes(),
+                    );
+                    out.push(rule.restriction_type);
+                }
+                _ => {
+                    return Err(RestError::InvalidValue {
+                        field: "restrictions",
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 状態のバイト列と、木のキーのもとのハッシュから、REST が返す形にする。
+    /// [`MosaicRestrictionEntryJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8], composite_hash: &Hash256) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let entry_type = reader.u8()?;
+        let mosaic_id = format!("{:016X}", reader.u64()?);
+        let target_address = match entry_type {
+            0 => Some(hex(reader.take(24)?)),
+            1 => None,
+            _ => return Err(RestError::InvalidValue { field: "entryType" }),
+        };
+        let mut restrictions = Vec::new();
+        for _ in 0..reader.u8()? {
+            let key = reader.u64()?.to_string();
+            restrictions.push(if target_address.is_some() {
+                MosaicRestrictionJson {
+                    key,
+                    value: Some(reader.u64()?.to_string()),
+                    restriction: None,
+                }
+            } else {
+                MosaicRestrictionJson {
+                    key,
+                    value: None,
+                    restriction: Some(MosaicGlobalRuleJson {
+                        reference_mosaic_id: format!("{:016X}", reader.u64()?),
+                        restriction_value: reader.u64()?.to_string(),
+                        restriction_type: reader.u8()?,
+                    }),
+                }
+            });
+        }
+        reader.finish()?;
+        Ok(Self {
+            version: STATE_VERSION,
+            composite_hash: hex(&composite_hash.0),
+            entry_type,
+            mosaic_id,
+            target_address,
+            restrictions,
+        })
+    }
+
+    pub fn state_hash(&self) -> Result<Hash256, RestError> {
+        Ok(sha3(&self.to_state_bytes()?))
+    }
+
+    /// 状態の木のキー。`compositeHash` の SHA3-256。
+    pub fn tree_key(&self) -> Result<Hash256, RestError> {
+        Ok(patricia::hash_key(&Hash256(hex_array(
+            &self.composite_hash,
+            "compositeHash",
+        )?)))
+    }
+}
+
 /// `MetadataInfoDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

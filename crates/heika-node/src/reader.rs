@@ -16,8 +16,8 @@
 use std::sync::Arc;
 
 use heika_api::{
-    AliasTarget, MetadataFilter, MetadataPosition, NamespaceFilter, PageRequest, PartialFilter,
-    StateError,
+    AliasTarget, KeyedStates, MetadataFilter, MetadataPosition, NamespaceFilter, PageRequest,
+    PartialFilter, StateError,
 };
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
@@ -38,7 +38,9 @@ use heika_rest::state::{
     NamespaceInfo, NamespaceNameJson, RootNamespaceState,
 };
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
-use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
+use heika_state_transition::executor::persist::{
+    decode_account_row, height_of_meta, lock_or_restriction_state, row_key,
+};
 use heika_state_transition::tree::{EMPTY_ROOT, ROOT, node_key, walk};
 use heika_store_redb::search::{
     METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID, NAMESPACE_BY_ADDRESS,
@@ -402,6 +404,29 @@ impl heika_api::Reader for DbReader {
     ) -> Result<Vec<MultisigJson>, StateError> {
         let (view, _) = self.view(at)?;
         self.multisigs_in(&view, addresses)
+    }
+
+    fn lock_or_restriction_states(
+        &self,
+        cache: SubCache,
+        keys: &[Vec<u8>],
+        at: Option<u64>,
+    ) -> Result<KeyedStates, StateError> {
+        let (view, _) = self.view(at)?;
+        let rows: Vec<_> = keys.iter().map(|key| row_key(cache, key)).collect();
+        let mut out = Vec::new();
+        for (key, row) in keys.iter().zip(self.rows(&view, &rows)?) {
+            let Some(row) = row else { continue };
+            let Some(state) = lock_or_restriction_state(cache, key, &row)
+                .map_err(|error| StateError::Other(error.to_string()))?
+            else {
+                continue;
+            };
+            let mut bytes = 1u16.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&state);
+            out.push((key.clone(), bytes));
+        }
+        Ok(out)
     }
 
     fn multisig_graph(

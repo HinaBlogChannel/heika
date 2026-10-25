@@ -15,6 +15,9 @@
 //! - `POST /accounts`、`POST /mosaics`: ID を並べて、まとめて引く。これも `?height=` を受ける
 //! - `/account/{address}/multisig`、`/merkle`、`/graph`: マルチシグの状態と、その木の道と、上下にたどった木。
 //!   これも `?height=` を受ける
+//! - `/lock/hash/{hash}`、`/lock/secret/{compositeHash}`、`/restrictions/account/{address}`、
+//!   `/restrictions/mosaic/{compositeHash}` と、それぞれの `/merkle` と、`POST` でまとめて引く口: ロックと制限。
+//!   これも `?height=` を受ける
 //! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
 //! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
 //!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
@@ -60,9 +63,10 @@ use heika_rest::node::{
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
-    AccountInfo, AccountJson, AccountNamesJson, MetadataEntryJson, MetadataInfo, MosaicInfo,
-    MosaicNamesJson, MosaicStateJson, MultisigGraphLevel, MultisigInfo, MultisigJson,
-    NamespaceInfo, NamespaceNameJson,
+    AccountInfo, AccountJson, AccountNamesJson, AccountRestrictionsInfo, AccountRestrictionsJson,
+    HashLockInfo, HashLockJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicNamesJson,
+    MosaicRestrictionEntryJson, MosaicRestrictionInfo, MosaicStateJson, MultisigGraphLevel,
+    MultisigInfo, MultisigJson, NamespaceInfo, NamespaceNameJson, SecretLockInfo, SecretLockJson,
 };
 use heika_rest::transaction::TransactionInfo;
 
@@ -121,6 +125,9 @@ impl From<String> for StateError {
 
 /// チェーンの中身を読む口。エラーはわけの文（500 で返す）。
 ///
+/// 木のキーのもとと、状態のバイト列の組の並び（[`Reader::lock_or_restriction_states`]）
+pub type KeyedStates = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// 状態を読む口の `at` は、そのブロックを実行したあとの状態を引く高さ。`None` なら今の状態
 pub trait Reader: Send + Sync {
     /// アカウントの状態。`addresses` のうち、あるものだけを渡した順に。全部を同じ高さで読む
@@ -137,6 +144,16 @@ pub trait Reader: Send + Sync {
         addresses: &[Address],
         at: Option<u64>,
     ) -> Result<Vec<MultisigJson>, StateError>;
+    /// ロックか制限（`cache` が [`SubCache::HashLockInfo`]、[`SubCache::SecretLockInfo`]、
+    /// [`SubCache::AccountRestriction`]、[`SubCache::MosaicRestriction`]）の状態を、catapult の状態のバイト列
+    /// （版の番号から）で。`keys`（木のキーのもと）のうち、あるものだけを、キーと組で渡した順に。全部を同じ高さで読む。
+    /// ロックは履歴の最後のもので、使ったものや期限を過ぎたものも、状態に残っていれば返す（catapult の REST と同じ）
+    fn lock_or_restriction_states(
+        &self,
+        cache: SubCache,
+        keys: &[Vec<u8>],
+        at: Option<u64>,
+    ) -> Result<KeyedStates, StateError>;
     /// `address` から上と下にたどったマルチシグの木（[`multisig_graph`]）。`address` になければ `None`。
     /// 全部を同じ高さで読む
     fn multisig_graph(
@@ -979,6 +996,188 @@ async fn multisig_graph_route(
     found_at(&id, at, api.node.reader.multisig_graph(&address, at))
 }
 
+/// ロックと制限の口。どの木の、どんな ID か
+#[derive(Clone, Copy)]
+enum Kept {
+    HashLock,
+    SecretLock,
+    AccountRestriction,
+    MosaicRestriction,
+}
+
+impl Kept {
+    fn cache(self) -> SubCache {
+        match self {
+            Kept::HashLock => SubCache::HashLockInfo,
+            Kept::SecretLock => SubCache::SecretLockInfo,
+            Kept::AccountRestriction => SubCache::AccountRestriction,
+            Kept::MosaicRestriction => SubCache::MosaicRestriction,
+        }
+    }
+
+    /// 1件の口の ID の名前と、まとめて引く本文の項目の名前（catapult の REST と同じ）
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Kept::HashLock => ("hash", "hashes"),
+            Kept::SecretLock | Kept::MosaicRestriction => ("compositeHash", "compositeHashes"),
+            Kept::AccountRestriction => ("address", "addresses"),
+        }
+    }
+
+    /// ID を木のキーのもとにする。読めなければ `None`
+    fn key(self, id: &str, network: NetworkIdentifier) -> Option<Vec<u8>> {
+        match self {
+            Kept::AccountRestriction => address_only(id, network).map(|address| address.0.to_vec()),
+            _ => hash256(id).map(|hash| hash.0.to_vec()),
+        }
+    }
+
+    /// 木のキーのもとを、木のキーにする
+    fn tree_key(self, key: &[u8]) -> Hash256 {
+        match self {
+            Kept::AccountRestriction => {
+                patricia::address_key(&Address(key.try_into().expect("24 バイト")))
+            }
+            _ => patricia::hash_key(&Hash256(key.try_into().expect("32 バイト"))),
+        }
+    }
+
+    /// 状態のバイト列を、catapult の REST と同じ JSON にする
+    fn json(self, key: &[u8], bytes: &[u8]) -> Result<KeptJson, String> {
+        let hash = || Hash256(key.try_into().unwrap_or([0; 32]));
+        match self {
+            Kept::HashLock => HashLockJson::from_state_bytes(bytes)
+                .map(|lock| KeptJson::HashLock(HashLockInfo { lock })),
+            Kept::SecretLock => SecretLockJson::from_state_bytes(bytes, &hash())
+                .map(|lock| KeptJson::SecretLock(SecretLockInfo { lock })),
+            Kept::AccountRestriction => {
+                AccountRestrictionsJson::from_state_bytes(bytes).map(|account_restrictions| {
+                    KeptJson::AccountRestriction(AccountRestrictionsInfo {
+                        account_restrictions,
+                    })
+                })
+            }
+            Kept::MosaicRestriction => MosaicRestrictionEntryJson::from_state_bytes(bytes, &hash())
+                .map(|mosaic_restriction_entry| {
+                    KeptJson::MosaicRestriction(MosaicRestrictionInfo {
+                        mosaic_restriction_entry,
+                    })
+                }),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    /// `keys` の状態を読んで、JSON にする
+    fn read(
+        self,
+        api: &Api,
+        keys: &[Vec<u8>],
+        at: Option<u64>,
+    ) -> Result<Vec<KeptJson>, StateError> {
+        api.node
+            .reader
+            .lock_or_restriction_states(self.cache(), keys, at)?
+            .iter()
+            .map(|(key, bytes)| self.json(key, bytes).map_err(StateError::Other))
+            .collect()
+    }
+}
+
+/// ロックと制限の JSON
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum KeptJson {
+    HashLock(HashLockInfo),
+    SecretLock(SecretLockInfo),
+    AccountRestriction(AccountRestrictionsInfo),
+    MosaicRestriction(MosaicRestrictionInfo),
+}
+
+/// ロックと制限をまとめて引く本文。catapult の REST と同じく、配列の代わりに1つの文字列でもよい
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeptBody {
+    hashes: Option<OneOrMany>,
+    composite_hashes: Option<OneOrMany>,
+    addresses: Option<OneOrMany>,
+}
+
+async fn kept_one(kept: Kept, api: Api, id: String, query: AtQuery) -> Response {
+    let Some(key) = kept.key(&id, api.node.reader.network()) else {
+        return invalid(format!("{} has an invalid format", kept.names().0));
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = kept.read(&api, &[key], at);
+    found_at(&id, at, read.map(|values| values.into_iter().next()))
+}
+
+async fn kept_many(kept: Kept, api: Api, query: AtQuery, body: KeptBody) -> Response {
+    let name = kept.names().1;
+    let values = match kept {
+        Kept::HashLock => body.hashes,
+        Kept::SecretLock | Kept::MosaicRestriction => body.composite_hashes,
+        Kept::AccountRestriction => body.addresses,
+    }
+    .map(OneOrMany::into_vec);
+    let network = api.node.reader.network();
+    let keys = match body_ids(values.as_deref(), name, MAX_STATE_IDS, |id| {
+        kept.key(id, network)
+    }) {
+        Ok(keys) => dedup(keys),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at("", at, kept.read(&api, &keys, at).map(Some))
+}
+
+async fn kept_merkle(kept: Kept, api: Api, id: String, query: AtQuery) -> Response {
+    let Some(key) = kept.key(&id, api.node.reader.network()) else {
+        return invalid(format!("{} has an invalid format", kept.names().0));
+    };
+    state_path(&api, &id, &query, kept.cache(), kept.tree_key(&key))
+}
+
+/// ロックと制限の、まとめて引く口と、1件の口と、木の道の口
+fn kept_routes(router: Router<Api>, base: &str, kept: Kept) -> Router<Api> {
+    let id = kept.names().0;
+    router
+        .route(
+            base,
+            post(
+                move |State(api): State<Api>,
+                      Query(query): Query<AtQuery>,
+                      Json(body): Json<KeptBody>| {
+                    kept_many(kept, api, query, body)
+                },
+            )
+            .options(preflight),
+        )
+        .route(
+            &format!("{base}/{{{id}}}"),
+            get(
+                move |State(api): State<Api>,
+                      Path(id): Path<String>,
+                      Query(query): Query<AtQuery>| kept_one(kept, api, id, query),
+            ),
+        )
+        .route(
+            &format!("{base}/{{{id}}}/merkle"),
+            get(
+                move |State(api): State<Api>,
+                      Path(id): Path<String>,
+                      Query(query): Query<AtQuery>| {
+                    kept_merkle(kept, api, id, query)
+                },
+            ),
+        )
+}
+
 async fn mosaic_merkle(
     State(api): State<Api>,
     Path(id): Path<String>,
@@ -1500,7 +1699,17 @@ async fn allow_any_origin(mut response: Response) -> Response {
 
 /// 口の並び
 pub fn router(shared: Shared, node: Node) -> Router {
-    Router::new()
+    let router = [
+        ("/lock/hash", Kept::HashLock),
+        ("/lock/secret", Kept::SecretLock),
+        ("/restrictions/account", Kept::AccountRestriction),
+        ("/restrictions/mosaic", Kept::MosaicRestriction),
+    ]
+    .into_iter()
+    .fold(Router::new(), |router, (base, kept)| {
+        kept_routes(router, base, kept)
+    });
+    router
         .route("/node/info", get(node_info))
         .route("/node/peers", get(node_peers))
         .route("/chain/info", get(chain_info))
@@ -1881,6 +2090,50 @@ mod tests {
             at: Option<u64>,
         ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError> {
             multisig_graph(address, |addresses| self.multisigs(addresses, at))
+        }
+
+        /// ハッシュ [0x44; 32] のハッシュロックと、`known` のアカウントの制限だけがある
+        fn lock_or_restriction_states(
+            &self,
+            cache: SubCache,
+            keys: &[Vec<u8>],
+            at: Option<u64>,
+        ) -> Result<KeyedStates, StateError> {
+            check_at(at)?;
+            let state = |key: &[u8]| match cache {
+                SubCache::HashLockInfo if key == [0x44; 32] => Some(
+                    HashLockJson {
+                        version: 1,
+                        owner_address: known().to_hex(),
+                        mosaic_id: format!("{CURRENCY:016X}"),
+                        amount: "10000000".to_owned(),
+                        end_height: "480".to_owned(),
+                        status: 0,
+                        hash: "44".repeat(32),
+                    }
+                    .to_state_bytes()
+                    .unwrap(),
+                ),
+                SubCache::AccountRestriction if key == known().0 => Some(
+                    AccountRestrictionsJson {
+                        version: 1,
+                        address: known().to_hex(),
+                        restrictions: vec![heika_rest::state::AccountRestrictionJson {
+                            restriction_flags: 0xC004,
+                            values: vec![heika_rest::state::AccountRestrictionValue::Operation(
+                                0x4154,
+                            )],
+                        }],
+                    }
+                    .to_state_bytes()
+                    .unwrap(),
+                ),
+                _ => None,
+            };
+            Ok(keys
+                .iter()
+                .filter_map(|key| state(key).map(|bytes| (key.clone(), bytes)))
+                .collect())
         }
 
         fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
@@ -2381,6 +2634,79 @@ mod tests {
                 .await
                 .0,
             StatusCode::GONE
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_locks_and_restrictions_like_catapult() {
+        let lock = "44".repeat(32);
+        let (status, body) = get_status(&format!("/lock/hash/{lock}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lock"]["hash"], lock.as_str());
+        assert_eq!(body["lock"]["status"], 0);
+        assert_eq!(body["lock"]["endHeight"], "480");
+        let (status, body) = get_status(&format!("/restrictions/account/{}", known())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["accountRestrictions"]["restrictions"],
+            serde_json::json!([{ "restrictionFlags": 0xC004, "values": [0x4154] }])
+        );
+        // まとめて引けば、あるものだけ。1つの文字列でもよい
+        let (status, body) = post(
+            "/lock/hash",
+            &format!(r#"{{"hashes": ["{lock}", "{}"]}}"#, "45".repeat(32)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        let (_, body) = post(
+            "/restrictions/account",
+            &format!(r#"{{"addresses": "{}"}}"#, known()),
+        )
+        .await;
+        assert_eq!(
+            body[0]["accountRestrictions"]["address"],
+            known().to_hex().as_str()
+        );
+        let other = "45".repeat(32);
+        for path in [
+            format!("/lock/hash/{other}"),
+            format!("/lock/secret/{other}"),
+            format!("/restrictions/mosaic/{other}"),
+        ] {
+            assert_eq!(get_status(&path).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+        let (_, body) = post(
+            "/lock/secret",
+            &format!(r#"{{"compositeHashes": ["{other}"]}}"#),
+        )
+        .await;
+        assert_eq!(body, serde_json::json!([]));
+        for (path, body) in [
+            ("/lock/hash", r#"{"hashes": ["12"]}"#.to_owned()),
+            ("/lock/secret", r#"{"hashes": []}"#.to_owned()),
+            (
+                "/restrictions/account",
+                r#"{"addresses": ["11"]}"#.to_owned(),
+            ),
+        ] {
+            let (status, response) = post(path, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
+            assert_eq!(response["code"], "InvalidArgument");
+        }
+        assert_eq!(get_status("/lock/hash/12").await.0, StatusCode::CONFLICT);
+        let response = get_response(&format!("/lock/hash/{lock}?height=7")).await;
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        assert_eq!(
+            get_status(&format!("/restrictions/account/{}?height=4", known()))
+                .await
+                .0,
+            StatusCode::GONE
+        );
+        // 木の道の口もある（読み役が答えを持っていれば 200）
+        assert_ne!(
+            get_status(&format!("/lock/hash/{lock}/merkle")).await.0,
+            StatusCode::NOT_FOUND
         );
     }
 

@@ -839,20 +839,6 @@ impl Db {
         self.current(STATE, key)
     }
 
-    /// 今の状態の行を、`keys` の順に。1つの読み取りで読むので、途中でブロックが入っても同じ高さの値になる
-    pub fn state_rows_of(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, DbError> {
-        let transaction = self.begin_read()?;
-        let table = transaction.open_table(STATE).map_err(db_error)?;
-        keys.iter()
-            .map(|key| {
-                Ok(table
-                    .get(key.as_slice())
-                    .map_err(db_error)?
-                    .map(|value| value.value().to_vec()))
-            })
-            .collect()
-    }
-
     /// 今の木のノード `key`（[`heika_state_transition::tree::node_key`]）。なければ `None`
     pub fn trie_node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
         self.current(TRIE_TABLES.current, key)
@@ -928,6 +914,14 @@ impl Db {
 
     /// `height` のブロックを実行したあとの状態と木のノードを、1つの読み取りで引くもの。
     /// その高さの履歴がなければ [`DbError::NoHistory`]。実行した高さより上かは確かめない（今の値が返る）
+    /// 今の状態を引く先。1つの読み取りを開いたままにするので、何度引いても、開いた時点の同じ高さの値になる
+    pub fn now(&self) -> Result<Now, DbError> {
+        let transaction = self.begin_read()?;
+        Ok(Now {
+            state: transaction.open_table(STATE).map_err(db_error)?,
+        })
+    }
+
     pub fn at(&self, height: u64) -> Result<At, DbError> {
         let transaction = self.begin_read()?;
         Ok(At {
@@ -1912,6 +1906,22 @@ impl At {
     /// 木のノード。なければ `None`
     pub fn trie_node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
         self.trie.get(key)
+    }
+}
+
+/// 今の状態を、1つの読み取りで引く先（[`Db::now`]）
+pub struct Now {
+    state: redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+}
+
+impl Now {
+    /// 状態の行。なければ `None`
+    pub fn state(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(self
+            .state
+            .get(key)
+            .map_err(db_error)?
+            .map(|value| value.value().to_vec()))
     }
 }
 
@@ -3240,15 +3250,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_current_rows_one_by_one_in_a_batch_and_by_prefix() {
+    fn reads_current_rows_one_by_one_in_one_read_and_by_prefix() {
         let dir = TempDir::new();
         let db = pruning_fixture(&dir.0);
         assert_eq!(db.state_row(b"a").unwrap().as_deref(), Some(&b"a5"[..]));
         assert_eq!(db.state_row(b"c").unwrap(), None);
-        assert_eq!(
-            db.state_rows_of(&[b"c".to_vec(), b"a".to_vec()]).unwrap(),
-            vec![None, Some(b"a5".to_vec())]
-        );
+        let now = db.now().unwrap();
+        assert_eq!(now.state(b"a").unwrap().as_deref(), Some(&b"a5"[..]));
+        assert_eq!(now.state(b"c").unwrap(), None);
         assert_eq!(db.trie_node(b"n").unwrap().as_deref(), Some(&b"n4"[..]));
         let mut seen = Vec::new();
         db.for_each_state_row(b"", &mut |key, value| {

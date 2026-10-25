@@ -13,6 +13,8 @@
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
 //! - `POST /accounts`、`POST /mosaics`: ID を並べて、まとめて引く。これも `?height=` を受ける
+//! - `/account/{address}/multisig`、`/merkle`、`/graph`: マルチシグの状態と、その木の道と、上下にたどった木。
+//!   これも `?height=` を受ける
 //! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
 //! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
 //!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
@@ -59,7 +61,8 @@ use heika_rest::node::{
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
     AccountInfo, AccountJson, AccountNamesJson, MetadataEntryJson, MetadataInfo, MosaicInfo,
-    MosaicNamesJson, MosaicStateJson, NamespaceInfo, NamespaceNameJson,
+    MosaicNamesJson, MosaicStateJson, MultisigGraphLevel, MultisigInfo, MultisigJson,
+    NamespaceInfo, NamespaceNameJson,
 };
 use heika_rest::transaction::TransactionInfo;
 
@@ -128,6 +131,19 @@ pub trait Reader: Send + Sync {
     ) -> Result<Vec<AccountJson>, StateError>;
     /// モザイクの定義の状態。`ids` のうち、あるものだけを渡した順に。全部を同じ高さで読む
     fn mosaics(&self, ids: &[u64], at: Option<u64>) -> Result<Vec<MosaicStateJson>, StateError>;
+    /// マルチシグの状態。`addresses` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn multisigs(
+        &self,
+        addresses: &[Address],
+        at: Option<u64>,
+    ) -> Result<Vec<MultisigJson>, StateError>;
+    /// `address` から上と下にたどったマルチシグの木（[`multisig_graph`]）。`address` になければ `None`。
+    /// 全部を同じ高さで読む
+    fn multisig_graph(
+        &self,
+        address: &Address,
+        at: Option<u64>,
+    ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError>;
     /// ネームスペース（ルートか子）の状態。なければ `None`。期限（猶予を含む）が過ぎても状態に残っていれば返し、
     /// `active` が `false` になる（catapult の REST と同じ）
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError>;
@@ -599,6 +615,72 @@ impl AtQuery {
     }
 }
 
+/// マルチシグの木の、たどる段の上限。catapult はマルチシグの深さを 3 までに抑えるので、ふつうは届かない
+const MAX_MULTISIG_LEVELS: i32 = 16;
+
+/// `address` から、上（入っているマルチシグ）と下（連署者）にたどったマルチシグの木。catapult の REST の
+/// `getMultisigGraph` と同じく、段ごとに前の段の全員のアドレスを集めて引き、なくなったらやめる。上の段から順に
+/// 並べる。`read` はアドレスのうち、あるものだけを返す。`address` になければ `None`
+pub fn multisig_graph<E>(
+    address: &Address,
+    mut read: impl FnMut(&[Address]) -> Result<Vec<MultisigJson>, E>,
+) -> Result<Option<Vec<MultisigGraphLevel>>, E> {
+    let Some(start) = read(std::slice::from_ref(address))?.into_iter().next() else {
+        return Ok(None);
+    };
+    // 段にあるアカウントの、上か下のアドレスを、重ねずに集める
+    let next = |entries: &[MultisigJson], up: bool| {
+        let mut addresses: Vec<Address> = Vec::new();
+        for entry in entries {
+            let side = if up {
+                &entry.multisig_addresses
+            } else {
+                &entry.cosignatory_addresses
+            };
+            for address in side.iter().filter_map(|hex| Address::from_hex(hex).ok()) {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        addresses
+    };
+    let mut levels = vec![(0, vec![start])];
+    for up in [true, false] {
+        let step = if up { -1 } else { 1 };
+        let mut level: i32 = 0;
+        let mut entries = levels[if up { 0 } else { levels.len() - 1 }].1.clone();
+        while level.abs() < MAX_MULTISIG_LEVELS {
+            let addresses = next(&entries, up);
+            if addresses.is_empty() {
+                break;
+            }
+            entries = read(&addresses)?;
+            if entries.is_empty() {
+                break;
+            }
+            level += step;
+            if up {
+                levels.insert(0, (level, entries.clone()));
+            } else {
+                levels.push((level, entries.clone()));
+            }
+        }
+    }
+    Ok(Some(
+        levels
+            .into_iter()
+            .map(|(level, entries)| MultisigGraphLevel {
+                level,
+                multisig_entries: entries
+                    .into_iter()
+                    .map(|multisig| MultisigInfo { multisig })
+                    .collect(),
+            })
+            .collect(),
+    ))
+}
+
 /// `?height=` が読めない形（409）
 struct InvalidHeight;
 
@@ -838,6 +920,63 @@ async fn mosaics(
             .collect::<Vec<_>>()
     });
     found_at("", at, read.map(Some))
+}
+
+async fn multisig(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.multisigs(&[address], at);
+    found_at(
+        &id,
+        at,
+        read.map(|entries| {
+            entries
+                .into_iter()
+                .next()
+                .map(|multisig| MultisigInfo { multisig })
+        }),
+    )
+}
+
+async fn multisig_merkle(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    state_path(
+        &api,
+        &id,
+        &query,
+        SubCache::Multisig,
+        patricia::address_key(&address),
+    )
+}
+
+async fn multisig_graph_route(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at(&id, at, api.node.reader.multisig_graph(&address, at))
 }
 
 async fn mosaic_merkle(
@@ -1394,6 +1533,9 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/accounts", post(accounts).options(preflight))
         .route("/accounts/{id}", get(account))
         .route("/accounts/{id}/merkle", get(account_merkle))
+        .route("/account/{id}/multisig", get(multisig))
+        .route("/account/{id}/multisig/merkle", get(multisig_merkle))
+        .route("/account/{id}/multisig/graph", get(multisig_graph_route))
         .route("/mosaics", post(mosaics).options(preflight))
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
@@ -1641,6 +1783,32 @@ mod tests {
     }
 
     /// 偽の読み役は高さ 10 まで実行していて、5 より前の状態の履歴は持っていない
+    /// 偽の読み役のマルチシグ。`M` は `known` と `C` が連署するマルチシグで、`M` は `U` の連署者
+    fn fake_multisig_address(name: char) -> Address {
+        Address::from_public_key(&PublicKey([name as u8; 32]), NetworkIdentifier::TESTNET)
+    }
+
+    fn fake_multisigs() -> Vec<MultisigJson> {
+        let entry = |address: Address, cosignatories: &[Address], multisigs: &[Address]| {
+            let hexes = |addresses: &[Address]| addresses.iter().map(Address::to_hex).collect();
+            MultisigJson {
+                version: 1,
+                account_address: address.to_hex(),
+                min_approval: cosignatories.len() as u32,
+                min_removal: 1,
+                cosignatory_addresses: hexes(cosignatories),
+                multisig_addresses: hexes(multisigs),
+            }
+        };
+        let [u, m, c] = ['U', 'M', 'C'].map(fake_multisig_address);
+        vec![
+            entry(u, &[m], &[]),
+            entry(m, &[known(), c], &[u]),
+            entry(known(), &[], &[m]),
+            entry(c, &[], &[m]),
+        ]
+    }
+
     fn check_at(at: Option<u64>) -> Result<(), StateError> {
         match at {
             Some(height) if height > 10 => Err(StateError::Ahead { height, tip: 10 }),
@@ -1689,6 +1857,30 @@ mod tests {
                 .filter(|id| **id == CURRENCY)
                 .map(mosaic)
                 .collect())
+        }
+
+        fn multisigs(
+            &self,
+            addresses: &[Address],
+            at: Option<u64>,
+        ) -> Result<Vec<MultisigJson>, StateError> {
+            check_at(at)?;
+            Ok(addresses
+                .iter()
+                .filter_map(|address| {
+                    fake_multisigs()
+                        .into_iter()
+                        .find(|entry| entry.account_address == address.to_hex())
+                })
+                .collect())
+        }
+
+        fn multisig_graph(
+            &self,
+            address: &Address,
+            at: Option<u64>,
+        ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError> {
+            multisig_graph(address, |addresses| self.multisigs(addresses, at))
         }
 
         fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
@@ -2118,6 +2310,78 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
             assert_eq!(response["code"], "InvalidArgument");
         }
+    }
+
+    #[tokio::test]
+    async fn reads_multisigs_and_their_graph_like_catapult() {
+        let [u, m, c] = ['U', 'M', 'C'].map(fake_multisig_address);
+        let (status, body) = get_status(&format!("/account/{m}/multisig")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["multisig"]["accountAddress"], m.to_hex().as_str());
+        assert_eq!(body["multisig"]["minApproval"], 2);
+        let levels = |body: &serde_json::Value| -> Vec<(i64, Vec<String>)> {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|level| {
+                    let entries = level["multisigEntries"].as_array().unwrap();
+                    (
+                        level["level"].as_i64().unwrap(),
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                entry["multisig"]["accountAddress"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned()
+                            })
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        // 上の段から順に。0 が引いたアカウント
+        let (status, body) = get_status(&format!("/account/{m}/multisig/graph")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            levels(&body),
+            vec![
+                (-1, vec![u.to_hex()]),
+                (0, vec![m.to_hex()]),
+                (1, vec![known().to_hex(), c.to_hex()]),
+            ]
+        );
+        let (_, body) = get_status(&format!("/account/{}/multisig/graph", known().to_hex())).await;
+        assert_eq!(
+            levels(&body),
+            vec![
+                (-2, vec![u.to_hex()]),
+                (-1, vec![m.to_hex()]),
+                (0, vec![known().to_hex()])
+            ]
+        );
+        let other = fake_multisig_address('Z');
+        for path in [
+            format!("/account/{other}/multisig"),
+            format!("/account/{other}/multisig/graph"),
+        ] {
+            assert_eq!(get_status(&path).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+        // 公開鍵では引けない（catapult と同じ）
+        let key = "11".repeat(32);
+        assert_eq!(
+            get_status(&format!("/account/{key}/multisig")).await.0,
+            StatusCode::CONFLICT
+        );
+        let response = get_response(&format!("/account/{m}/multisig/graph?height=7")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        assert_eq!(
+            get_status(&format!("/account/{m}/multisig?height=4"))
+                .await
+                .0,
+            StatusCode::GONE
+        );
     }
 
     #[tokio::test]

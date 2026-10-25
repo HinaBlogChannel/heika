@@ -34,8 +34,8 @@ use heika_rest::merkle::{MerklePathItem, MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::TransactionFeesJson;
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
-    AccountJson, MetadataEntryJson, MosaicStateJson, NamespaceInfo, NamespaceNameJson,
-    RootNamespaceState,
+    AccountJson, MetadataEntryJson, MosaicStateJson, MultisigGraphLevel, MultisigJson,
+    NamespaceInfo, NamespaceNameJson, RootNamespaceState,
 };
 use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
 use heika_state_transition::executor::persist::{decode_account_row, height_of_meta, row_key};
@@ -44,7 +44,7 @@ use heika_store_redb::search::{
     METADATA_BY_SOURCE, METADATA_BY_TARGET, METADATA_BY_TARGET_ID, NAMESPACE_BY_ADDRESS,
     NAMESPACE_BY_MOSAIC, NAMESPACE_BY_OWNER, NamespaceRow, namespace_ids, row_key_of, row_yields,
 };
-use heika_store_redb::{At, Db, DbError, MetadataFields, Searches};
+use heika_store_redb::{At, Db, DbError, MetadataFields, Now, Searches};
 use heika_transaction::{Body, Transaction};
 
 use crate::recent::SharedRecent;
@@ -177,7 +177,11 @@ impl DbReader {
     fn view(&self, at: Option<u64>) -> Result<(View, u64), StateError> {
         let tip = self.executed()?;
         let Some(height) = at else {
-            return Ok((View::Now, tip));
+            let now = self
+                .db
+                .now()
+                .map_err(|error| StateError::Other(error.to_string()))?;
+            return Ok((View::Now(Box::new(now)), tip));
         };
         // 実行した高さより上を引くと、DB は今の値を返してしまう
         if height > tip {
@@ -195,7 +199,7 @@ impl DbReader {
     /// 状態の行。なければ `None`
     fn row(&self, view: &View, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
         match view {
-            View::Now => self.db.state_row(key),
+            View::Now(now) => now.state(key),
             View::At(past) => past.state(key),
         }
         .map_err(|error| StateError::Other(error.to_string()))
@@ -203,11 +207,33 @@ impl DbReader {
 
     /// 状態の行を `keys` の順に。なければ `None`。全部を同じ高さで読む
     fn rows(&self, view: &View, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, StateError> {
-        match view {
-            View::Now => self.db.state_rows_of(keys),
-            View::At(past) => keys.iter().map(|key| past.state(key)).collect(),
+        keys.iter().map(|key| self.row(view, key)).collect()
+    }
+
+    /// マルチシグの状態。`addresses` のうち、あるものだけを渡した順に
+    fn multisigs_in(
+        &self,
+        view: &View,
+        addresses: &[Address],
+    ) -> Result<Vec<MultisigJson>, StateError> {
+        let keys: Vec<_> = addresses
+            .iter()
+            .map(|address| row_key(SubCache::Multisig, &address.0))
+            .collect();
+        let mut out = Vec::new();
+        for (address, row) in addresses.iter().zip(self.rows(view, &keys)?) {
+            let Some(row) = row else { continue };
+            // 行はアドレスを除いたもの。葉と同じく、二つの数のあとに入れる
+            let (counts, rest) = row
+                .split_at_checked(8)
+                .ok_or_else(|| StateError::Other("マルチシグの行が短すぎます".to_owned()))?;
+            let mut bytes = 1u16.to_le_bytes().to_vec();
+            bytes.extend_from_slice(counts);
+            bytes.extend_from_slice(&address.0);
+            bytes.extend_from_slice(rest);
+            out.push(MultisigJson::from_state_bytes(&bytes).map_err(|error| error.to_string())?);
         }
-        .map_err(|error| StateError::Other(error.to_string()))
+        Ok(out)
     }
 
     /// 高さ `height` の状態の木 `cache` の根。差分が残っていなければ `None`
@@ -305,8 +331,8 @@ fn existed(past: &At, key: &[u8]) -> Result<bool, DbError> {
 
 /// 状態を引く先
 enum View {
-    /// 今の状態
-    Now,
+    /// 今の状態。開いた時点の高さで読む
+    Now(Box<Now>),
     /// ある高さのブロックを実行したあとの状態
     At(Box<At>),
 }
@@ -369,6 +395,24 @@ impl heika_api::Reader for DbReader {
         Ok(out)
     }
 
+    fn multisigs(
+        &self,
+        addresses: &[Address],
+        at: Option<u64>,
+    ) -> Result<Vec<MultisigJson>, StateError> {
+        let (view, _) = self.view(at)?;
+        self.multisigs_in(&view, addresses)
+    }
+
+    fn multisig_graph(
+        &self,
+        address: &Address,
+        at: Option<u64>,
+    ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError> {
+        let (view, _) = self.view(at)?;
+        heika_api::multisig_graph(address, |addresses| self.multisigs_in(&view, addresses))
+    }
+
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
         let (view, height) = self.view(at)?;
         let root_bytes = |root_id: u64, row: &[u8]| state_bytes(&root_id.to_le_bytes(), row);
@@ -388,7 +432,7 @@ impl heika_api::Reader for DbReader {
             };
             let prefix = [SubCache::Namespace.index() as u8];
             match view {
-                View::Now => self.db.for_each_state_row(&prefix, &mut keep),
+                View::Now(_) => self.db.for_each_state_row(&prefix, &mut keep),
                 View::At(_) => self
                     .db
                     .state_rows_with_prefix_at(&prefix, height)
@@ -483,7 +527,7 @@ impl heika_api::Reader for DbReader {
             };
             let after = after.as_deref();
             match view {
-                View::Now => {
+                View::Now(_) => {
                     self.db
                         .for_each_search_key(&prefix, after, page.descending, &mut visit)
                 }
@@ -609,9 +653,10 @@ impl heika_api::Reader for DbReader {
             found.len() < page.size
         };
         match &view {
-            View::Now => self
-                .db
-                .for_each_search_key(&prefix, after, page.descending, &mut visit),
+            View::Now(_) => {
+                self.db
+                    .for_each_search_key(&prefix, after, page.descending, &mut visit)
+            }
             View::At(_) => {
                 self.db
                     .for_each_search_key_with_past(&prefix, after, page.descending, &mut visit)
@@ -723,7 +768,7 @@ impl heika_api::Reader for DbReader {
         let nodes = walk(key, |position| {
             let key = node_key(cache.index() as u8, position);
             match &view {
-                View::Now => self.db.trie_node(&key),
+                View::Now(_) => self.db.trie_node(&key),
                 View::At(past) => past.trie_node(&key),
             }
             .map_err(|error| error.to_string())?

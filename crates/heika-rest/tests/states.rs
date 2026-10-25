@@ -6,7 +6,7 @@ use heika_rest::RestError;
 use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::state::{
     AccountInfo, AccountJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicStateJson,
-    NamespaceInfo, RootNamespaceState,
+    MultisigInfo, MultisigJson, NamespaceInfo, RootNamespaceState,
 };
 use serde_json::{Value, json};
 use sha3::{Digest, Sha3_256};
@@ -182,6 +182,45 @@ fn rebuilds_the_mosaic_state() {
         info.mosaic.tree_key(),
         Ok(heika_core::patricia::id_key(0x6BED_913F_A202_23F8))
     );
+}
+
+#[test]
+fn rebuilds_the_multisig_state() {
+    let info: MultisigInfo = serde_json::from_value(json!({
+        "multisig": {
+            "version": 1,
+            "accountAddress": hex(&[0x68; 24]),
+            "minApproval": 2,
+            "minRemoval": 1,
+            "cosignatoryAddresses": [hex(&[0x11; 24]), hex(&[0x22; 24])],
+            "multisigAddresses": [hex(&[0x33; 24])],
+        },
+    }))
+    .unwrap();
+    let mut expected = vec![1, 0];
+    expected.extend_from_slice(&2_u32.to_le_bytes());
+    expected.extend_from_slice(&1_u32.to_le_bytes());
+    expected.extend_from_slice(&[0x68; 24]);
+    expected.extend_from_slice(&le(2));
+    expected.extend_from_slice(&[0x11; 24]);
+    expected.extend_from_slice(&[0x22; 24]);
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&[0x33; 24]);
+    assert_eq!(info.multisig.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        MultisigJson::from_state_bytes(&expected),
+        Ok(info.multisig.clone())
+    );
+    assert_eq!(
+        info.multisig.tree_key(),
+        Ok(heika_core::patricia::address_key(
+            &heika_core::address::Address([0x68; 24])
+        ))
+    );
+    // 数が中身より多ければ読めない
+    let mut short = expected.clone();
+    short[34] = 3;
+    assert!(MultisigJson::from_state_bytes(&short).is_err());
 }
 
 #[test]

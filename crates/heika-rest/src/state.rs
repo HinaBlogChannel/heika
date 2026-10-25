@@ -341,6 +341,89 @@ impl MosaicStateJson {
     }
 }
 
+/// `MultisigAccountInfoDTO`。
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct MultisigInfo {
+    pub multisig: MultisigJson,
+}
+
+/// `MultisigDTO`。マルチシグのアカウントと、その連署者（`cosignatoryAddresses`）、連署者として入っている
+/// マルチシグ（`multisigAddresses`）。連署者にしかなっていないアカウントにもある
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultisigJson {
+    pub version: u16,
+    pub account_address: String,
+    pub min_approval: u32,
+    pub min_removal: u32,
+    pub cosignatory_addresses: Vec<String>,
+    pub multisig_addresses: Vec<String>,
+}
+
+/// `MultisigAccountGraphInfoDTO`。マルチシグの木の1段。0 が引いたアカウントで、負は上（入っているマルチシグ）、
+/// 正は下（連署者）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultisigGraphLevel {
+    pub level: i32,
+    pub multisig_entries: Vec<MultisigInfo>,
+}
+
+impl MultisigJson {
+    /// 状態のバイト列。catapult の `MultisigEntrySerializer`。
+    pub fn to_state_bytes(&self) -> Result<Vec<u8>, RestError> {
+        let mut out = header(self.version)?;
+        out.extend_from_slice(&self.min_approval.to_le_bytes());
+        out.extend_from_slice(&self.min_removal.to_le_bytes());
+        out.extend_from_slice(&hex_array::<24>(&self.account_address, "accountAddress")?);
+        for (addresses, name) in [
+            (&self.cosignatory_addresses, "cosignatoryAddresses"),
+            (&self.multisig_addresses, "multisigAddresses"),
+        ] {
+            out.extend_from_slice(&(addresses.len() as u64).to_le_bytes());
+            for address in addresses {
+                out.extend_from_slice(&hex_array::<24>(address, name)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 状態のバイト列から、REST が返す形にする。[`MultisigJson::to_state_bytes`] の逆
+    pub fn from_state_bytes(bytes: &[u8]) -> Result<Self, RestError> {
+        let mut reader = StateReader::new(bytes)?;
+        let min_approval = reader.u32()?;
+        let min_removal = reader.u32()?;
+        let account_address = hex(reader.take(24)?);
+        let mut addresses = || -> Result<Vec<String>, RestError> {
+            let count = reader.u64()?;
+            (0..count).map(|_| Ok(hex(reader.take(24)?))).collect()
+        };
+        let cosignatory_addresses = addresses()?;
+        let multisig_addresses = addresses()?;
+        reader.finish()?;
+        Ok(Self {
+            version: STATE_VERSION,
+            account_address,
+            min_approval,
+            min_removal,
+            cosignatory_addresses,
+            multisig_addresses,
+        })
+    }
+
+    pub fn state_hash(&self) -> Result<Hash256, RestError> {
+        Ok(sha3(&self.to_state_bytes()?))
+    }
+
+    /// 状態の木のキー。アドレスの SHA3-256。
+    pub fn tree_key(&self) -> Result<Hash256, RestError> {
+        Ok(patricia::address_key(&Address(hex_array(
+            &self.account_address,
+            "accountAddress",
+        )?)))
+    }
+}
+
 /// `MetadataInfoDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

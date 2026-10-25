@@ -273,6 +273,7 @@ pub struct NodeRoles(pub u32);
 
 impl NodeRoles {
     pub const PEER: Self = Self(0x01);
+    pub const API: Self = Self(0x02);
     pub const VOTING: Self = Self(0x04);
 
     const NAMES: [(u32, &str); 5] = [

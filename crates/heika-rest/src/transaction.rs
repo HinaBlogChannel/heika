@@ -67,6 +67,11 @@ pub struct TransactionMeta {
     /// 中のトランザクションだけにある、親のアグリゲートのハッシュ
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_hash: Option<String>,
+    /// 入ったブロックの時刻と、手数料の倍率。catapult の REST が承認されたものに足す
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_multiplier: Option<u32>,
 }
 
 /// トランザクションの JSON。種類ごとの本体の項目は、どれか1つの種類のものだけが入る。
@@ -1026,6 +1031,8 @@ fn body_json(body: &Body) -> BodyJson {
                             merkle_component_hash: None,
                             index: Some(index as u32),
                             aggregate_hash: None,
+                            timestamp: None,
+                            fee_multiplier: None,
                         },
                         transaction: TransactionJson::from(embedded),
                     })

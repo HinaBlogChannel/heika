@@ -721,6 +721,50 @@ impl Db {
         }
     }
 
+    /// しまってあるブロックを、高さが `heights` の中のものだけ、低い順に（`reverse` なら高い順に）`visit` に渡す。
+    /// `after` があれば、その順でその高さから（その高さのブロックも渡す。続きを決めるのは呼ぶ側）。
+    /// `visit` が `false` を返したら止める
+    pub fn for_each_block(
+        &self,
+        heights: std::ops::RangeInclusive<u64>,
+        after: Option<u64>,
+        reverse: bool,
+        visit: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<(), DbError> {
+        let (mut low, mut high) = (*heights.start(), *heights.end());
+        if let Some(after) = after {
+            if reverse {
+                high = high.min(after);
+            } else {
+                low = low.max(after);
+            }
+        }
+        if low > high {
+            return Ok(());
+        }
+        let transaction = self.begin_read()?;
+        let table = transaction.open_table(BLOCKS).map_err(db_error)?;
+        let range = table.range(low..=high).map_err(db_error)?;
+        let mut visit_row = |row: Result<(AccessGuard<u64>, AccessGuard<&[u8]>), StorageError>| {
+            let (height, block) = row.map_err(db_error)?;
+            Ok::<_, DbError>(visit(height.value(), block.value()))
+        };
+        if reverse {
+            for row in range.rev() {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        } else {
+            for row in range {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `address` が関わったトランザクション（アグリゲートの中のものは除く）の（高さ、ブロックの中の番号）を、高さが
     /// `heights` の中のものだけ、古い順に（`reverse` なら新しい順に）`visit` に渡す。`after` があれば、その順で
     /// それより後のものから。`visit` が `false` を返したら止める。表を作っていなければ何も渡さない
@@ -3849,6 +3893,33 @@ mod tests {
         );
         assert_eq!(db.state_at(b"a", 3).unwrap().as_deref(), Some(&b"a3"[..]));
         assert_eq!(db.state_at(b"a", 4).unwrap().as_deref(), Some(&b"a4"[..]));
+    }
+
+    #[test]
+    fn walks_blocks_in_either_order() {
+        let dir = TempDir::new();
+        let db = Db::open(&dir.0).unwrap();
+        let mut batch = db.batch().unwrap();
+        for height in 1..=5 {
+            batch.put_block(height, &[height as u8]).unwrap();
+        }
+        batch.commit().unwrap();
+        let walk = |heights, after, reverse, stop_after: usize| {
+            let mut seen = Vec::new();
+            db.for_each_block(heights, after, reverse, &mut |height, block| {
+                assert_eq!(block, [height as u8]);
+                seen.push(height);
+                seen.len() < stop_after
+            })
+            .unwrap();
+            seen
+        };
+        assert_eq!(walk(1..=5, None, false, 9), vec![1, 2, 3, 4, 5]);
+        assert_eq!(walk(2..=4, None, true, 9), vec![4, 3, 2]);
+        assert_eq!(walk(1..=5, Some(3), false, 9), vec![3, 4, 5]);
+        assert_eq!(walk(1..=5, Some(3), true, 2), vec![3, 2]);
+        assert_eq!(walk(4..=5, Some(3), false, 9), vec![4, 5]);
+        assert!(walk(1..=2, Some(3), false, 9).is_empty());
     }
 
     #[test]

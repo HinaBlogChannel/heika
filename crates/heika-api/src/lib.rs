@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::Request;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     CONTENT_DISPOSITION, CONTENT_TYPE,
@@ -209,7 +209,8 @@ pub trait Reader: Send + Sync {
     /// トランザクションの行方。知らなければ `None`
     fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String>;
     /// 承認されたトランザクションを `filter` で絞り、`page` の分を返す。`after` があれば、並び（高さとブロックの中の
-    /// 番号の順）でその位置より後から。索引（`storage.search` の `transactions`）を作っていなければ `None`
+    /// 番号の順）でその位置より後から。アドレス、署名者、宛先で絞るのに要る索引（`storage.search` の
+    /// `transactions`）を作っていなければ `None`。それらで絞らなければ、索引がなくてもしまってあるブロックを順に読む
     fn search_transactions(
         &self,
         filter: &TransactionFilter,
@@ -324,10 +325,20 @@ pub struct PageRequest {
 }
 
 /// 承認されたトランザクションの検索の絞り込み。アグリゲートの中のものは返さない（catapult の `embedded` の既定）
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionFilter {
     /// 関わったアドレス（catapult の `meta.addresses`）
-    pub address: Address,
+    pub address: Option<Address>,
+    /// 署名者（アグリゲートなら外側の）
+    pub signer: Option<PublicKey>,
+    /// 送金、シークレットロック、シークレットの証明の宛先（解決する前のアドレスのバイト列）
+    pub recipient: Option<[u8; 24]>,
+    /// トランザクションの種類のどれか。空なら絞らない
+    pub types: Vec<u16>,
+    /// 送金のモザイク（解決する前の ID）と、その額の範囲。額はモザイクがあるときだけ
+    pub mosaic: Option<u64>,
+    pub from_amount: Option<u64>,
+    pub to_amount: Option<u64>,
     /// 入った高さの範囲（両端を含む）
     pub from_height: u64,
     pub to_height: u64,
@@ -348,11 +359,19 @@ struct TransactionQuery {
     embedded: Option<String>,
     signer_public_key: Option<String>,
     recipient_address: Option<String>,
-    #[serde(rename = "type")]
-    transaction_type: Option<String>,
     transfer_mosaic_id: Option<String>,
     from_transfer_amount: Option<String>,
     to_transfer_amount: Option<String>,
+}
+
+/// クエリ文字列の `type` を全部（catapult の REST と同じく、何回でも書ける）。読めなければ `None`
+fn transaction_types(query: Option<&str>) -> Option<Vec<u16>> {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("type="))
+        .map(|value| value.parse::<u16>().ok())
+        .collect()
 }
 
 /// `/metadata` のクエリ文字列
@@ -1432,11 +1451,12 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
     )
 }
 
-/// 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス）と高さで絞る。
-/// ほかの絞り込みと、`address` のない検索は、まだ 501
+/// 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス）、`signerPublicKey`、
+/// `recipientAddress`、`type`、送金のモザイクと額、高さで絞る。アグリゲートの中のもの（`embedded=true`）は、まだ 501
 async fn search_confirmed(
     State(api): State<Api>,
     Query(query): Query<TransactionQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
     if query.address.is_some()
         && (query.signer_public_key.is_some() || query.recipient_address.is_some())
@@ -1446,44 +1466,61 @@ async fn search_confirmed(
                 .to_owned(),
         );
     }
-    let unsupported = [
-        ("signerPublicKey", query.signer_public_key.is_some()),
-        ("recipientAddress", query.recipient_address.is_some()),
-        ("type", query.transaction_type.is_some()),
-        ("transferMosaicId", query.transfer_mosaic_id.is_some()),
-        ("fromTransferAmount", query.from_transfer_amount.is_some()),
-        ("toTransferAmount", query.to_transfer_amount.is_some()),
-        ("embedded", query.embedded.as_deref() == Some("true")),
-    ];
-    if let Some((name, _)) = unsupported.iter().find(|(_, used)| *used) {
-        return not_supported(&format!("the {name} filter"));
+    if (query.from_transfer_amount.is_some() || query.to_transfer_amount.is_some())
+        && query.transfer_mosaic_id.is_none()
+    {
+        return invalid(
+            "can't filter by transfer amount if transferMosaicId is not provided".to_owned(),
+        );
     }
-    let Some(address) = query.address.as_deref() else {
-        return not_supported("searching confirmed transactions without address");
-    };
-    let Some(address) = address_only(address, api.node.reader.network()) else {
-        return invalid("address has an invalid format".to_owned());
-    };
-    let height = |value: &Option<String>, name: &str| match value.as_deref() {
-        None => Ok(None),
-        Some(text) => text
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| format!("{name} has an invalid format")),
-    };
-    let heights = (|| {
-        let exact = height(&query.height, "height")?;
-        Ok::<_, String>((
-            exact
-                .or(height(&query.from_height, "fromHeight")?)
+    if query.embedded.as_deref() == Some("true") {
+        return not_supported("the embedded filter");
+    }
+    let network = api.node.reader.network();
+    let filter = (|| {
+        let number = |value: &Option<String>, name: &str| match value.as_deref() {
+            None => Ok(None),
+            Some(text) => text
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| format!("{name} has an invalid format")),
+        };
+        let address = |value: &Option<String>, name: &str| match value.as_deref() {
+            None => Ok(None),
+            Some(id) => address_only(id, network)
+                .map(Some)
+                .ok_or_else(|| format!("{name} has an invalid format")),
+        };
+        let exact = number(&query.height, "height")?;
+        Ok::<_, String>(TransactionFilter {
+            address: address(&query.address, "address")?,
+            signer: match query.signer_public_key.as_deref() {
+                None => None,
+                Some(key) => Some(
+                    key.parse::<PublicKey>()
+                        .ok()
+                        .filter(|_| key.len() == 64)
+                        .ok_or("signerPublicKey has an invalid format")?,
+                ),
+            },
+            recipient: address(&query.recipient_address, "recipientAddress")?.map(|a| a.0),
+            types: transaction_types(raw.as_deref()).ok_or("type has an invalid format")?,
+            mosaic: match query.transfer_mosaic_id.as_deref() {
+                None => None,
+                Some(id) => Some(hex_id(id).ok_or("transferMosaicId has an invalid format")?),
+            },
+            from_amount: number(&query.from_transfer_amount, "fromTransferAmount")?,
+            to_amount: number(&query.to_transfer_amount, "toTransferAmount")?,
+            from_height: exact
+                .or(number(&query.from_height, "fromHeight")?)
                 .unwrap_or(0),
-            exact
-                .or(height(&query.to_height, "toHeight")?)
+            to_height: exact
+                .or(number(&query.to_height, "toHeight")?)
                 .unwrap_or(u64::MAX),
-        ))
+        })
     })();
-    let (from_height, to_height) = match heights {
-        Ok(heights) => heights,
+    let filter = match filter {
+        Ok(filter) => filter,
         Err(message) => return invalid(message),
     };
     // 前のページの最後の件の `id` から続ける。飛ばす分をなめないので、深いページでも速い
@@ -1495,11 +1532,6 @@ async fn search_confirmed(
     let page = match page_request(query.order.as_deref(), query.page_size, query.page_number) {
         Ok(page) => page,
         Err(message) => return invalid(message),
-    };
-    let filter = TransactionFilter {
-        address,
-        from_height,
-        to_height,
     };
     match api.node.reader.search_transactions(&filter, page, after) {
         Ok(None) => search_not_kept("transaction", None),
@@ -2108,6 +2140,9 @@ mod tests {
     /// 公開鍵 [0x11; 32] のアカウントと、通貨のモザイクだけがある読み役
     struct FakeReader;
 
+    /// 偽の読み役が、最後に受け取ったトランザクションの検索の絞り込み
+    static LAST_FILTER: std::sync::Mutex<Option<TransactionFilter>> = std::sync::Mutex::new(None);
+
     const CURRENCY: u64 = 0x6BED_913F_A202_23F8;
 
     fn known() -> Address {
@@ -2452,7 +2487,7 @@ mod tests {
         }
 
         /// `known` は高さ 1 から 25 のブロックの 0 番目に関わった。公開鍵 [0x23; 32] のアドレスは、索引を作っていない
-        /// ことにする
+        /// ことにする。受け取った絞り込みは [`LAST_FILTER`] に残す
         fn search_transactions(
             &self,
             filter: &TransactionFilter,
@@ -2461,10 +2496,12 @@ mod tests {
         ) -> Result<Option<Vec<TransactionInfo>>, String> {
             let unkept =
                 Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
-            if filter.address == unkept {
+            *LAST_FILTER.lock().unwrap() = Some(filter.clone());
+            if filter.address == Some(unkept) {
                 return Ok(None);
             }
-            let mut heights: Vec<u64> = if filter.address == known() {
+            // アドレスがなければ、全部のブロックを読んだことにする
+            let mut heights: Vec<u64> = if filter.address.is_none_or(|address| address == known()) {
                 (1..=25)
                     .filter(|height| (filter.from_height..=filter.to_height).contains(height))
                     .collect()
@@ -2510,6 +2547,8 @@ mod tests {
                             merkle_component_hash: None,
                             index: Some(0),
                             aggregate_hash: None,
+                            timestamp: None,
+                            fee_multiplier: None,
                         },
                         transaction: heika_rest::transaction::TransactionJson::from(&transaction),
                     })
@@ -2961,14 +3000,34 @@ mod tests {
             (StatusCode::OK, serde_json::json!([]))
         );
 
-        // 索引がなければ 501。まだ扱わない絞り込みと、アドレスのない検索も 501
-        let unkept = Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
+        // 絞り込みを読んで渡す。type は何回でも書ける
         let key = "11".repeat(32);
+        let (status, _) = get_status(&format!(
+            "/transactions/confirmed?signerPublicKey={key}&recipientAddress={other}&type=16724&type=16961\
+             &transferMosaicId=6BED913FA20223F8&fromTransferAmount=5&toTransferAmount=9"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let filter = LAST_FILTER.lock().unwrap().clone().unwrap();
+        assert_eq!(filter.address, None);
+        assert_eq!(filter.signer, Some(PublicKey([0x11; 32])));
+        assert_eq!(filter.recipient, Some(other.0));
+        assert_eq!(filter.types, vec![0x4154, 0x4241]);
+        assert_eq!(
+            (filter.mosaic, filter.from_amount, filter.to_amount),
+            (Some(CURRENCY), Some(5), Some(9))
+        );
+        // アドレスがなくても答える（索引がなければ、しまってあるブロックを読む）
+        let (status, body) = get_status("/transactions/confirmed?height=3").await;
+        assert_eq!(
+            (status, heights(&body)),
+            (StatusCode::OK, vec!["3".to_owned()])
+        );
+
+        // 索引がなければ 501。アグリゲートの中のものも、まだ 501
+        let unkept = Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
         for path in [
             format!("/transactions/confirmed?address={unkept}"),
-            "/transactions/confirmed".to_owned(),
-            format!("/transactions/confirmed?signerPublicKey={key}"),
-            format!("/transactions/confirmed?address={address}&type=16724"),
             format!("/transactions/confirmed?address={address}&embedded=true"),
         ] {
             let (status, body) = get_status(&path).await;
@@ -2977,7 +3036,12 @@ mod tests {
         }
         for path in [
             format!("/transactions/confirmed?address={address}&signerPublicKey={key}"),
+            format!("/transactions/confirmed?address={address}&recipientAddress={other}"),
+            "/transactions/confirmed?fromTransferAmount=1".to_owned(),
             "/transactions/confirmed?address=zzz".to_owned(),
+            "/transactions/confirmed?signerPublicKey=11".to_owned(),
+            "/transactions/confirmed?type=x".to_owned(),
+            "/transactions/confirmed?transferMosaicId=12".to_owned(),
             format!("/transactions/confirmed?address={address}&offset=12"),
             format!("/transactions/confirmed?address={address}&fromHeight=x"),
             format!("/transactions/confirmed?address={address}&order=up"),

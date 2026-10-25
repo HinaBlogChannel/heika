@@ -101,7 +101,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 |---|---|
 | `metadata` | `/metadata` を、送り主、宛先、対象（モザイクかネームスペース）から引く |
 | `namespaces` | `/namespaces` を、持ち主と別名（アドレスかモザイク）から引く。ネームスペースの名前の表も作り、`/namespaces/names`、`/namespaces/account/names`、`/namespaces/mosaic/names` に答える |
-| `transactions` | トランザクションのハッシュから、入った高さとブロックの中の番号を引く表を作り、`/transactions/confirmed/{hash}` と `/transactionStatus/{hash}` に、直近のブロックより前のものも答える。ブロックから作るので、途中で足せば、起動したときにしまってあるブロックを全部読む（止めても続きから）。ブロックを刈り込む残し方では、刈り込んだブロックの分は答えない |
+| `transactions` | トランザクションのハッシュから入った高さとブロックの中の番号を引く表と、関わったアドレスから引く表を作る。`/transactions/confirmed/{hash}` と `/transactionStatus/{hash}` に直近のブロックより前のものも答え、`/transactions/confirmed?address=` の検索に答える。ブロックから作るので、途中で足せば、起動したときにしまってあるブロックを全部読む（止めても続きから）。ブロックを刈り込む残し方では、刈り込んだブロックの分は答えない |
 
 ネームスペースの名前は状態の木になく、登録のトランザクションにしかないので、名前の表はブロックから拾う。ID は親と名前から決まるので、ID と合う登録だけを入れ、足すだけで消さない（どのブロックから拾っても正しい）。`namespaces` を足したら、起動したときに、しまってあるブロックから拾う（止めても、次の起動で続きから）。ライトは古いブロックを持たないので、名前を知っているのは、しまってあるブロックとその後に登録されたものだけで、知らない名前は返さない。
 
@@ -148,6 +148,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |
 | `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロック（`storage.search` に `transactions` があれば、しまってある全部のブロック）に入っていれば `confirmed` と高さ |
+| `/transactions/confirmed` | 承認されたトランザクションの検索。`storage.search` に `transactions` があるときだけで、なければ 501。catapult の REST と同じく `address`（関わったアドレス。catapult の `meta.addresses` と同じく、署名者、宛先などのトランザクションの種類ごとに決まった相手、アグリゲートの中の署名者と相手、エイリアスを解決した先。連署者は入らない）と、`height`、`fromHeight`、`toHeight` で絞る。アグリゲートの中のトランザクションは返さない（catapult の `embedded` の既定）。並びは高さとブロックの中の順（`order=desc` で逆）。ページ送りはメタデータの検索と同じで、1件ごとの `id` は高さとブロックの中の番号をつないだ16進。ほかの絞り込み（`signerPublicKey`、`recipientAddress`、`type`、`embedded=true`、送金のモザイクと額）と、`address` のない検索は、まだ 501 |
 | `/transactions/confirmed/{hash}` | 直近のブロック（同じく、`transactions` があれば全部）に入ったトランザクションと、入った高さ |
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |
 | `PUT /transactions/partial`、`PUT /transactions/cosignature` | 連署を待つアグリゲートボンデッドと、その連署（catapult の `CosignatureDTO`）を受け付ける。受け付けたら 202。ハッシュロックや連署できる人かは、そのあとノードで確かめる。連署を待っているものは、行方（`/transactionStatus`）で `partial` になる |

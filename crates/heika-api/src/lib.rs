@@ -24,6 +24,8 @@
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
+//! - `/transactions/confirmed`: 承認されたトランザクションを、関わったアドレスと高さで検索する。ノードが索引を
+//!   作っているときだけ（`storage.search` の `transactions`）
 //! - `/transactionStatus/{hash}`、`/transactions/confirmed/{hash}`、`/blocks/{height}/transactions/{hash}/merkle`:
 //!   送ったトランザクションの行方と、入ったブロックへの Merkle の経路
 //!
@@ -68,7 +70,7 @@ use heika_rest::state::{
     MosaicRestrictionEntryJson, MosaicRestrictionInfo, MosaicStateJson, MultisigGraphLevel,
     MultisigInfo, MultisigJson, NamespaceInfo, NamespaceNameJson, SecretLockInfo, SecretLockJson,
 };
-use heika_rest::transaction::TransactionInfo;
+use heika_rest::transaction::{TransactionInfo, parse_transaction_position};
 
 /// API が返す、ノードの今の様子
 #[derive(Clone, Debug)]
@@ -206,6 +208,14 @@ pub trait Reader: Send + Sync {
     fn block(&self, height: u64) -> Result<Option<BlockInfo>, String>;
     /// トランザクションの行方。知らなければ `None`
     fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String>;
+    /// 承認されたトランザクションを `filter` で絞り、`page` の分を返す。`after` があれば、並び（高さとブロックの中の
+    /// 番号の順）でその位置より後から。索引（`storage.search` の `transactions`）を作っていなければ `None`
+    fn search_transactions(
+        &self,
+        filter: &TransactionFilter,
+        page: PageRequest,
+        after: Option<(u64, u32)>,
+    ) -> Result<Option<Vec<TransactionInfo>>, String>;
     /// 承認されたトランザクション。知らなければ `None`
     fn confirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
     /// 高さ `height` のブロックの TransactionsHash への、`hash` のトランザクションの経路。なければ `None`
@@ -311,6 +321,38 @@ pub struct PageRequest {
     /// 1 から
     pub number: usize,
     pub descending: bool,
+}
+
+/// 承認されたトランザクションの検索の絞り込み。アグリゲートの中のものは返さない（catapult の `embedded` の既定）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransactionFilter {
+    /// 関わったアドレス（catapult の `meta.addresses`）
+    pub address: Address,
+    /// 入った高さの範囲（両端を含む）
+    pub from_height: u64,
+    pub to_height: u64,
+}
+
+/// `/transactions/confirmed` のクエリ文字列。heika がまだ扱わない絞り込みは、あれば 501 にするために読む
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionQuery {
+    address: Option<String>,
+    height: Option<String>,
+    from_height: Option<String>,
+    to_height: Option<String>,
+    page_size: Option<usize>,
+    page_number: Option<usize>,
+    order: Option<String>,
+    offset: Option<String>,
+    embedded: Option<String>,
+    signer_public_key: Option<String>,
+    recipient_address: Option<String>,
+    #[serde(rename = "type")]
+    transaction_type: Option<String>,
+    transfer_mosaic_id: Option<String>,
+    from_transfer_amount: Option<String>,
+    to_transfer_amount: Option<String>,
 }
 
 /// `/metadata` のクエリ文字列
@@ -1390,6 +1432,98 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
     )
 }
 
+/// 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス）と高さで絞る。
+/// ほかの絞り込みと、`address` のない検索は、まだ 501
+async fn search_confirmed(
+    State(api): State<Api>,
+    Query(query): Query<TransactionQuery>,
+) -> Response {
+    if query.address.is_some()
+        && (query.signer_public_key.is_some() || query.recipient_address.is_some())
+    {
+        return invalid(
+            "can't filter by address if signerPublicKey or recipientAddress are already provided"
+                .to_owned(),
+        );
+    }
+    let unsupported = [
+        ("signerPublicKey", query.signer_public_key.is_some()),
+        ("recipientAddress", query.recipient_address.is_some()),
+        ("type", query.transaction_type.is_some()),
+        ("transferMosaicId", query.transfer_mosaic_id.is_some()),
+        ("fromTransferAmount", query.from_transfer_amount.is_some()),
+        ("toTransferAmount", query.to_transfer_amount.is_some()),
+        ("embedded", query.embedded.as_deref() == Some("true")),
+    ];
+    if let Some((name, _)) = unsupported.iter().find(|(_, used)| *used) {
+        return not_supported(&format!("the {name} filter"));
+    }
+    let Some(address) = query.address.as_deref() else {
+        return not_supported("searching confirmed transactions without address");
+    };
+    let Some(address) = address_only(address, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    let height = |value: &Option<String>, name: &str| match value.as_deref() {
+        None => Ok(None),
+        Some(text) => text
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| format!("{name} has an invalid format")),
+    };
+    let heights = (|| {
+        let exact = height(&query.height, "height")?;
+        Ok::<_, String>((
+            exact
+                .or(height(&query.from_height, "fromHeight")?)
+                .unwrap_or(0),
+            exact
+                .or(height(&query.to_height, "toHeight")?)
+                .unwrap_or(u64::MAX),
+        ))
+    })();
+    let (from_height, to_height) = match heights {
+        Ok(heights) => heights,
+        Err(message) => return invalid(message),
+    };
+    // 前のページの最後の件の `id` から続ける。飛ばす分をなめないので、深いページでも速い
+    let after = match query.offset.as_deref().map(parse_transaction_position) {
+        None => None,
+        Some(Some(position)) => Some(position),
+        Some(None) => return invalid("offset has an invalid format".to_owned()),
+    };
+    let page = match page_request(query.order.as_deref(), query.page_size, query.page_number) {
+        Ok(page) => page,
+        Err(message) => return invalid(message),
+    };
+    let filter = TransactionFilter {
+        address,
+        from_height,
+        to_height,
+    };
+    match api.node.reader.search_transactions(&filter, page, after) {
+        Ok(None) => search_not_kept("transaction", None),
+        Ok(Some(data)) => Json(Page {
+            data,
+            pagination: Pagination {
+                page_number: page.number,
+                page_size: page.size,
+            },
+        })
+        .into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+    }
+}
+
+/// heika がまだ扱わない口や絞り込み（501）
+fn not_supported(what: &str) -> Response {
+    error(
+        StatusCode::NOT_IMPLEMENTED,
+        "NotImplemented",
+        format!("{what} is not supported by this node yet"),
+    )
+}
+
 /// 一覧の並びとページ。読めなければ、409 で返すわけ
 fn page_request(
     order: Option<&str>,
@@ -1769,6 +1903,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/blocks/{height}", get(block))
         .route("/network/fees/transaction", get(transaction_fees))
         .route("/transactionStatus/{hash}", get(transaction_status))
+        .route("/transactions/confirmed", get(search_confirmed))
         .route("/transactions/confirmed/{hash}", get(confirmed_transaction))
         .route(
             "/blocks/{height}/transactions/{hash}/merkle",
@@ -2316,6 +2451,72 @@ mod tests {
             Ok(None)
         }
 
+        /// `known` は高さ 1 から 25 のブロックの 0 番目に関わった。公開鍵 [0x23; 32] のアドレスは、索引を作っていない
+        /// ことにする
+        fn search_transactions(
+            &self,
+            filter: &TransactionFilter,
+            page: PageRequest,
+            after: Option<(u64, u32)>,
+        ) -> Result<Option<Vec<TransactionInfo>>, String> {
+            let unkept =
+                Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
+            if filter.address == unkept {
+                return Ok(None);
+            }
+            let mut heights: Vec<u64> = if filter.address == known() {
+                (1..=25)
+                    .filter(|height| (filter.from_height..=filter.to_height).contains(height))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if page.descending {
+                heights.reverse();
+            }
+            if let Some((after, _)) = after {
+                heights.retain(|&height| {
+                    if page.descending {
+                        height < after
+                    } else {
+                        height > after
+                    }
+                });
+            }
+            let transaction = heika_transaction::Transaction::new(
+                PublicKey([0x11; 32]),
+                NetworkIdentifier::TESTNET,
+                0,
+                0,
+                heika_transaction::Body::Transfer(
+                    heika_transaction::Transfer::new(
+                        known().into(),
+                        Default::default(),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            );
+            Ok(Some(
+                heights
+                    .into_iter()
+                    .skip((page.number - 1) * page.size)
+                    .take(page.size)
+                    .map(|height| TransactionInfo {
+                        id: Some(heika_rest::transaction::transaction_position(height, 0)),
+                        meta: heika_rest::transaction::TransactionMeta {
+                            height: Some(height.to_string()),
+                            hash: None,
+                            merkle_component_hash: None,
+                            index: Some(0),
+                            aggregate_hash: None,
+                        },
+                        transaction: heika_rest::transaction::TransactionJson::from(&transaction),
+                    })
+                    .collect(),
+            ))
+        }
+
         fn transaction_merkle(
             &self,
             height: u64,
@@ -2708,6 +2909,83 @@ mod tests {
             get_status(&format!("/lock/hash/{lock}/merkle")).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn searches_confirmed_transactions_by_address() {
+        let heights = |body: &serde_json::Value| -> Vec<String> {
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|info| info["meta"]["height"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let address = known();
+        let (status, body) =
+            get_status(&format!("/transactions/confirmed?address={address}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            heights(&body),
+            (1..=10).map(|h| h.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            body["pagination"],
+            serde_json::json!({"pageNumber": 1, "pageSize": 10})
+        );
+        // 最後の件の id から続ける。新しい順、高さの範囲、ページの番号も
+        let last = body["data"][9]["id"].as_str().unwrap().to_owned();
+        assert_eq!(last, format!("{:016X}{:08X}", 10, 0));
+        let (_, body) = get_status(&format!(
+            "/transactions/confirmed?address={address}&offset={last}"
+        ))
+        .await;
+        assert_eq!(heights(&body)[0], "11");
+        let (_, body) = get_status(&format!(
+            "/transactions/confirmed?address={address}&order=desc&fromHeight=3&toHeight=20&pageNumber=2"
+        ))
+        .await;
+        assert_eq!(
+            heights(&body),
+            (3..=10).rev().map(|h| h.to_string()).collect::<Vec<_>>()
+        );
+        let (_, body) = get_status(&format!(
+            "/transactions/confirmed?address={address}&height=7"
+        ))
+        .await;
+        assert_eq!(heights(&body), vec!["7"]);
+        let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
+        let (status, body) = get_status(&format!("/transactions/confirmed?address={other}")).await;
+        assert_eq!(
+            (status, body["data"].clone()),
+            (StatusCode::OK, serde_json::json!([]))
+        );
+
+        // 索引がなければ 501。まだ扱わない絞り込みと、アドレスのない検索も 501
+        let unkept = Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
+        let key = "11".repeat(32);
+        for path in [
+            format!("/transactions/confirmed?address={unkept}"),
+            "/transactions/confirmed".to_owned(),
+            format!("/transactions/confirmed?signerPublicKey={key}"),
+            format!("/transactions/confirmed?address={address}&type=16724"),
+            format!("/transactions/confirmed?address={address}&embedded=true"),
+        ] {
+            let (status, body) = get_status(&path).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
+            assert_eq!(body["code"], "NotImplemented");
+        }
+        for path in [
+            format!("/transactions/confirmed?address={address}&signerPublicKey={key}"),
+            "/transactions/confirmed?address=zzz".to_owned(),
+            format!("/transactions/confirmed?address={address}&offset=12"),
+            format!("/transactions/confirmed?address={address}&fromHeight=x"),
+            format!("/transactions/confirmed?address={address}&order=up"),
+        ] {
+            let (status, body) = get_status(&path).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path}");
+            assert_eq!(body["code"], "InvalidArgument");
+        }
     }
 
     #[tokio::test]

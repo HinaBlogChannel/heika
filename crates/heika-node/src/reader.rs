@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use heika_api::{
     AliasTarget, KeyedStates, MetadataFilter, MetadataPosition, NamespaceFilter, PageRequest,
-    PartialFilter, StateError,
+    PartialFilter, StateError, TransactionFilter,
 };
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
@@ -37,7 +37,9 @@ use heika_rest::state::{
     AccountJson, MetadataEntryJson, MosaicStateJson, MultisigGraphLevel, MultisigJson,
     NamespaceInfo, NamespaceNameJson, RootNamespaceState,
 };
-use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
+use heika_rest::transaction::{
+    TransactionInfo, TransactionJson, TransactionMeta, transaction_position,
+};
 use heika_state_transition::executor::persist::{
     decode_account_row, height_of_meta, lock_or_restriction_state, row_key,
 };
@@ -128,6 +130,7 @@ impl DbReader {
         let bytes = self.partials.lock().stitched(hash)?;
         let transaction = Transaction::from_bytes(&bytes).ok()?;
         Some(TransactionInfo {
+            id: None,
             meta: TransactionMeta {
                 height: Some("0".to_owned()),
                 hash: Some(hash.to_string()),
@@ -883,10 +886,73 @@ impl heika_api::Reader for DbReader {
             .map(|(transaction, height, _)| status("confirmed", transaction.deadline, height)))
     }
 
+    fn search_transactions(
+        &self,
+        filter: &TransactionFilter,
+        page: PageRequest,
+        after: Option<(u64, u32)>,
+    ) -> Result<Option<Vec<TransactionInfo>>, String> {
+        if !self.db.searches().contains(Searches::TRANSACTIONS) {
+            return Ok(None);
+        }
+        let mut skip = (page.number - 1) * page.size;
+        let mut found = Vec::new();
+        self.db
+            .for_each_address_transaction(
+                &filter.address.0,
+                filter.from_height..=filter.to_height,
+                after,
+                page.descending,
+                &mut |height, index| {
+                    if skip > 0 {
+                        skip -= 1;
+                        return true;
+                    }
+                    found.push((height, index));
+                    found.len() < page.size
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut out = Vec::with_capacity(found.len());
+        let mut block: Option<(u64, Block)> = None;
+        for (height, index) in found {
+            if block.as_ref().is_none_or(|(at, _)| *at != height) {
+                // 刈り込んだブロックの分は、索引に残っていても返せない
+                let Some(read) = self.read_block(height)? else {
+                    continue;
+                };
+                block = Some((height, read));
+            }
+            let Some((_, read)) = &block else { continue };
+            let Some(transaction) = read
+                .transactions()
+                .nth(index as usize)
+                .and_then(|bytes| Transaction::from_bytes(bytes).ok())
+            else {
+                continue;
+            };
+            out.push(TransactionInfo {
+                id: Some(transaction_position(height, index)),
+                meta: TransactionMeta {
+                    height: Some(height.to_string()),
+                    hash: Some(transaction.hash(&self.seed).to_string()),
+                    merkle_component_hash: Some(
+                        transaction.merkle_component_hash(&self.seed).to_string(),
+                    ),
+                    index: Some(index),
+                    aggregate_hash: None,
+                },
+                transaction: TransactionJson::from(&transaction),
+            });
+        }
+        Ok(Some(out))
+    }
+
     fn confirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
         Ok(self
             .recent_transaction(hash)?
             .map(|(transaction, height, index)| TransactionInfo {
+                id: None,
                 meta: TransactionMeta {
                     height: Some(height.to_string()),
                     hash: Some(hash.to_string()),

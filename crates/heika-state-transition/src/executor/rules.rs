@@ -146,18 +146,13 @@ impl Executor {
         body: &Body,
     ) -> Result<(), ExecError> {
         // アドレスを指すもの（catapult の `AccountAddressNotification`）。モザイクとネームスペースの使用料の
-        // 受け取り先は設定の値で、ブロックの受け取り先は取るスレッドで確かめる
+        // 受け取り先は設定の値で、ブロックの受け取り先は取るスレッドで確かめる。モザイクとネームスペースの
+        // メタデータの相手は、catapult と同じく、持ち主かどうかだけを下で確かめる
         match body {
             Body::Transfer(transfer) => self.check_address(transfer.recipient_address())?,
             Body::SecretLock(lock) => self.check_address(&lock.recipient_address)?,
             Body::AccountMetadata(metadata) => {
                 self.check_address(&metadata.target_address)?;
-            }
-            Body::MosaicMetadata(metadata) => {
-                self.check_address(&metadata.metadata.target_address)?;
-            }
-            Body::NamespaceMetadata(metadata) => {
-                self.check_address(&metadata.metadata.target_address)?;
             }
             Body::MosaicSupplyRevocation(revocation) => {
                 self.check_address(&revocation.source_address)?;
@@ -1183,6 +1178,45 @@ mod tests {
                 .as_deref(),
                 expected,
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_only_the_owner_for_mosaic_and_namespace_metadata_targets() {
+        let mut executor = executor();
+        let owner = Address::from_public_key(&PublicKey([1; 32]), NetworkIdentifier::MAINNET);
+        let mut bad_checksum = owner;
+        bad_checksum.0[23] ^= 1;
+        let id = 0x4000_0000_0000_0001;
+        executor.namespaces.insert(
+            id,
+            super::super::RootNamespace {
+                owner: owner.0,
+                start: 1,
+                end: u64::MAX,
+                alias: Alias::None,
+                children: Default::default(),
+            },
+        );
+        executor.namespace_paths.insert(id, vec![id]);
+        // 壊れたアドレスも、catapult と同じく、アドレスとしてではなく持ち主の食い違いとして落ちる
+        for (target, expected) in [(owner, None), (bad_checksum, Some("MetadataOwner"))] {
+            let body = Body::NamespaceMetadata(heika_transaction::NamespaceMetadata {
+                metadata: Metadata {
+                    target_address: UnresolvedAddress(target.0),
+                    scoped_metadata_key: 0,
+                    value_size_delta: 1,
+                    value: vec![1].try_into().unwrap(),
+                },
+                target_namespace_id: heika_transaction::NamespaceId(id),
+            });
+            assert_eq!(
+                rejected(&mut executor, |executor| {
+                    executor.check_body_rules(HEIGHT, owner.0, &body)
+                })
+                .as_deref(),
+                expected,
             );
         }
     }

@@ -98,42 +98,17 @@ impl Executor {
                     .filter(|lock| {
                         lock.status == LockStatus::Unused && self.height < lock.end_height
                     })?;
-                out.extend_from_slice(&lock.owner);
-                out.extend_from_slice(&lock.mosaic_id.to_le_bytes());
-                out.extend_from_slice(&lock.amount.to_le_bytes());
-                out.extend_from_slice(&lock.end_height.to_le_bytes());
-                out.push(lock.status as u8);
-                out.extend_from_slice(key);
+                hash_lock_state(&mut out, key, lock);
             }
             SubCache::SecretLockInfo => {
                 let stale = self.stale_secret_locks.contains(key);
                 let lock = self.secret_locks.get(key)?.last().filter(|lock| {
                     stale || (lock.status == LockStatus::Unused && self.height < lock.end_height)
                 })?;
-                out.extend_from_slice(&lock.owner);
-                out.extend_from_slice(&lock.mosaic_id.to_le_bytes());
-                out.extend_from_slice(&lock.amount.to_le_bytes());
-                out.extend_from_slice(&lock.end_height.to_le_bytes());
-                out.push(lock.status as u8);
-                out.push(lock.hash_algorithm);
-                out.extend_from_slice(&lock.secret);
-                out.extend_from_slice(&lock.recipient);
+                secret_lock_state(&mut out, lock);
             }
             SubCache::AccountRestriction => {
-                let restrictions = self.account_restrictions.get(key)?;
-                out.extend_from_slice(key);
-                let used: Vec<_> = restrictions
-                    .values()
-                    .filter(|restriction| !restriction.values.is_empty())
-                    .collect();
-                out.extend_from_slice(&(used.len() as u64).to_le_bytes());
-                for restriction in used {
-                    out.extend_from_slice(&restriction.descriptor.to_le_bytes());
-                    out.extend_from_slice(&(restriction.values.len() as u64).to_le_bytes());
-                    for value in &restriction.values {
-                        out.extend_from_slice(value);
-                    }
-                }
+                account_restrictions_state(&mut out, key, self.account_restrictions.get(key)?);
             }
             SubCache::Metadata => {
                 let (key, value) = self.metadata.get(&key.try_into().ok()?)?;
@@ -151,5 +126,48 @@ impl Executor {
             SubCache::AccountState => return None,
         }
         Some(out)
+    }
+}
+
+/// ハッシュロックの状態（版の番号のあと）。catapult の `HashLockInfoSerializer`。`key` はロックしたアグリゲートのハッシュ
+pub(super) fn hash_lock_state(out: &mut Vec<u8>, key: &[u8], lock: &HashLockInfo) {
+    out.extend_from_slice(&lock.owner);
+    out.extend_from_slice(&lock.mosaic_id.to_le_bytes());
+    out.extend_from_slice(&lock.amount.to_le_bytes());
+    out.extend_from_slice(&lock.end_height.to_le_bytes());
+    out.push(lock.status as u8);
+    out.extend_from_slice(key);
+}
+
+/// シークレットロックの状態（版の番号のあと）。catapult の `SecretLockInfoSerializer`
+pub(super) fn secret_lock_state(out: &mut Vec<u8>, lock: &SecretLockInfo) {
+    out.extend_from_slice(&lock.owner);
+    out.extend_from_slice(&lock.mosaic_id.to_le_bytes());
+    out.extend_from_slice(&lock.amount.to_le_bytes());
+    out.extend_from_slice(&lock.end_height.to_le_bytes());
+    out.push(lock.status as u8);
+    out.push(lock.hash_algorithm);
+    out.extend_from_slice(&lock.secret);
+    out.extend_from_slice(&lock.recipient);
+}
+
+/// アカウントの制限の状態（版の番号のあと）。catapult の `AccountRestrictionsSerializer`。値のない種類は書かない
+pub(super) fn account_restrictions_state(
+    out: &mut Vec<u8>,
+    key: &[u8],
+    restrictions: &BTreeMap<u16, AccountRestriction>,
+) {
+    out.extend_from_slice(key);
+    let used: Vec<_> = restrictions
+        .values()
+        .filter(|restriction| !restriction.values.is_empty())
+        .collect();
+    out.extend_from_slice(&(used.len() as u64).to_le_bytes());
+    for restriction in used {
+        out.extend_from_slice(&restriction.descriptor.to_le_bytes());
+        out.extend_from_slice(&(restriction.values.len() as u64).to_le_bytes());
+        for value in &restriction.values {
+            out.extend_from_slice(value);
+        }
     }
 }

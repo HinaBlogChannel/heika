@@ -482,6 +482,36 @@ pub fn decode_account_row(value: &[u8]) -> Result<AccountState, ExecError> {
     Ok(account)
 }
 
+/// ロックと制限の行（[`row_key`] が `cache` と `key` の行）の値を、catapult の状態のバイト列（版の番号のあと）に
+/// する。状態の木の葉と同じ形で、ロックは履歴の最後のもの。使ったものや期限を過ぎたものでも、行があれば返す
+/// （catapult の REST と同じ。木に入るのは、まだ使っておらず期限前のものだけ）。ほかの `cache` は `None`
+pub fn lock_or_restriction_state(
+    cache: SubCache,
+    key: &[u8],
+    value: &[u8],
+) -> Result<Option<Vec<u8>>, ExecError> {
+    let mut reader = Reader::new(value);
+    let mut out = Vec::new();
+    match cache {
+        SubCache::HashLockInfo => match decode_hash_locks(&mut reader)?.last() {
+            Some(lock) => super::roots::hash_lock_state(&mut out, key, lock),
+            None => return Ok(None),
+        },
+        SubCache::SecretLockInfo => match decode_secret_locks(&mut reader)?.last() {
+            Some(lock) => super::roots::secret_lock_state(&mut out, lock),
+            None => return Ok(None),
+        },
+        SubCache::AccountRestriction => {
+            let restrictions = decode_account_restrictions(&mut reader)?;
+            super::roots::account_restrictions_state(&mut out, key, &restrictions);
+        }
+        SubCache::MosaicRestriction => out = decode_mosaic_restriction(&mut reader)?.encode(),
+        _ => return Ok(None),
+    }
+    reader.finish()?;
+    Ok(Some(out))
+}
+
 /// 行のキー
 pub fn row_key(cache: SubCache, key: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + key.len());

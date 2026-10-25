@@ -130,13 +130,19 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `/heika/delegations` | 届いた委任の要求ごとに、引き受けたか（`accepted`）、上限を超えて待っているか（`waiting`）、引き受けなかったか（`rejected`。`reason` にわけ） |
 | `/accounts/{accountId}` | アカウントの今の状態。ID はアドレス（Base32 か16進）か公開鍵 |
 | `/mosaics/{mosaicId}` | モザイクの定義の今の状態 |
+| `POST /accounts`、`POST /mosaics` | まとめて引く。本文は catapult の REST と同じく `{"addresses": [...]}` か `{"publicKeys": [...]}`（両方は 409）、`{"mosaicIds": [...]}`。配列の代わりに1つの文字列でもよい。あるものだけを頼んだ順に、同じものは1回だけ返す。全部を同じ高さで読む。1回に 1000 件まで（catapult には上限がない） |
+| `/account/{address}/multisig` | マルチシグの今の状態。連署者（`cosignatoryAddresses`）と、連署者として入っているマルチシグ（`multisigAddresses`）。連署者にしかなっていないアカウントにもある。ID はアドレス（Base32 か16進）で、公開鍵では引けない（catapult と同じ） |
+| `/account/{address}/multisig/graph` | そのアカウントから上と下にたどったマルチシグの木。catapult の REST と同じく、段（`level`。0 が引いたアカウント、負は上、正は下）ごとに、前の段の全員の上か下のアドレスを集めて引いたもの。上の段から順に並ぶ。全部を同じ高さで読む |
+| `/lock/hash/{hash}`、`/lock/secret/{compositeHash}` | ハッシュロックとシークレットロック。ID はロックしたアグリゲートのハッシュと、シークレットと受取人から求めたハッシュ。catapult の REST と同じく、使ったもの（`status` が 1）や期限を過ぎたものも、状態に残っていれば返す（状態の木に入るのは、まだ使っておらず期限前のものだけ） |
+| `/restrictions/account/{address}`、`/restrictions/mosaic/{compositeHash}` | アカウントの制限と、モザイクの制限（`entryType` が 0 ならアドレスごとの値、1 ならモザイク全体の決まり） |
+| `POST /lock/hash`、`POST /lock/secret`、`POST /restrictions/account`、`POST /restrictions/mosaic` | まとめて引く。本文は catapult の REST と同じく `{"hashes": [...]}`、`{"compositeHashes": [...]}`、`{"addresses": [...]}`。答え方と上限は `POST /accounts` と同じ。アドレスやモザイクから探す検索（`/lock/hash?address=` など）は、まだない |
 | `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限の高さ（`endHeight`。catapult と同じく、猶予の 30 日を足した高さ）を過ぎたものも、状態に残っていれば返し、`active` が `false`（状態の木からは外れている）。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
 | `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
 | `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。1件ごとの `id` は MongoDB の ID ではなく、その件の位置（送り主、種類、宛先、対象の ID、キーをつないだ16進）。前のページの最後の `id` を `offset` に渡すと、その次から返す。飛ばす分をなめないので、`pageNumber` で送るより深いページが速い。`?height=` はアーカイブだけで、ほかは 501 |
 | `/namespaces` | ネームスペースの検索。`storage.search` に `namespaces` があるときだけで、なければ 501。catapult の REST と同じく `ownerAddress`、`level0`、`registrationType`、`aliasType` で絞る。ページ送り、`id` と `offset`、アーカイブでの `?height=` はメタデータの検索と同じ（`id` は検索表のキーの16進で、同じ絞り込みの検索の `offset` にだけ渡せる） |
 | `POST /namespaces/names` | `{"namespaceIds": [...]}` の ID と、その親の名前（自分の部分）。名前を知らないものは返さない。1回に 100 件まで |
 | `POST /namespaces/account/names`、`POST /namespaces/mosaic/names` | `{"addresses": [...]}` か `{"mosaicIds": [...]}` を別名にしている、今有効なネームスペースの名前（`symbol.xym` のようにルートからつないだもの）。1回に 100 件まで |
-| `/accounts/{accountId}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
+| `/accounts/{accountId}/merkle`、`/account/{address}/multisig/merkle`、`/lock/hash/{hash}/merkle`、`/lock/secret/{compositeHash}/merkle`、`/restrictions/account/{address}/merkle`、`/restrictions/mosaic/{compositeHash}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |
@@ -149,7 +155,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `PUT /blocks` | 外で組んで署名したブロックを受け取る。本文は、`Content-Type: application/json` なら `{"payload":"16進"}`、`application/octet-stream` ならブロックのバイト列そのまま（ほかは 415）。ブロックは P2P の `Push_Block` と同じく 32 MiB まで（JSON は16進なのでおよそ 64 MiB まで。超えたら 413）。heika だけの口。P2P の `Push_Block` と同じく、形と署名を確かめて 202 を返し（読めなければ 409）、先端の次につながるか、先端と同じ親の上でスコアが高ければ足して、つないでいるピアに流す。足したかはノードのログか `/chain/info` で見る。規則に合わなくても、P2P と違って締め出す相手はいない |
 
 - トランザクションの行方は、トランザクションの期限（`maxTransactionLifetime`、メインネットで 6 時間）の分の直近のブロックだけから答える。送ったばかりのものは、その間に入るか二度と入らないかなので、送金のあとの確かめには足りる。索引はメモリにだけ持ち、起動したら直近のブロックを読んで作り直す（ライトの残し方でもブロックはその分ある）。それより古いトランザクションは 404
-- 状態の口（`/accounts`、`/mosaics`、`/namespaces`、`/metadata` と、それぞれの `/merkle`）は、`?height=N` を付けると、高さ N のブロックを実行したあとの状態を返す（heika だけ）。`/merkle` の道はブロック N の9本の根につながるので、`/blocks/{N}` の StateHash まで確かめられる。ネームスペースの `active` も、その高さで決める
+- 状態の口（`/accounts`、`/mosaics`、`/namespaces`、`/metadata` と、それぞれの `/merkle`、`POST /accounts`、`POST /mosaics`、`/account/{address}/multisig` と `/graph`、ロックと制限の口）は、`?height=N` を付けると、高さ N のブロックを実行したあとの状態を返す（heika だけ）。`/merkle` の道はブロック N の9本の根につながるので、`/blocks/{N}` の StateHash まで確かめられる。ネームスペースの `active` も、その高さで決める
   - 答えには、引いた高さを `X-Heika-Height` で添える。catapult はこのクエリを知らずに今の状態を返すので、このヘッダーがなければ、その高さの答えではない
   - まだ実行していない高さと、読めない形の高さは 409。その高さの差分を持っていなければ 410（`Gone`）。アーカイブの残し方なら全部の高さ、ライトとフルなら残している差分の分だけ答えられる
 - 話すのは HTTP だけ。HTTPS で外に出すなら、手前に Nginx や Caddy を置き、そこで TLS を終わらせる。systemd と Caddy で外に出す手順は [deploy.md](deploy.md)

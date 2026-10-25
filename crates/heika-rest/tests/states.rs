@@ -5,8 +5,10 @@ use heika_core::patricia::TreeNode;
 use heika_rest::RestError;
 use heika_rest::merkle::MerkleStateInfo;
 use heika_rest::state::{
-    AccountInfo, AccountJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicStateJson,
-    NamespaceInfo, RootNamespaceState,
+    AccountInfo, AccountJson, AccountRestrictionsInfo, AccountRestrictionsJson, HashLockInfo,
+    HashLockJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicRestrictionEntryJson,
+    MosaicRestrictionInfo, MosaicStateJson, MultisigInfo, MultisigJson, NamespaceInfo,
+    RootNamespaceState, SecretLockInfo, SecretLockJson,
 };
 use serde_json::{Value, json};
 use sha3::{Digest, Sha3_256};
@@ -181,6 +183,207 @@ fn rebuilds_the_mosaic_state() {
     assert_eq!(
         info.mosaic.tree_key(),
         Ok(heika_core::patricia::id_key(0x6BED_913F_A202_23F8))
+    );
+}
+
+#[test]
+fn rebuilds_the_multisig_state() {
+    let info: MultisigInfo = serde_json::from_value(json!({
+        "multisig": {
+            "version": 1,
+            "accountAddress": hex(&[0x68; 24]),
+            "minApproval": 2,
+            "minRemoval": 1,
+            "cosignatoryAddresses": [hex(&[0x11; 24]), hex(&[0x22; 24])],
+            "multisigAddresses": [hex(&[0x33; 24])],
+        },
+    }))
+    .unwrap();
+    let mut expected = vec![1, 0];
+    expected.extend_from_slice(&2_u32.to_le_bytes());
+    expected.extend_from_slice(&1_u32.to_le_bytes());
+    expected.extend_from_slice(&[0x68; 24]);
+    expected.extend_from_slice(&le(2));
+    expected.extend_from_slice(&[0x11; 24]);
+    expected.extend_from_slice(&[0x22; 24]);
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&[0x33; 24]);
+    assert_eq!(info.multisig.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        MultisigJson::from_state_bytes(&expected),
+        Ok(info.multisig.clone())
+    );
+    assert_eq!(
+        info.multisig.tree_key(),
+        Ok(heika_core::patricia::address_key(
+            &heika_core::address::Address([0x68; 24])
+        ))
+    );
+    // 数が中身より多ければ読めない
+    let mut short = expected.clone();
+    short[34] = 3;
+    assert!(MultisigJson::from_state_bytes(&short).is_err());
+}
+
+#[test]
+fn rebuilds_the_lock_states() {
+    let hash_lock: HashLockInfo = serde_json::from_value(json!({
+        "lock": {
+            "version": 1,
+            "ownerAddress": hex(&[0x68; 24]),
+            "mosaicId": "6BED913FA20223F8",
+            "amount": "10000000",
+            "endHeight": "480",
+            "status": 1,
+            "hash": hex(&[0x44; 32]),
+        },
+    }))
+    .unwrap();
+    let mut head = vec![1, 0];
+    head.extend_from_slice(&[0x68; 24]);
+    head.extend_from_slice(&le(0x6BED_913F_A202_23F8));
+    head.extend_from_slice(&le(10_000_000));
+    head.extend_from_slice(&le(480));
+    head.push(1);
+    let mut expected = head.clone();
+    expected.extend_from_slice(&[0x44; 32]);
+    assert_eq!(hash_lock.lock.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        HashLockJson::from_state_bytes(&expected),
+        Ok(hash_lock.lock.clone())
+    );
+    assert_eq!(
+        hash_lock.lock.tree_key(),
+        Ok(heika_core::patricia::hash_key(&Hash256([0x44; 32])))
+    );
+
+    let secret_lock: SecretLockInfo = serde_json::from_value(json!({
+        "lock": {
+            "version": 1,
+            "ownerAddress": hex(&[0x68; 24]),
+            "mosaicId": "6BED913FA20223F8",
+            "amount": "10000000",
+            "endHeight": "480",
+            "status": 1,
+            "hashAlgorithm": 0,
+            "secret": hex(&[0x55; 32]),
+            "recipientAddress": hex(&[0x77; 24]),
+            "compositeHash": hex(&[0x66; 32]),
+        },
+    }))
+    .unwrap();
+    let mut expected = head;
+    expected.push(0);
+    expected.extend_from_slice(&[0x55; 32]);
+    expected.extend_from_slice(&[0x77; 24]);
+    assert_eq!(secret_lock.lock.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        SecretLockJson::from_state_bytes(&expected, &Hash256([0x66; 32])),
+        Ok(secret_lock.lock.clone())
+    );
+    assert_eq!(
+        secret_lock.lock.tree_key(),
+        Ok(heika_core::patricia::hash_key(&Hash256([0x66; 32])))
+    );
+}
+
+#[test]
+fn rebuilds_the_restriction_states() {
+    // アドレスを受け入れ、送るトランザクションの種類（送金 0x4154）を拒む
+    let account: AccountRestrictionsInfo = serde_json::from_value(json!({
+        "accountRestrictions": {
+            "version": 1,
+            "address": hex(&[0x68; 24]),
+            "restrictions": [
+                { "restrictionFlags": 0x0001, "values": [hex(&[0x11; 24])] },
+                { "restrictionFlags": 0x0002, "values": ["6BED913FA20223F8"] },
+                { "restrictionFlags": 0xC004, "values": [0x4154] },
+            ],
+        },
+    }))
+    .unwrap();
+    let mut expected = vec![1, 0];
+    expected.extend_from_slice(&[0x68; 24]);
+    expected.extend_from_slice(&le(3));
+    expected.extend_from_slice(&0x0001_u16.to_le_bytes());
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&[0x11; 24]);
+    expected.extend_from_slice(&0x0002_u16.to_le_bytes());
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&le(0x6BED_913F_A202_23F8));
+    expected.extend_from_slice(&0xC004_u16.to_le_bytes());
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&0x4154_u16.to_le_bytes());
+    let restrictions = &account.account_restrictions;
+    assert_eq!(restrictions.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        AccountRestrictionsJson::from_state_bytes(&expected),
+        Ok(restrictions.clone())
+    );
+    assert_eq!(
+        restrictions.tree_key(),
+        Ok(heika_core::patricia::address_key(
+            &heika_core::address::Address([0x68; 24])
+        ))
+    );
+
+    // アドレスごとの値（`targetAddress` あり）と、モザイク全体の決まり（なし）
+    let address: MosaicRestrictionInfo = serde_json::from_value(json!({
+        "mosaicRestrictionEntry": {
+            "version": 1,
+            "compositeHash": hex(&[0x66; 32]),
+            "entryType": 0,
+            "mosaicId": "6BED913FA20223F8",
+            "targetAddress": hex(&[0x68; 24]),
+            "restrictions": [{ "key": "1", "value": "2" }],
+        },
+    }))
+    .unwrap();
+    let mut expected = vec![1, 0, 0];
+    expected.extend_from_slice(&le(0x6BED_913F_A202_23F8));
+    expected.extend_from_slice(&[0x68; 24]);
+    expected.push(1);
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&le(2));
+    let entry = &address.mosaic_restriction_entry;
+    assert_eq!(entry.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        MosaicRestrictionEntryJson::from_state_bytes(&expected, &Hash256([0x66; 32])),
+        Ok(entry.clone())
+    );
+    let global: MosaicRestrictionInfo = serde_json::from_value(json!({
+        "mosaicRestrictionEntry": {
+            "version": 1,
+            "compositeHash": hex(&[0x66; 32]),
+            "entryType": 1,
+            "mosaicId": "6BED913FA20223F8",
+            "restrictions": [{
+                "key": "1",
+                "restriction": {
+                    "referenceMosaicId": "0000000000000000",
+                    "restrictionValue": "2",
+                    "restrictionType": 1,
+                },
+            }],
+        },
+    }))
+    .unwrap();
+    let mut expected = vec![1, 0, 1];
+    expected.extend_from_slice(&le(0x6BED_913F_A202_23F8));
+    expected.push(1);
+    expected.extend_from_slice(&le(1));
+    expected.extend_from_slice(&le(0));
+    expected.extend_from_slice(&le(2));
+    expected.push(1);
+    let entry = &global.mosaic_restriction_entry;
+    assert_eq!(entry.to_state_bytes().unwrap(), expected);
+    assert_eq!(
+        MosaicRestrictionEntryJson::from_state_bytes(&expected, &Hash256([0x66; 32])),
+        Ok(entry.clone())
+    );
+    assert_eq!(
+        serde_json::to_value(&global).unwrap()["mosaicRestrictionEntry"].get("targetAddress"),
+        None
     );
 }
 

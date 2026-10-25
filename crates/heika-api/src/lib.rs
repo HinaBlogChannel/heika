@@ -12,6 +12,12 @@
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
+//! - `POST /accounts`、`POST /mosaics`: ID を並べて、まとめて引く。これも `?height=` を受ける
+//! - `/account/{address}/multisig`、`/merkle`、`/graph`: マルチシグの状態と、その木の道と、上下にたどった木。
+//!   これも `?height=` を受ける
+//! - `/lock/hash/{hash}`、`/lock/secret/{compositeHash}`、`/restrictions/account/{address}`、
+//!   `/restrictions/mosaic/{compositeHash}` と、それぞれの `/merkle` と、`POST` でまとめて引く口: ロックと制限。
+//!   これも `?height=` を受ける
 //! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
 //! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
 //!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
@@ -57,8 +63,10 @@ use heika_rest::node::{
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
-    AccountInfo, AccountJson, AccountNamesJson, MetadataEntryJson, MetadataInfo, MosaicInfo,
-    MosaicNamesJson, MosaicStateJson, NamespaceInfo, NamespaceNameJson,
+    AccountInfo, AccountJson, AccountNamesJson, AccountRestrictionsInfo, AccountRestrictionsJson,
+    HashLockInfo, HashLockJson, MetadataEntryJson, MetadataInfo, MosaicInfo, MosaicNamesJson,
+    MosaicRestrictionEntryJson, MosaicRestrictionInfo, MosaicStateJson, MultisigGraphLevel,
+    MultisigInfo, MultisigJson, NamespaceInfo, NamespaceNameJson, SecretLockInfo, SecretLockJson,
 };
 use heika_rest::transaction::TransactionInfo;
 
@@ -117,16 +125,42 @@ impl From<String> for StateError {
 
 /// チェーンの中身を読む口。エラーはわけの文（500 で返す）。
 ///
+/// 木のキーのもとと、状態のバイト列の組の並び（[`Reader::lock_or_restriction_states`]）
+pub type KeyedStates = Vec<(Vec<u8>, Vec<u8>)>;
+
 /// 状態を読む口の `at` は、そのブロックを実行したあとの状態を引く高さ。`None` なら今の状態
 pub trait Reader: Send + Sync {
-    /// アカウントの状態。なければ `None`
-    fn account(
+    /// アカウントの状態。`addresses` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn accounts(
+        &self,
+        addresses: &[Address],
+        at: Option<u64>,
+    ) -> Result<Vec<AccountJson>, StateError>;
+    /// モザイクの定義の状態。`ids` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn mosaics(&self, ids: &[u64], at: Option<u64>) -> Result<Vec<MosaicStateJson>, StateError>;
+    /// マルチシグの状態。`addresses` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn multisigs(
+        &self,
+        addresses: &[Address],
+        at: Option<u64>,
+    ) -> Result<Vec<MultisigJson>, StateError>;
+    /// ロックか制限（`cache` が [`SubCache::HashLockInfo`]、[`SubCache::SecretLockInfo`]、
+    /// [`SubCache::AccountRestriction`]、[`SubCache::MosaicRestriction`]）の状態を、catapult の状態のバイト列
+    /// （版の番号から）で。`keys`（木のキーのもと）のうち、あるものだけを、キーと組で渡した順に。全部を同じ高さで読む。
+    /// ロックは履歴の最後のもので、使ったものや期限を過ぎたものも、状態に残っていれば返す（catapult の REST と同じ）
+    fn lock_or_restriction_states(
+        &self,
+        cache: SubCache,
+        keys: &[Vec<u8>],
+        at: Option<u64>,
+    ) -> Result<KeyedStates, StateError>;
+    /// `address` から上と下にたどったマルチシグの木（[`multisig_graph`]）。`address` になければ `None`。
+    /// 全部を同じ高さで読む
+    fn multisig_graph(
         &self,
         address: &Address,
         at: Option<u64>,
-    ) -> Result<Option<AccountJson>, StateError>;
-    /// モザイクの定義の状態。なければ `None`
-    fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError>;
+    ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError>;
     /// ネームスペース（ルートか子）の状態。なければ `None`。期限（猶予を含む）が過ぎても状態に残っていれば返し、
     /// `active` が `false` になる（catapult の REST と同じ）
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError>;
@@ -236,6 +270,10 @@ struct NamespaceQuery {
 
 /// 名前を引く口に、1回で頼める数
 const MAX_NAME_IDS: usize = 100;
+
+/// アカウントやモザイクをまとめて引く口に、1回で頼める数。catapult の REST には上限がないので、ふつうの使い方で
+/// 当たらないくらいに大きく取る
+const MAX_STATE_IDS: usize = 1000;
 
 /// メタデータの検索の、1件の位置（[`MetadataEntryJson::position`] を読んだもの）。ページ送りの `offset`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -594,6 +632,72 @@ impl AtQuery {
     }
 }
 
+/// マルチシグの木の、たどる段の上限。catapult はマルチシグの深さを 3 までに抑えるので、ふつうは届かない
+const MAX_MULTISIG_LEVELS: i32 = 16;
+
+/// `address` から、上（入っているマルチシグ）と下（連署者）にたどったマルチシグの木。catapult の REST の
+/// `getMultisigGraph` と同じく、段ごとに前の段の全員のアドレスを集めて引き、なくなったらやめる。上の段から順に
+/// 並べる。`read` はアドレスのうち、あるものだけを返す。`address` になければ `None`
+pub fn multisig_graph<E>(
+    address: &Address,
+    mut read: impl FnMut(&[Address]) -> Result<Vec<MultisigJson>, E>,
+) -> Result<Option<Vec<MultisigGraphLevel>>, E> {
+    let Some(start) = read(std::slice::from_ref(address))?.into_iter().next() else {
+        return Ok(None);
+    };
+    // 段にあるアカウントの、上か下のアドレスを、重ねずに集める
+    let next = |entries: &[MultisigJson], up: bool| {
+        let mut addresses: Vec<Address> = Vec::new();
+        for entry in entries {
+            let side = if up {
+                &entry.multisig_addresses
+            } else {
+                &entry.cosignatory_addresses
+            };
+            for address in side.iter().filter_map(|hex| Address::from_hex(hex).ok()) {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        addresses
+    };
+    let mut levels = vec![(0, vec![start])];
+    for up in [true, false] {
+        let step = if up { -1 } else { 1 };
+        let mut level: i32 = 0;
+        let mut entries = levels[if up { 0 } else { levels.len() - 1 }].1.clone();
+        while level.abs() < MAX_MULTISIG_LEVELS {
+            let addresses = next(&entries, up);
+            if addresses.is_empty() {
+                break;
+            }
+            entries = read(&addresses)?;
+            if entries.is_empty() {
+                break;
+            }
+            level += step;
+            if up {
+                levels.insert(0, (level, entries.clone()));
+            } else {
+                levels.push((level, entries.clone()));
+            }
+        }
+    }
+    Ok(Some(
+        levels
+            .into_iter()
+            .map(|(level, entries)| MultisigGraphLevel {
+                level,
+                multisig_entries: entries
+                    .into_iter()
+                    .map(|multisig| MultisigInfo { multisig })
+                    .collect(),
+            })
+            .collect(),
+    ))
+}
+
 /// `?height=` が読めない形（409）
 struct InvalidHeight;
 
@@ -674,12 +778,95 @@ async fn account(
         Ok(at) => at,
         Err(invalid) => return invalid.into_response(),
     };
-    let read = api.node.reader.account(&address, at);
+    let read = api.node.reader.accounts(&[address], at);
     found_at(
         &id,
         at,
-        read.map(|account| account.map(|account| AccountInfo { account })),
+        read.map(|accounts| {
+            accounts
+                .into_iter()
+                .next()
+                .map(|account| AccountInfo { account })
+        }),
     )
+}
+
+/// `POST /accounts` と `POST /mosaics` の本文。catapult の REST と同じく、配列の代わりに1つの文字列でもよい
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatesBody {
+    addresses: Option<OneOrMany>,
+    public_keys: Option<OneOrMany>,
+    mosaic_ids: Option<OneOrMany>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            OneOrMany::One(value) => vec![value],
+            OneOrMany::Many(values) => values,
+        }
+    }
+}
+
+/// 同じものは、最初の1つだけを残す（catapult の REST は、DB に `$in` で頼むので、同じものは1回だけ返る）
+fn dedup<T: PartialEq>(values: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// アカウントを、アドレスか公開鍵を並べてまとめて引く。あるものだけを頼んだ順に返す
+async fn accounts(
+    State(api): State<Api>,
+    Query(query): Query<AtQuery>,
+    Json(body): Json<StatesBody>,
+) -> Response {
+    let network = api.node.reader.network();
+    let ids = match (body.addresses, body.public_keys) {
+        (Some(_), Some(_)) => {
+            return invalid("publicKeys and addresses cannot both be provided".to_owned());
+        }
+        (None, Some(keys)) => {
+            body_ids(Some(&keys.into_vec()), "publicKeys", MAX_STATE_IDS, |key| {
+                (key.len() == 64)
+                    .then(|| account_address(key, network))
+                    .flatten()
+            })
+        }
+        (addresses, None) => body_ids(
+            addresses.map(OneOrMany::into_vec).as_deref(),
+            "addresses",
+            MAX_STATE_IDS,
+            |id| address_only(id, network),
+        ),
+    };
+    let addresses = match ids {
+        Ok(addresses) => dedup(addresses),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.accounts(&addresses, at).map(|accounts| {
+        accounts
+            .into_iter()
+            .map(|account| AccountInfo { account })
+            .collect::<Vec<_>>()
+    });
+    found_at("", at, read.map(Some))
 }
 
 async fn account_merkle(
@@ -711,12 +898,284 @@ async fn mosaic(
         Ok(at) => at,
         Err(invalid) => return invalid.into_response(),
     };
-    let read = api.node.reader.mosaic(mosaic_id, at);
+    let read = api.node.reader.mosaics(&[mosaic_id], at);
     found_at(
         &id,
         at,
-        read.map(|mosaic| mosaic.map(|mosaic| MosaicInfo { mosaic })),
+        read.map(|mosaics| {
+            mosaics
+                .into_iter()
+                .next()
+                .map(|mosaic| MosaicInfo { mosaic })
+        }),
     )
+}
+
+/// モザイクの定義を、ID を並べてまとめて引く。あるものだけを頼んだ順に返す
+async fn mosaics(
+    State(api): State<Api>,
+    Query(query): Query<AtQuery>,
+    Json(body): Json<StatesBody>,
+) -> Response {
+    let ids = match body_ids(
+        body.mosaic_ids.map(OneOrMany::into_vec).as_deref(),
+        "mosaicIds",
+        MAX_STATE_IDS,
+        hex_id,
+    ) {
+        Ok(ids) => dedup(ids),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.mosaics(&ids, at).map(|mosaics| {
+        mosaics
+            .into_iter()
+            .map(|mosaic| MosaicInfo { mosaic })
+            .collect::<Vec<_>>()
+    });
+    found_at("", at, read.map(Some))
+}
+
+async fn multisig(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.multisigs(&[address], at);
+    found_at(
+        &id,
+        at,
+        read.map(|entries| {
+            entries
+                .into_iter()
+                .next()
+                .map(|multisig| MultisigInfo { multisig })
+        }),
+    )
+}
+
+async fn multisig_merkle(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    state_path(
+        &api,
+        &id,
+        &query,
+        SubCache::Multisig,
+        patricia::address_key(&address),
+    )
+}
+
+async fn multisig_graph_route(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Query(query): Query<AtQuery>,
+) -> Response {
+    let Some(address) = address_only(&id, api.node.reader.network()) else {
+        return invalid("address has an invalid format".to_owned());
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at(&id, at, api.node.reader.multisig_graph(&address, at))
+}
+
+/// ロックと制限の口。どの木の、どんな ID か
+#[derive(Clone, Copy)]
+enum Kept {
+    HashLock,
+    SecretLock,
+    AccountRestriction,
+    MosaicRestriction,
+}
+
+impl Kept {
+    fn cache(self) -> SubCache {
+        match self {
+            Kept::HashLock => SubCache::HashLockInfo,
+            Kept::SecretLock => SubCache::SecretLockInfo,
+            Kept::AccountRestriction => SubCache::AccountRestriction,
+            Kept::MosaicRestriction => SubCache::MosaicRestriction,
+        }
+    }
+
+    /// 1件の口の ID の名前と、まとめて引く本文の項目の名前（catapult の REST と同じ）
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Kept::HashLock => ("hash", "hashes"),
+            Kept::SecretLock | Kept::MosaicRestriction => ("compositeHash", "compositeHashes"),
+            Kept::AccountRestriction => ("address", "addresses"),
+        }
+    }
+
+    /// ID を木のキーのもとにする。読めなければ `None`
+    fn key(self, id: &str, network: NetworkIdentifier) -> Option<Vec<u8>> {
+        match self {
+            Kept::AccountRestriction => address_only(id, network).map(|address| address.0.to_vec()),
+            _ => hash256(id).map(|hash| hash.0.to_vec()),
+        }
+    }
+
+    /// 木のキーのもとを、木のキーにする
+    fn tree_key(self, key: &[u8]) -> Hash256 {
+        match self {
+            Kept::AccountRestriction => {
+                patricia::address_key(&Address(key.try_into().expect("24 バイト")))
+            }
+            _ => patricia::hash_key(&Hash256(key.try_into().expect("32 バイト"))),
+        }
+    }
+
+    /// 状態のバイト列を、catapult の REST と同じ JSON にする
+    fn json(self, key: &[u8], bytes: &[u8]) -> Result<KeptJson, String> {
+        let hash = || Hash256(key.try_into().unwrap_or([0; 32]));
+        match self {
+            Kept::HashLock => HashLockJson::from_state_bytes(bytes)
+                .map(|lock| KeptJson::HashLock(HashLockInfo { lock })),
+            Kept::SecretLock => SecretLockJson::from_state_bytes(bytes, &hash())
+                .map(|lock| KeptJson::SecretLock(SecretLockInfo { lock })),
+            Kept::AccountRestriction => {
+                AccountRestrictionsJson::from_state_bytes(bytes).map(|account_restrictions| {
+                    KeptJson::AccountRestriction(AccountRestrictionsInfo {
+                        account_restrictions,
+                    })
+                })
+            }
+            Kept::MosaicRestriction => MosaicRestrictionEntryJson::from_state_bytes(bytes, &hash())
+                .map(|mosaic_restriction_entry| {
+                    KeptJson::MosaicRestriction(MosaicRestrictionInfo {
+                        mosaic_restriction_entry,
+                    })
+                }),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    /// `keys` の状態を読んで、JSON にする
+    fn read(
+        self,
+        api: &Api,
+        keys: &[Vec<u8>],
+        at: Option<u64>,
+    ) -> Result<Vec<KeptJson>, StateError> {
+        api.node
+            .reader
+            .lock_or_restriction_states(self.cache(), keys, at)?
+            .iter()
+            .map(|(key, bytes)| self.json(key, bytes).map_err(StateError::Other))
+            .collect()
+    }
+}
+
+/// ロックと制限の JSON
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum KeptJson {
+    HashLock(HashLockInfo),
+    SecretLock(SecretLockInfo),
+    AccountRestriction(AccountRestrictionsInfo),
+    MosaicRestriction(MosaicRestrictionInfo),
+}
+
+/// ロックと制限をまとめて引く本文。catapult の REST と同じく、配列の代わりに1つの文字列でもよい
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeptBody {
+    hashes: Option<OneOrMany>,
+    composite_hashes: Option<OneOrMany>,
+    addresses: Option<OneOrMany>,
+}
+
+async fn kept_one(kept: Kept, api: Api, id: String, query: AtQuery) -> Response {
+    let Some(key) = kept.key(&id, api.node.reader.network()) else {
+        return invalid(format!("{} has an invalid format", kept.names().0));
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = kept.read(&api, &[key], at);
+    found_at(&id, at, read.map(|values| values.into_iter().next()))
+}
+
+async fn kept_many(kept: Kept, api: Api, query: AtQuery, body: KeptBody) -> Response {
+    let name = kept.names().1;
+    let values = match kept {
+        Kept::HashLock => body.hashes,
+        Kept::SecretLock | Kept::MosaicRestriction => body.composite_hashes,
+        Kept::AccountRestriction => body.addresses,
+    }
+    .map(OneOrMany::into_vec);
+    let network = api.node.reader.network();
+    let keys = match body_ids(values.as_deref(), name, MAX_STATE_IDS, |id| {
+        kept.key(id, network)
+    }) {
+        Ok(keys) => dedup(keys),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    found_at("", at, kept.read(&api, &keys, at).map(Some))
+}
+
+async fn kept_merkle(kept: Kept, api: Api, id: String, query: AtQuery) -> Response {
+    let Some(key) = kept.key(&id, api.node.reader.network()) else {
+        return invalid(format!("{} has an invalid format", kept.names().0));
+    };
+    state_path(&api, &id, &query, kept.cache(), kept.tree_key(&key))
+}
+
+/// ロックと制限の、まとめて引く口と、1件の口と、木の道の口
+fn kept_routes(router: Router<Api>, base: &str, kept: Kept) -> Router<Api> {
+    let id = kept.names().0;
+    router
+        .route(
+            base,
+            post(
+                move |State(api): State<Api>,
+                      Query(query): Query<AtQuery>,
+                      Json(body): Json<KeptBody>| {
+                    kept_many(kept, api, query, body)
+                },
+            )
+            .options(preflight),
+        )
+        .route(
+            &format!("{base}/{{{id}}}"),
+            get(
+                move |State(api): State<Api>,
+                      Path(id): Path<String>,
+                      Query(query): Query<AtQuery>| kept_one(kept, api, id, query),
+            ),
+        )
+        .route(
+            &format!("{base}/{{{id}}}/merkle"),
+            get(
+                move |State(api): State<Api>,
+                      Path(id): Path<String>,
+                      Query(query): Query<AtQuery>| {
+                    kept_merkle(kept, api, id, query)
+                },
+            ),
+        )
 }
 
 async fn mosaic_merkle(
@@ -1049,9 +1508,19 @@ fn name_ids<T>(
     name: &str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<Vec<T>, String> {
+    body_ids(values, name, MAX_NAME_IDS, parse)
+}
+
+/// 本文の ID の並びを、`max` 個まで読む。なければ、多すぎれば、読めなければ、409 で返すわけ
+fn body_ids<T>(
+    values: Option<&[String]>,
+    name: &str,
+    max: usize,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, String> {
     let values = values.ok_or_else(|| format!("{name} is missing"))?;
-    if values.len() > MAX_NAME_IDS {
-        return Err(format!("{name} has more than {MAX_NAME_IDS} items"));
+    if values.len() > max {
+        return Err(format!("{name} has more than {max} items"));
     }
     values
         .iter()
@@ -1230,7 +1699,17 @@ async fn allow_any_origin(mut response: Response) -> Response {
 
 /// 口の並び
 pub fn router(shared: Shared, node: Node) -> Router {
-    Router::new()
+    let router = [
+        ("/lock/hash", Kept::HashLock),
+        ("/lock/secret", Kept::SecretLock),
+        ("/restrictions/account", Kept::AccountRestriction),
+        ("/restrictions/mosaic", Kept::MosaicRestriction),
+    ]
+    .into_iter()
+    .fold(Router::new(), |router, (base, kept)| {
+        kept_routes(router, base, kept)
+    });
+    router
         .route("/node/info", get(node_info))
         .route("/node/peers", get(node_peers))
         .route("/chain/info", get(chain_info))
@@ -1260,8 +1739,13 @@ pub fn router(shared: Shared, node: Node) -> Router {
             "/transactions/cosignature",
             put(announce_cosignature).options(preflight),
         )
+        .route("/accounts", post(accounts).options(preflight))
         .route("/accounts/{id}", get(account))
         .route("/accounts/{id}/merkle", get(account_merkle))
+        .route("/account/{id}/multisig", get(multisig))
+        .route("/account/{id}/multisig/merkle", get(multisig_merkle))
+        .route("/account/{id}/multisig/graph", get(multisig_graph_route))
+        .route("/mosaics", post(mosaics).options(preflight))
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
         .route("/namespaces", get(search_namespaces))
@@ -1508,6 +1992,32 @@ mod tests {
     }
 
     /// 偽の読み役は高さ 10 まで実行していて、5 より前の状態の履歴は持っていない
+    /// 偽の読み役のマルチシグ。`M` は `known` と `C` が連署するマルチシグで、`M` は `U` の連署者
+    fn fake_multisig_address(name: char) -> Address {
+        Address::from_public_key(&PublicKey([name as u8; 32]), NetworkIdentifier::TESTNET)
+    }
+
+    fn fake_multisigs() -> Vec<MultisigJson> {
+        let entry = |address: Address, cosignatories: &[Address], multisigs: &[Address]| {
+            let hexes = |addresses: &[Address]| addresses.iter().map(Address::to_hex).collect();
+            MultisigJson {
+                version: 1,
+                account_address: address.to_hex(),
+                min_approval: cosignatories.len() as u32,
+                min_removal: 1,
+                cosignatory_addresses: hexes(cosignatories),
+                multisig_addresses: hexes(multisigs),
+            }
+        };
+        let [u, m, c] = ['U', 'M', 'C'].map(fake_multisig_address);
+        vec![
+            entry(u, &[m], &[]),
+            entry(m, &[known(), c], &[u]),
+            entry(known(), &[], &[m]),
+            entry(c, &[], &[m]),
+        ]
+    }
+
     fn check_at(at: Option<u64>) -> Result<(), StateError> {
         match at {
             Some(height) if height > 10 => Err(StateError::Ahead { height, tip: 10 }),
@@ -1517,33 +2027,113 @@ mod tests {
     }
 
     impl Reader for FakeReader {
-        fn account(
+        fn accounts(
+            &self,
+            addresses: &[Address],
+            at: Option<u64>,
+        ) -> Result<Vec<AccountJson>, StateError> {
+            check_at(at)?;
+            let account = |address: &Address| {
+                let mut bytes = vec![1, 0];
+                bytes.extend_from_slice(&address.0);
+                bytes.extend_from_slice(&1u64.to_le_bytes());
+                bytes.extend_from_slice(&[0x11; 32]);
+                bytes.extend_from_slice(&2u64.to_le_bytes());
+                bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+                AccountJson::from_state_bytes(&bytes).unwrap()
+            };
+            Ok(addresses
+                .iter()
+                .filter(|address| **address == known())
+                .map(account)
+                .collect())
+        }
+
+        fn mosaics(
+            &self,
+            ids: &[u64],
+            at: Option<u64>,
+        ) -> Result<Vec<MosaicStateJson>, StateError> {
+            check_at(at)?;
+            let mosaic = |id: &u64| {
+                let mut bytes = vec![1, 0];
+                bytes.extend_from_slice(&id.to_le_bytes());
+                bytes.extend_from_slice(&[0; 54]);
+                MosaicStateJson::from_state_bytes(&bytes).unwrap()
+            };
+            Ok(ids
+                .iter()
+                .filter(|id| **id == CURRENCY)
+                .map(mosaic)
+                .collect())
+        }
+
+        fn multisigs(
+            &self,
+            addresses: &[Address],
+            at: Option<u64>,
+        ) -> Result<Vec<MultisigJson>, StateError> {
+            check_at(at)?;
+            Ok(addresses
+                .iter()
+                .filter_map(|address| {
+                    fake_multisigs()
+                        .into_iter()
+                        .find(|entry| entry.account_address == address.to_hex())
+                })
+                .collect())
+        }
+
+        fn multisig_graph(
             &self,
             address: &Address,
             at: Option<u64>,
-        ) -> Result<Option<AccountJson>, StateError> {
-            check_at(at)?;
-            if *address != known() {
-                return Ok(None);
-            }
-            let mut bytes = vec![1, 0];
-            bytes.extend_from_slice(&address.0);
-            bytes.extend_from_slice(&1u64.to_le_bytes());
-            bytes.extend_from_slice(&[0x11; 32]);
-            bytes.extend_from_slice(&2u64.to_le_bytes());
-            bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-            Ok(Some(AccountJson::from_state_bytes(&bytes).unwrap()))
+        ) -> Result<Option<Vec<MultisigGraphLevel>>, StateError> {
+            multisig_graph(address, |addresses| self.multisigs(addresses, at))
         }
 
-        fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError> {
+        /// ハッシュ [0x44; 32] のハッシュロックと、`known` のアカウントの制限だけがある
+        fn lock_or_restriction_states(
+            &self,
+            cache: SubCache,
+            keys: &[Vec<u8>],
+            at: Option<u64>,
+        ) -> Result<KeyedStates, StateError> {
             check_at(at)?;
-            if id != CURRENCY {
-                return Ok(None);
-            }
-            let mut bytes = vec![1, 0];
-            bytes.extend_from_slice(&id.to_le_bytes());
-            bytes.extend_from_slice(&[0; 54]);
-            Ok(Some(MosaicStateJson::from_state_bytes(&bytes).unwrap()))
+            let state = |key: &[u8]| match cache {
+                SubCache::HashLockInfo if key == [0x44; 32] => Some(
+                    HashLockJson {
+                        version: 1,
+                        owner_address: known().to_hex(),
+                        mosaic_id: format!("{CURRENCY:016X}"),
+                        amount: "10000000".to_owned(),
+                        end_height: "480".to_owned(),
+                        status: 0,
+                        hash: "44".repeat(32),
+                    }
+                    .to_state_bytes()
+                    .unwrap(),
+                ),
+                SubCache::AccountRestriction if key == known().0 => Some(
+                    AccountRestrictionsJson {
+                        version: 1,
+                        address: known().to_hex(),
+                        restrictions: vec![heika_rest::state::AccountRestrictionJson {
+                            restriction_flags: 0xC004,
+                            values: vec![heika_rest::state::AccountRestrictionValue::Operation(
+                                0x4154,
+                            )],
+                        }],
+                    }
+                    .to_state_bytes()
+                    .unwrap(),
+                ),
+                _ => None,
+            };
+            Ok(keys
+                .iter()
+                .filter_map(|key| state(key).map(|bytes| (key.clone(), bytes)))
+                .collect())
         }
 
         fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
@@ -1916,6 +2506,231 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn reads_accounts_and_mosaics_in_a_batch_like_catapult() {
+        let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
+        // ないものは飛ばし、同じものは1回だけ。アドレスは Base32 でも16進でもよい
+        let (status, body) = post(
+            "/accounts",
+            &format!(
+                r#"{{"addresses": ["{}", "{other}", "{}"]}}"#,
+                known(),
+                known().to_hex()
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["account"]["address"], known().to_hex().as_str());
+        // 公開鍵でも、1つの文字列でもよい
+        let (_, body) = post(
+            "/accounts",
+            &format!(r#"{{"publicKeys": "{}"}}"#, "11".repeat(32)),
+        )
+        .await;
+        assert_eq!(body[0]["account"]["address"], known().to_hex().as_str());
+        let (_, body) = post(
+            "/mosaics",
+            r#"{"mosaicIds": ["000000000000DEAD", "6BED913FA20223F8"]}"#,
+        )
+        .await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["mosaic"]["id"], "6BED913FA20223F8");
+        let (status, body) = post("/mosaics", r#"{"mosaicIds": []}"#).await;
+        assert_eq!((status, body), (StatusCode::OK, serde_json::json!([])));
+
+        let many: Vec<String> = (0..=MAX_STATE_IDS).map(|id| format!("{id:016X}")).collect();
+        for (path, body) in [
+            (
+                "/accounts",
+                format!(
+                    r#"{{"addresses": ["{}"], "publicKeys": ["{}"]}}"#,
+                    known(),
+                    "11".repeat(32)
+                ),
+            ),
+            ("/accounts", "{}".to_owned()),
+            ("/accounts", r#"{"publicKeys": ["11"]}"#.to_owned()),
+            ("/mosaics", r#"{"mosaicIds": ["12"]}"#.to_owned()),
+            (
+                "/mosaics",
+                serde_json::json!({ "mosaicIds": many }).to_string(),
+            ),
+        ] {
+            let (status, response) = post(path, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
+            assert_eq!(response["code"], "InvalidArgument");
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_multisigs_and_their_graph_like_catapult() {
+        let [u, m, c] = ['U', 'M', 'C'].map(fake_multisig_address);
+        let (status, body) = get_status(&format!("/account/{m}/multisig")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["multisig"]["accountAddress"], m.to_hex().as_str());
+        assert_eq!(body["multisig"]["minApproval"], 2);
+        let levels = |body: &serde_json::Value| -> Vec<(i64, Vec<String>)> {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|level| {
+                    let entries = level["multisigEntries"].as_array().unwrap();
+                    (
+                        level["level"].as_i64().unwrap(),
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                entry["multisig"]["accountAddress"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned()
+                            })
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        // 上の段から順に。0 が引いたアカウント
+        let (status, body) = get_status(&format!("/account/{m}/multisig/graph")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            levels(&body),
+            vec![
+                (-1, vec![u.to_hex()]),
+                (0, vec![m.to_hex()]),
+                (1, vec![known().to_hex(), c.to_hex()]),
+            ]
+        );
+        let (_, body) = get_status(&format!("/account/{}/multisig/graph", known().to_hex())).await;
+        assert_eq!(
+            levels(&body),
+            vec![
+                (-2, vec![u.to_hex()]),
+                (-1, vec![m.to_hex()]),
+                (0, vec![known().to_hex()])
+            ]
+        );
+        let other = fake_multisig_address('Z');
+        for path in [
+            format!("/account/{other}/multisig"),
+            format!("/account/{other}/multisig/graph"),
+        ] {
+            assert_eq!(get_status(&path).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+        // 公開鍵では引けない（catapult と同じ）
+        let key = "11".repeat(32);
+        assert_eq!(
+            get_status(&format!("/account/{key}/multisig")).await.0,
+            StatusCode::CONFLICT
+        );
+        let response = get_response(&format!("/account/{m}/multisig/graph?height=7")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        assert_eq!(
+            get_status(&format!("/account/{m}/multisig?height=4"))
+                .await
+                .0,
+            StatusCode::GONE
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_locks_and_restrictions_like_catapult() {
+        let lock = "44".repeat(32);
+        let (status, body) = get_status(&format!("/lock/hash/{lock}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["lock"]["hash"], lock.as_str());
+        assert_eq!(body["lock"]["status"], 0);
+        assert_eq!(body["lock"]["endHeight"], "480");
+        let (status, body) = get_status(&format!("/restrictions/account/{}", known())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["accountRestrictions"]["restrictions"],
+            serde_json::json!([{ "restrictionFlags": 0xC004, "values": [0x4154] }])
+        );
+        // まとめて引けば、あるものだけ。1つの文字列でもよい
+        let (status, body) = post(
+            "/lock/hash",
+            &format!(r#"{{"hashes": ["{lock}", "{}"]}}"#, "45".repeat(32)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        let (_, body) = post(
+            "/restrictions/account",
+            &format!(r#"{{"addresses": "{}"}}"#, known()),
+        )
+        .await;
+        assert_eq!(
+            body[0]["accountRestrictions"]["address"],
+            known().to_hex().as_str()
+        );
+        let other = "45".repeat(32);
+        for path in [
+            format!("/lock/hash/{other}"),
+            format!("/lock/secret/{other}"),
+            format!("/restrictions/mosaic/{other}"),
+        ] {
+            assert_eq!(get_status(&path).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+        let (_, body) = post(
+            "/lock/secret",
+            &format!(r#"{{"compositeHashes": ["{other}"]}}"#),
+        )
+        .await;
+        assert_eq!(body, serde_json::json!([]));
+        for (path, body) in [
+            ("/lock/hash", r#"{"hashes": ["12"]}"#.to_owned()),
+            ("/lock/secret", r#"{"hashes": []}"#.to_owned()),
+            (
+                "/restrictions/account",
+                r#"{"addresses": ["11"]}"#.to_owned(),
+            ),
+        ] {
+            let (status, response) = post(path, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
+            assert_eq!(response["code"], "InvalidArgument");
+        }
+        assert_eq!(get_status("/lock/hash/12").await.0, StatusCode::CONFLICT);
+        let response = get_response(&format!("/lock/hash/{lock}?height=7")).await;
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        assert_eq!(
+            get_status(&format!("/restrictions/account/{}?height=4", known()))
+                .await
+                .0,
+            StatusCode::GONE
+        );
+        // 木の道の口もある（読み役が答えを持っていれば 200）
+        assert_ne!(
+            get_status(&format!("/lock/hash/{lock}/merkle")).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_a_batch_at_a_past_height() {
+        let response = router(snapshot(), node(submit(Arc::default())))
+            .oneshot(
+                Request::post("/mosaics?height=7")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mosaicIds": ["6BED913FA20223F8"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        for (height, status) in [(4, StatusCode::GONE), (11, StatusCode::CONFLICT)] {
+            let (got, _) = post(
+                &format!("/accounts?height={height}"),
+                &format!(r#"{{"addresses": ["{}"]}}"#, known()),
+            )
+            .await;
+            assert_eq!(got, status, "{height}");
+        }
     }
 
     #[tokio::test]

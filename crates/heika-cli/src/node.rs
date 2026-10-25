@@ -29,7 +29,7 @@ const PROBE_BLOCKS: u32 = 100;
 const PROBE_DEPTH: u64 = 1000;
 /// 知らないネットワークでのブロックの目標間隔。catapult の blockGenerationTargetTime の既定値
 const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(30);
-/// --peers-json に書くノードの、遅れの上限（ブロック）。遅れは目標間隔で換算した推定なので、
+/// --peers-json と --peers-api-json に書くノードの、遅れの上限（ブロック）。遅れは目標間隔で換算した推定なので、
 /// 実際のブロックの間隔のばらつきで、遅れていないノードにも数ブロックの遅れが出ることがある
 const MAX_PEER_LAG: u64 = 5;
 
@@ -43,7 +43,9 @@ pub enum NodeCommand {
     /// 名乗るのは --client-cert の証明書で、ノードの秘密鍵は標準入力から読む。
     /// ノードを持っていなくても、heika cert ca と heika cert node で作った証明書でつなげる。
     /// --peers-json を付けると、遅れがなく Peer のロールのあるノードを、読み出しの速い順に、
-    /// catapult の peers-p2p.json の形式で書く。
+    /// catapult の peers-p2p.json の形式で書く。--peers-api-json は、同じように Api のロールのある
+    /// ノードを選んで、peers-api.json として書く。
+    #[command(group(clap::ArgGroup::new("peers_files").args(["peers_json", "peers_api_json"]).multiple(true)))]
     Find {
         /// 最初につなぐノード
         #[arg(long, value_name = "HOST:PORT")]
@@ -60,8 +62,12 @@ pub enum NodeCommand {
         /// 測ったノードを、catapult の peers-p2p.json の形式で書くファイル。すでにあるファイルは上書きしない
         #[arg(long, value_name = "PATH")]
         peers_json: Option<PathBuf>,
-        /// --peers-json に書くノードの数の上限
-        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=1000), requires = "peers_json")]
+        /// 測ったノードのうち Api のロールのあるものを、catapult の peers-api.json の形式で書くファイル。
+        /// API ノードが、連署を集めている途中のトランザクションをやりとりする相手になる。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH")]
+        peers_api_json: Option<PathBuf>,
+        /// --peers-json と --peers-api-json に、それぞれ書くノードの数の上限
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=1000), requires = "peers_files")]
         peers_count: u16,
         /// 測った結果を、表の代わりに JSON で標準出力に出す。途中の経過は標準エラーに出す
         #[arg(long)]
@@ -250,6 +256,7 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             limit,
             crawl,
             peers_json,
+            peers_api_json,
             peers_count,
             json,
         } => {
@@ -365,29 +372,32 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
                 );
             }
 
-            if let Some(path) = peers_json {
-                // 自分のノードを載せると、catapult が自分につなごうとする
-                let own_key = *chain[1].public_key();
-                let peers: Vec<(&Measurement, Endpoint)> = rows
-                    .iter()
-                    .filter(|(m, lag)| {
-                        m.node.roles.contains(NodeRoles::PEER)
-                            && *lag <= MAX_PEER_LAG
-                            && m.ca_key != own_key
-                    })
-                    .filter_map(|(m, _)| Some((m, Endpoint::parse(&m.address)?)))
-                    .take(usize::from(peers_count))
-                    .collect();
+            // 自分のノードを載せると、catapult が自分につなごうとする
+            let own_key = *chain[1].public_key();
+            let files = [
+                (peers_json, NodeRoles::PEER, "Peer"),
+                (peers_api_json, NodeRoles::API, "Api"),
+            ];
+            // 片方が書けないなら、どちらも書かずに止める
+            let mut chosen = Vec::new();
+            for (path, role, name) in files {
+                let Some(path) = path else {
+                    continue;
+                };
+                let peers = select_peers(&rows, role, &own_key, peers_count);
                 if peers.is_empty() {
                     return Err(format!(
-                        "Peer のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードがないので、{} は書きませんでした",
+                        "{name} のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードがないので、{} は書きませんでした",
                         path.display()
                     )
                     .into());
                 }
+                chosen.push((path, name, peers));
+            }
+            for (path, name, peers) in chosen {
                 write_new(&path, peers_p2p_json(&peers).as_bytes())?;
                 progress(&format!(
-                    "{} に {} 台を書きました。Peer のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードを、読み出しの速い順に選んでいます（自分のノードは除く）",
+                    "{} に {} 台を書きました。{name} のロールがあり、遅れが {MAX_PEER_LAG} ブロック以下のノードを、読み出しの速い順に選んでいます（自分のノードは除く）",
                     path.display(),
                     peers.len()
                 ))?;
@@ -539,7 +549,24 @@ impl Endpoint {
     }
 }
 
-/// catapult の peers-p2p.json（`config/PeersConfiguration.cpp` が読む形式）。
+/// peers の JSON に書くノードを選ぶ。`role` のロールがあり、遅れが [`MAX_PEER_LAG`] 以下で、自分のノード
+/// （CA の公開鍵が `own_key`）でないものを、並んでいる順（読み出しの速い順）に `count` 台まで。
+fn select_peers<'a>(
+    rows: &'a [(Measurement, u64)],
+    role: NodeRoles,
+    own_key: &PublicKey,
+    count: u16,
+) -> Vec<(&'a Measurement, Endpoint)> {
+    rows.iter()
+        .filter(|(m, lag)| {
+            m.node.roles.contains(role) && *lag <= MAX_PEER_LAG && m.ca_key != *own_key
+        })
+        .filter_map(|(m, _)| Some((m, Endpoint::parse(&m.address)?)))
+        .take(usize::from(count))
+        .collect()
+}
+
+/// catapult の peers-p2p.json（`config/PeersConfiguration.cpp` が読む形式）。peers-api.json も同じ形式。
 ///
 /// publicKey は TLS で確かめた CA の公開鍵、roles はノード自身が名乗ったロールにする。
 /// IPv4 も IPv6 も名乗っていないノードは、catapult が IPv4 とみなす（`ionet/IpProtocol.cpp`）。
@@ -784,6 +811,41 @@ mod tests {
         );
         assert!(Endpoint::parse("node.example").is_none());
         assert!(Endpoint::parse("node.example:port").is_none());
+    }
+
+    #[test]
+    fn selects_peers_with_the_role_in_order() {
+        let node = |roles: u32, lag: u64, key: u8, address: &str| {
+            let mut m = measurement(100, Instant::now());
+            m.node.roles = NodeRoles(roles);
+            m.ca_key = PublicKey([key; 32]);
+            m.address = address.to_owned();
+            (m, lag)
+        };
+        let own = PublicKey([9; 32]);
+        let rows = [
+            node(0x01, 0, 1, "peer.example:7900"),
+            node(0x03, MAX_PEER_LAG + 1, 2, "late.example:7900"),
+            node(0x03, 0, 9, "own.example:7900"),
+            node(0x02, 0, 3, "api.example:7900"),
+            node(0x03, MAX_PEER_LAG, 4, "dual.example:7900"),
+            node(0x03, 0, 5, "no-port.example"),
+            node(0x03, 0, 6, "more.example:7900"),
+        ];
+        let addresses = |role, count| -> Vec<String> {
+            select_peers(&rows, role, &own, count)
+                .iter()
+                .map(|(m, _)| m.address.clone())
+                .collect()
+        };
+        assert_eq!(
+            addresses(NodeRoles::API, 10),
+            ["api.example:7900", "dual.example:7900", "more.example:7900"]
+        );
+        assert_eq!(
+            addresses(NodeRoles::PEER, 2),
+            ["peer.example:7900", "dual.example:7900"]
+        );
     }
 
     #[test]

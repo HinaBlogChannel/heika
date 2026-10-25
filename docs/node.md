@@ -3,7 +3,7 @@
 ## できること
 
 - 近くて速いノードを探す（ノードと TLS でつなぎ、接続にかかる時間、高さ、ブロックの読み出しの速さを測る。REST のないノードも調べられる）
-- 見つけた速いノードを、catapult の peers-p2p.json の形式で書く
+- 見つけた速いノードを、catapult の peers-p2p.json と peers-api.json の形式で書く
 - 測った結果を JSON で出す
 - ノードあての委任の一覧（ブロックから委任の要求を拾い、メインアカウントのリンクと比べて、今も有効かを出す。harvesters.dat と突き合わせて、入っていない有効な委任を足した harvesters.dat を書ける）
 - 投票するノードが集めている、ファイナライズの投票のメッセージを、ラウンドと段階ごとにまとめる
@@ -12,7 +12,7 @@
 
 ```sh
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem < node.key.pem
-heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json < node.key.pem
+heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --crawl --limit 300 --peers-json peers-p2p.json --peers-api-json peers-api.json < node.key.pem
 heika node find --connect <ホスト>:<ポート> --client-cert node.full.crt.pem --json < node.key.pem > nodes.json
 heika node delegations --connect <自分のノード>:<ポート> --client-cert node.full.crt.pem --from-height <高さ> < node.key.pem
 heika node votes --connect <投票するノード>:<ポート> --client-cert node.full.crt.pem < node.key.pem
@@ -22,9 +22,11 @@ heika node votes --connect <投票するノード>:<ポート> --client-cert nod
 
 `heika node find` は、最初につないだノードからほかのノードの一覧をもらい、1つずつ順につないで測る。`--crawl` を付けると、測ったノードからも一覧をもらってたどるので、ネットワーク全体を調べられる。名乗る証明書は、ノードを持っていなくても `heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとノードに嫌われるので、いつも同じ証明書を使う。`--json` を付けると、表の代わりに、測った結果と測れなかったノードを JSON で標準出力に出す。途中の経過は標準エラーに出すので、標準出力をそのままファイルに書ける。時間はミリ秒、遅れはブロックで、公開鍵はノードが名乗ったものと、TLS で確かめた CA のものの両方を出す。
 
-## peers-p2p.json
+## peers-p2p.json と peers-api.json
 
 `--peers-json` を付けると、測ったノードのうち、Peer のロールがあって遅れが 5 ブロック以下のノードを、読み出しの速い順に `--peers-count` 台（既定は 10 台）選び、catapult の `peers-p2p.json` の形式で書く。公開鍵は、ノードが名乗ったものではなく、TLS で確かめた CA の公開鍵を書く。自分のノードの証明書で名乗っていれば、自分のノードは除く。すでにあるファイルは上書きしないので、ノードの `resources/peers-p2p.json` には、中身を確かめてから置き換える。
+
+`--peers-api-json` を付けると、同じように Api のロールがあるノードを選び、`peers-api.json` として書く。形式は peers-p2p.json と同じ。catapult では、API ノード（Api のロール）の部分トランザクションの拡張だけがこのファイルを読み、連署を集めている途中のトランザクションをやりとりする相手にする。Peer だけのノードには要らない。`--peers-count` は、ファイルごとの上限になる。どちらかのファイルに載せるノードがなければ、どちらも書かずに止める。
 
 ## 委任の一覧
 

@@ -15,6 +15,8 @@
 //! [`Db::for_each_search_key_with_past`]: crate::Db::for_each_search_key_with_past
 
 use heika_core::address::Address;
+use heika_core::hash::Hash256;
+use heika_core::network::GenerationHashSeed;
 use heika_core::patricia::SubCache;
 use heika_transaction::{Body, MetadataKey, MetadataType, NamespaceId, NamespaceRegistrationType};
 
@@ -30,6 +32,10 @@ impl Searches {
     ///
     /// [`Db::namespace_name`]: crate::Db::namespace_name
     pub const NAMESPACES: Self = Self(2);
+    /// トランザクションを、ハッシュから引く（[`Db::transaction_location`]）。ブロックから作る
+    ///
+    /// [`Db::transaction_location`]: crate::Db::transaction_location
+    pub const TRANSACTIONS: Self = Self(4);
     /// 作る検索を、昔の高さでも引けるようにする。状態の差分を全部残すアーカイブのためのもの
     pub const PAST: Self = Self(0x80);
 
@@ -141,6 +147,21 @@ impl NamespaceRow {
         }
         keys
     }
+}
+
+/// ブロック `block` のトランザクション（アグリゲートの中は除く）の、ブロックの中の番号とハッシュ。読めないものは飛ばす
+pub(crate) fn transaction_hashes(block: &[u8], seed: &GenerationHashSeed) -> Vec<(u32, Hash256)> {
+    let Ok(block) = heika_block::Block::from_bytes(block) else {
+        return Vec::new();
+    };
+    block
+        .transactions()
+        .enumerate()
+        .filter_map(|(index, bytes)| {
+            let transaction = heika_transaction::Transaction::from_bytes(bytes).ok()?;
+            Some((index as u32, transaction.hash(seed)))
+        })
+        .collect()
 }
 
 /// ブロック `block` のネームスペースの登録（アグリゲートの中も）から、ID、親の ID（ルートは 0）、名前。

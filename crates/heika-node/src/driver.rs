@@ -228,6 +228,8 @@ fn catch_up_if_behind(
     let mut db = Db::open(&spec.data_directory)?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     check_storage_mode(&db, spec.storage.mode)?;
+    // トランザクションのハッシュの表を作るのに要る。別のネットワークの DB なら、ここで止まる
+    db.set_generation_hash_seed(setup.parameters.generation_hash_seed)?;
     // 足した検索表は、今の状態の行から作る
     let searches = spec.storage.searches();
     if db.searches() != searches {
@@ -243,6 +245,20 @@ fn catch_up_if_behind(
     let done = db.backfill_names(stopping, &mut |at, through| {
         if last_report.elapsed() >= Duration::from_secs(10) || at >= through {
             eprintln!("ネームスペースの名前を、しまってあるブロックから拾っています（高さ {at} / {through}）");
+            last_report = Instant::now();
+        }
+    })?;
+    if !done {
+        return Ok(());
+    }
+    // トランザクションのハッシュの表を足したなら、これもしまってあるブロックから
+    let started = Instant::now();
+    let done = db.backfill_transactions(stopping, &mut |at, through| {
+        if last_report.elapsed() >= Duration::from_secs(10) || at >= through {
+            eprintln!(
+                "トランザクションのハッシュを、しまってあるブロックから拾っています（高さ {at} / {through}、{} 秒）",
+                started.elapsed().as_secs()
+            );
             last_report = Instant::now();
         }
     })?;

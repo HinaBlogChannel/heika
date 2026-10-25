@@ -89,7 +89,8 @@ impl DbReader {
         }
     }
 
-    /// 直近のブロックに入った `hash` のトランザクションと、入った高さと、ブロックの中の番号
+    /// 直近のブロック（ハッシュの表を作っていれば、しまってある全部のブロック）に入った `hash` のトランザクションと、
+    /// 入った高さと、ブロックの中の番号
     fn recent_transaction(
         &self,
         hash: &Hash256,
@@ -99,6 +100,14 @@ impl DbReader {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .find(hash);
+        // 直近のブロックになければ、ハッシュの表（storage.search の transactions）から
+        let found = match found {
+            Some(found) => Some(found),
+            None => self
+                .db
+                .transaction_location(hash)
+                .map_err(|error| error.to_string())?,
+        };
         let Some((height, index)) = found else {
             return Ok(None);
         };

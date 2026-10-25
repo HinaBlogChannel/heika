@@ -464,10 +464,11 @@ fn manifest(
     } else {
         seed.0.clone()
     };
+    // REST はこの PC の中だけなので、ほかのノードには Api を名乗らない（ノードの既定では、REST の口があれば名乗る）
     format!(
         "apiVersion: {api}\nkind: Peer\nmetadata:\n  name: heika-gui\nspec:\n  network:\n    type: {network}\n  \
          dataDirectory: {data}\n  certificates:\n    directory: {certificates}\n  seed: {seed}\n  \
-         listen:\n    address: {listen}\n  storage:\n    mode: {mode}\n  rest:\n    - address: {rest}\n",
+         listen:\n    address: {listen}\n    roles: [Peer]\n  storage:\n    mode: {mode}\n  rest:\n    - address: {rest}\n",
         api = heika_node::config::API_VERSION,
         data = path(&directory.join("data")),
         certificates = path(certificates),
@@ -722,7 +723,9 @@ mod tests {
         let manifest = heika_node::config::Manifest::parse(&text).unwrap();
         assert_eq!(manifest.spec.seed.as_deref(), Some("node.example:7900"));
         assert_eq!(manifest.spec.network.resources, None);
-        assert_eq!(manifest.spec.listen.unwrap().address, LISTEN);
         assert_eq!(manifest.spec.rest[0].address, rest::OWN_REST);
+        // この PC の中だけの REST があっても、Peer だけを名乗る
+        assert_eq!(manifest.spec.roles().0, ROLE_PEER);
+        assert_eq!(manifest.spec.listen.unwrap().address, LISTEN);
     }
 }

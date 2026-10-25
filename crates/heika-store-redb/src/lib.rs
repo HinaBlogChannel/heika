@@ -722,21 +722,21 @@ impl Db {
     }
 
     /// しまってあるブロックを、高さが `heights` の中のものだけ、低い順に（`reverse` なら高い順に）`visit` に渡す。
-    /// `after` があれば、その順でその高さから（その高さのブロックも渡す。続きを決めるのは呼ぶ側）。
+    /// `from` があれば、その順でその高さから（その高さのブロックも渡す。続きを決めるのは呼ぶ側）。
     /// `visit` が `false` を返したら止める
     pub fn for_each_block(
         &self,
         heights: std::ops::RangeInclusive<u64>,
-        after: Option<u64>,
+        from: Option<u64>,
         reverse: bool,
         visit: &mut dyn FnMut(u64, &[u8]) -> bool,
     ) -> Result<(), DbError> {
         let (mut low, mut high) = (*heights.start(), *heights.end());
-        if let Some(after) = after {
+        if let Some(from) = from {
             if reverse {
-                high = high.min(after);
+                high = high.min(from);
             } else {
-                low = low.max(after);
+                low = low.max(from);
             }
         }
         if low > high {
@@ -766,13 +766,13 @@ impl Db {
     }
 
     /// `address` が関わったトランザクション（アグリゲートの中のものは除く）の（高さ、ブロックの中の番号）を、高さが
-    /// `heights` の中のものだけ、古い順に（`reverse` なら新しい順に）`visit` に渡す。`after` があれば、その順で
-    /// それより後のものから。`visit` が `false` を返したら止める。表を作っていなければ何も渡さない
+    /// `heights` の中のものだけ、古い順に（`reverse` なら新しい順に）`visit` に渡す。`from` があれば、その順で
+    /// そこから（`from` そのものも含む）。`visit` が `false` を返したら止める。表を作っていなければ何も渡さない
     pub fn for_each_address_transaction(
         &self,
         address: &[u8; 24],
         heights: std::ops::RangeInclusive<u64>,
-        after: Option<(u64, u32)>,
+        from: Option<(u64, u32)>,
         reverse: bool,
         visit: &mut dyn FnMut(u64, u32) -> bool,
     ) -> Result<(), DbError> {
@@ -782,12 +782,12 @@ impl Db {
         };
         let mut low = search::address_key(address, *heights.start(), 0);
         let mut high = search::address_key(address, *heights.end(), u32::MAX);
-        if let Some((height, index)) = after {
+        if let Some((height, index)) = from {
             let at = search::address_key(address, height, index);
             if reverse {
-                high = at;
+                high = high.min(at);
             } else {
-                low = at;
+                low = low.max(at);
             }
         }
         if low > high {
@@ -799,10 +799,6 @@ impl Db {
         let mut visit_key = |key: &[u8]| {
             let height = u64::from_be_bytes(key[24..32].try_into().expect("8 バイト"));
             let index = u32::from_be_bytes(key[32..36].try_into().expect("4 バイト"));
-            // `after` そのものは渡さない
-            if after == Some((height, index)) {
-                return true;
-            }
             visit(height, index)
         };
         if reverse {
@@ -3375,7 +3371,14 @@ mod tests {
         .unwrap();
         assert_eq!(seen, vec![(3, 0), (2, 0)]);
         let mut seen = Vec::new();
-        db.for_each_address_transaction(&signer, 0..=u64::MAX, Some((1, 0)), false, &mut |h, i| {
+        db.for_each_address_transaction(&signer, 0..=u64::MAX, Some((2, 0)), false, &mut |h, i| {
+            seen.push((h, i));
+            true
+        })
+        .unwrap();
+        assert_eq!(seen, vec![(2, 0), (3, 0)]);
+        let mut seen = Vec::new();
+        db.for_each_address_transaction(&signer, 0..=u64::MAX, Some((2, 0)), true, &mut |h, i| {
             seen.push((h, i));
             false
         })
@@ -3904,9 +3907,9 @@ mod tests {
             batch.put_block(height, &[height as u8]).unwrap();
         }
         batch.commit().unwrap();
-        let walk = |heights, after, reverse, stop_after: usize| {
+        let walk = |heights, from, reverse, stop_after: usize| {
             let mut seen = Vec::new();
-            db.for_each_block(heights, after, reverse, &mut |height, block| {
+            db.for_each_block(heights, from, reverse, &mut |height, block| {
                 assert_eq!(block, [height as u8]);
                 seen.push(height);
                 seen.len() < stop_after

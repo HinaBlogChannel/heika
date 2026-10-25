@@ -215,7 +215,7 @@ pub trait Reader: Send + Sync {
         &self,
         filter: &TransactionFilter,
         page: PageRequest,
-        after: Option<(u64, u32)>,
+        after: Option<(u64, u32, u16)>,
     ) -> Result<Option<Vec<TransactionInfo>>, String>;
     /// 承認されたトランザクション。知らなければ `None`
     fn confirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
@@ -324,7 +324,7 @@ pub struct PageRequest {
     pub descending: bool,
 }
 
-/// 承認されたトランザクションの検索の絞り込み。アグリゲートの中のものは返さない（catapult の `embedded` の既定）
+/// 承認されたトランザクションの検索の絞り込み
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionFilter {
     /// 関わったアドレス（catapult の `meta.addresses`）
@@ -342,6 +342,9 @@ pub struct TransactionFilter {
     /// 入った高さの範囲（両端を含む）
     pub from_height: u64,
     pub to_height: u64,
+    /// アグリゲートの中のトランザクションも 1 件ずつ返すか（catapult の `embedded`。既定は返さない）。catapult と同じく、
+    /// `address` で絞るときは中のものは合わない（catapult の中のトランザクションの文書には `meta.addresses` がない）
+    pub embedded: bool,
 }
 
 /// `/transactions/confirmed` のクエリ文字列。heika がまだ扱わない絞り込みは、あれば 501 にするために読む
@@ -1452,7 +1455,7 @@ async fn search_metadata(State(api): State<Api>, Query(query): Query<MetadataQue
 }
 
 /// 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス）、`signerPublicKey`、
-/// `recipientAddress`、`type`、送金のモザイクと額、高さで絞る。アグリゲートの中のもの（`embedded=true`）は、まだ 501
+/// `recipientAddress`、`type`、送金のモザイクと額、高さで絞る。`embedded=true` なら、アグリゲートの中のものも返す
 async fn search_confirmed(
     State(api): State<Api>,
     Query(query): Query<TransactionQuery>,
@@ -1472,9 +1475,6 @@ async fn search_confirmed(
         return invalid(
             "can't filter by transfer amount if transferMosaicId is not provided".to_owned(),
         );
-    }
-    if query.embedded.as_deref() == Some("true") {
-        return not_supported("the embedded filter");
     }
     let network = api.node.reader.network();
     let filter = (|| {
@@ -1517,6 +1517,11 @@ async fn search_confirmed(
             to_height: exact
                 .or(number(&query.to_height, "toHeight")?)
                 .unwrap_or(u64::MAX),
+            embedded: match query.embedded.as_deref() {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(_) => return Err("embedded has an invalid format".to_owned()),
+            },
         })
     })();
     let filter = match filter {
@@ -1545,15 +1550,6 @@ async fn search_confirmed(
         .into_response(),
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
     }
-}
-
-/// heika がまだ扱わない口や絞り込み（501）
-fn not_supported(what: &str) -> Response {
-    error(
-        StatusCode::NOT_IMPLEMENTED,
-        "NotImplemented",
-        format!("{what} is not supported by this node yet"),
-    )
 }
 
 /// 一覧の並びとページ。読めなければ、409 で返すわけ
@@ -2492,7 +2488,7 @@ mod tests {
             &self,
             filter: &TransactionFilter,
             page: PageRequest,
-            after: Option<(u64, u32)>,
+            after: Option<(u64, u32, u16)>,
         ) -> Result<Option<Vec<TransactionInfo>>, String> {
             let unkept =
                 Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
@@ -2511,7 +2507,7 @@ mod tests {
             if page.descending {
                 heights.reverse();
             }
-            if let Some((after, _)) = after {
+            if let Some((after, _, _)) = after {
                 heights.retain(|&height| {
                     if page.descending {
                         height < after
@@ -2540,13 +2536,14 @@ mod tests {
                     .skip((page.number - 1) * page.size)
                     .take(page.size)
                     .map(|height| TransactionInfo {
-                        id: Some(heika_rest::transaction::transaction_position(height, 0)),
+                        id: Some(heika_rest::transaction::transaction_position(height, 0, 0)),
                         meta: heika_rest::transaction::TransactionMeta {
                             height: Some(height.to_string()),
                             hash: None,
                             merkle_component_hash: None,
                             index: Some(0),
                             aggregate_hash: None,
+                            aggregate_id: None,
                             timestamp: None,
                             fee_multiplier: None,
                         },
@@ -2974,7 +2971,7 @@ mod tests {
         );
         // 最後の件の id から続ける。新しい順、高さの範囲、ページの番号も
         let last = body["data"][9]["id"].as_str().unwrap().to_owned();
-        assert_eq!(last, format!("{:016X}{:08X}", 10, 0));
+        assert_eq!(last, format!("{:012X}{:08X}{:04X}", 10, 0, 0));
         let (_, body) = get_status(&format!(
             "/transactions/confirmed?address={address}&offset={last}"
         ))
@@ -3017,6 +3014,16 @@ mod tests {
             (filter.mosaic, filter.from_amount, filter.to_amount),
             (Some(CURRENCY), Some(5), Some(9))
         );
+        assert!(!filter.embedded);
+        for (embedded, expected) in [("true", true), ("false", false)] {
+            let (status, _) =
+                get_status(&format!("/transactions/confirmed?embedded={embedded}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                LAST_FILTER.lock().unwrap().clone().unwrap().embedded,
+                expected
+            );
+        }
         // アドレスがなくても答える（索引がなければ、しまってあるブロックを読む）
         let (status, body) = get_status("/transactions/confirmed?height=3").await;
         assert_eq!(
@@ -3024,16 +3031,11 @@ mod tests {
             (StatusCode::OK, vec!["3".to_owned()])
         );
 
-        // 索引がなければ 501。アグリゲートの中のものも、まだ 501
+        // 索引がなければ 501
         let unkept = Address::from_public_key(&PublicKey([0x23; 32]), NetworkIdentifier::TESTNET);
-        for path in [
-            format!("/transactions/confirmed?address={unkept}"),
-            format!("/transactions/confirmed?address={address}&embedded=true"),
-        ] {
-            let (status, body) = get_status(&path).await;
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
-            assert_eq!(body["code"], "NotImplemented");
-        }
+        let (status, body) = get_status(&format!("/transactions/confirmed?address={unkept}")).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["code"], "NotImplemented");
         for path in [
             format!("/transactions/confirmed?address={address}&signerPublicKey={key}"),
             format!("/transactions/confirmed?address={address}&recipientAddress={other}"),
@@ -3041,6 +3043,7 @@ mod tests {
             "/transactions/confirmed?address=zzz".to_owned(),
             "/transactions/confirmed?signerPublicKey=11".to_owned(),
             "/transactions/confirmed?type=x".to_owned(),
+            "/transactions/confirmed?embedded=yes".to_owned(),
             "/transactions/confirmed?transferMosaicId=12".to_owned(),
             format!("/transactions/confirmed?address={address}&offset=12"),
             format!("/transactions/confirmed?address={address}&fromHeight=x"),

@@ -12,6 +12,7 @@
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
+//! - `POST /accounts`、`POST /mosaics`: ID を並べて、まとめて引く。これも `?height=` を受ける
 //! - `/metadata`: メタデータの検索。ノードが検索表を作っているときだけ（`storage.search`）
 //! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
 //!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
@@ -119,14 +120,14 @@ impl From<String> for StateError {
 ///
 /// 状態を読む口の `at` は、そのブロックを実行したあとの状態を引く高さ。`None` なら今の状態
 pub trait Reader: Send + Sync {
-    /// アカウントの状態。なければ `None`
-    fn account(
+    /// アカウントの状態。`addresses` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn accounts(
         &self,
-        address: &Address,
+        addresses: &[Address],
         at: Option<u64>,
-    ) -> Result<Option<AccountJson>, StateError>;
-    /// モザイクの定義の状態。なければ `None`
-    fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError>;
+    ) -> Result<Vec<AccountJson>, StateError>;
+    /// モザイクの定義の状態。`ids` のうち、あるものだけを渡した順に。全部を同じ高さで読む
+    fn mosaics(&self, ids: &[u64], at: Option<u64>) -> Result<Vec<MosaicStateJson>, StateError>;
     /// ネームスペース（ルートか子）の状態。なければ `None`。期限（猶予を含む）が過ぎても状態に残っていれば返し、
     /// `active` が `false` になる（catapult の REST と同じ）
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError>;
@@ -236,6 +237,10 @@ struct NamespaceQuery {
 
 /// 名前を引く口に、1回で頼める数
 const MAX_NAME_IDS: usize = 100;
+
+/// アカウントやモザイクをまとめて引く口に、1回で頼める数。catapult の REST には上限がないので、ふつうの使い方で
+/// 当たらないくらいに大きく取る
+const MAX_STATE_IDS: usize = 1000;
 
 /// メタデータの検索の、1件の位置（[`MetadataEntryJson::position`] を読んだもの）。ページ送りの `offset`
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -674,12 +679,95 @@ async fn account(
         Ok(at) => at,
         Err(invalid) => return invalid.into_response(),
     };
-    let read = api.node.reader.account(&address, at);
+    let read = api.node.reader.accounts(&[address], at);
     found_at(
         &id,
         at,
-        read.map(|account| account.map(|account| AccountInfo { account })),
+        read.map(|accounts| {
+            accounts
+                .into_iter()
+                .next()
+                .map(|account| AccountInfo { account })
+        }),
     )
+}
+
+/// `POST /accounts` と `POST /mosaics` の本文。catapult の REST と同じく、配列の代わりに1つの文字列でもよい
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatesBody {
+    addresses: Option<OneOrMany>,
+    public_keys: Option<OneOrMany>,
+    mosaic_ids: Option<OneOrMany>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            OneOrMany::One(value) => vec![value],
+            OneOrMany::Many(values) => values,
+        }
+    }
+}
+
+/// 同じものは、最初の1つだけを残す（catapult の REST は、DB に `$in` で頼むので、同じものは1回だけ返る）
+fn dedup<T: PartialEq>(values: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// アカウントを、アドレスか公開鍵を並べてまとめて引く。あるものだけを頼んだ順に返す
+async fn accounts(
+    State(api): State<Api>,
+    Query(query): Query<AtQuery>,
+    Json(body): Json<StatesBody>,
+) -> Response {
+    let network = api.node.reader.network();
+    let ids = match (body.addresses, body.public_keys) {
+        (Some(_), Some(_)) => {
+            return invalid("publicKeys and addresses cannot both be provided".to_owned());
+        }
+        (None, Some(keys)) => {
+            body_ids(Some(&keys.into_vec()), "publicKeys", MAX_STATE_IDS, |key| {
+                (key.len() == 64)
+                    .then(|| account_address(key, network))
+                    .flatten()
+            })
+        }
+        (addresses, None) => body_ids(
+            addresses.map(OneOrMany::into_vec).as_deref(),
+            "addresses",
+            MAX_STATE_IDS,
+            |id| address_only(id, network),
+        ),
+    };
+    let addresses = match ids {
+        Ok(addresses) => dedup(addresses),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.accounts(&addresses, at).map(|accounts| {
+        accounts
+            .into_iter()
+            .map(|account| AccountInfo { account })
+            .collect::<Vec<_>>()
+    });
+    found_at("", at, read.map(Some))
 }
 
 async fn account_merkle(
@@ -711,12 +799,45 @@ async fn mosaic(
         Ok(at) => at,
         Err(invalid) => return invalid.into_response(),
     };
-    let read = api.node.reader.mosaic(mosaic_id, at);
+    let read = api.node.reader.mosaics(&[mosaic_id], at);
     found_at(
         &id,
         at,
-        read.map(|mosaic| mosaic.map(|mosaic| MosaicInfo { mosaic })),
+        read.map(|mosaics| {
+            mosaics
+                .into_iter()
+                .next()
+                .map(|mosaic| MosaicInfo { mosaic })
+        }),
     )
+}
+
+/// モザイクの定義を、ID を並べてまとめて引く。あるものだけを頼んだ順に返す
+async fn mosaics(
+    State(api): State<Api>,
+    Query(query): Query<AtQuery>,
+    Json(body): Json<StatesBody>,
+) -> Response {
+    let ids = match body_ids(
+        body.mosaic_ids.map(OneOrMany::into_vec).as_deref(),
+        "mosaicIds",
+        MAX_STATE_IDS,
+        hex_id,
+    ) {
+        Ok(ids) => dedup(ids),
+        Err(message) => return invalid(message),
+    };
+    let at = match query.at() {
+        Ok(at) => at,
+        Err(invalid) => return invalid.into_response(),
+    };
+    let read = api.node.reader.mosaics(&ids, at).map(|mosaics| {
+        mosaics
+            .into_iter()
+            .map(|mosaic| MosaicInfo { mosaic })
+            .collect::<Vec<_>>()
+    });
+    found_at("", at, read.map(Some))
 }
 
 async fn mosaic_merkle(
@@ -1049,9 +1170,19 @@ fn name_ids<T>(
     name: &str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<Vec<T>, String> {
+    body_ids(values, name, MAX_NAME_IDS, parse)
+}
+
+/// 本文の ID の並びを、`max` 個まで読む。なければ、多すぎれば、読めなければ、409 で返すわけ
+fn body_ids<T>(
+    values: Option<&[String]>,
+    name: &str,
+    max: usize,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, String> {
     let values = values.ok_or_else(|| format!("{name} is missing"))?;
-    if values.len() > MAX_NAME_IDS {
-        return Err(format!("{name} has more than {MAX_NAME_IDS} items"));
+    if values.len() > max {
+        return Err(format!("{name} has more than {max} items"));
     }
     values
         .iter()
@@ -1260,8 +1391,10 @@ pub fn router(shared: Shared, node: Node) -> Router {
             "/transactions/cosignature",
             put(announce_cosignature).options(preflight),
         )
+        .route("/accounts", post(accounts).options(preflight))
         .route("/accounts/{id}", get(account))
         .route("/accounts/{id}/merkle", get(account_merkle))
+        .route("/mosaics", post(mosaics).options(preflight))
         .route("/mosaics/{id}", get(mosaic))
         .route("/mosaics/{id}/merkle", get(mosaic_merkle))
         .route("/namespaces", get(search_namespaces))
@@ -1517,33 +1650,45 @@ mod tests {
     }
 
     impl Reader for FakeReader {
-        fn account(
+        fn accounts(
             &self,
-            address: &Address,
+            addresses: &[Address],
             at: Option<u64>,
-        ) -> Result<Option<AccountJson>, StateError> {
+        ) -> Result<Vec<AccountJson>, StateError> {
             check_at(at)?;
-            if *address != known() {
-                return Ok(None);
-            }
-            let mut bytes = vec![1, 0];
-            bytes.extend_from_slice(&address.0);
-            bytes.extend_from_slice(&1u64.to_le_bytes());
-            bytes.extend_from_slice(&[0x11; 32]);
-            bytes.extend_from_slice(&2u64.to_le_bytes());
-            bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-            Ok(Some(AccountJson::from_state_bytes(&bytes).unwrap()))
+            let account = |address: &Address| {
+                let mut bytes = vec![1, 0];
+                bytes.extend_from_slice(&address.0);
+                bytes.extend_from_slice(&1u64.to_le_bytes());
+                bytes.extend_from_slice(&[0x11; 32]);
+                bytes.extend_from_slice(&2u64.to_le_bytes());
+                bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+                AccountJson::from_state_bytes(&bytes).unwrap()
+            };
+            Ok(addresses
+                .iter()
+                .filter(|address| **address == known())
+                .map(account)
+                .collect())
         }
 
-        fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError> {
+        fn mosaics(
+            &self,
+            ids: &[u64],
+            at: Option<u64>,
+        ) -> Result<Vec<MosaicStateJson>, StateError> {
             check_at(at)?;
-            if id != CURRENCY {
-                return Ok(None);
-            }
-            let mut bytes = vec![1, 0];
-            bytes.extend_from_slice(&id.to_le_bytes());
-            bytes.extend_from_slice(&[0; 54]);
-            Ok(Some(MosaicStateJson::from_state_bytes(&bytes).unwrap()))
+            let mosaic = |id: &u64| {
+                let mut bytes = vec![1, 0];
+                bytes.extend_from_slice(&id.to_le_bytes());
+                bytes.extend_from_slice(&[0; 54]);
+                MosaicStateJson::from_state_bytes(&bytes).unwrap()
+            };
+            Ok(ids
+                .iter()
+                .filter(|id| **id == CURRENCY)
+                .map(mosaic)
+                .collect())
         }
 
         fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {
@@ -1916,6 +2061,86 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn reads_accounts_and_mosaics_in_a_batch_like_catapult() {
+        let other = Address::from_public_key(&PublicKey([0x22; 32]), NetworkIdentifier::TESTNET);
+        // ないものは飛ばし、同じものは1回だけ。アドレスは Base32 でも16進でもよい
+        let (status, body) = post(
+            "/accounts",
+            &format!(
+                r#"{{"addresses": ["{}", "{other}", "{}"]}}"#,
+                known(),
+                known().to_hex()
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["account"]["address"], known().to_hex().as_str());
+        // 公開鍵でも、1つの文字列でもよい
+        let (_, body) = post(
+            "/accounts",
+            &format!(r#"{{"publicKeys": "{}"}}"#, "11".repeat(32)),
+        )
+        .await;
+        assert_eq!(body[0]["account"]["address"], known().to_hex().as_str());
+        let (_, body) = post(
+            "/mosaics",
+            r#"{"mosaicIds": ["000000000000DEAD", "6BED913FA20223F8"]}"#,
+        )
+        .await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["mosaic"]["id"], "6BED913FA20223F8");
+        let (status, body) = post("/mosaics", r#"{"mosaicIds": []}"#).await;
+        assert_eq!((status, body), (StatusCode::OK, serde_json::json!([])));
+
+        let many: Vec<String> = (0..=MAX_STATE_IDS).map(|id| format!("{id:016X}")).collect();
+        for (path, body) in [
+            (
+                "/accounts",
+                format!(
+                    r#"{{"addresses": ["{}"], "publicKeys": ["{}"]}}"#,
+                    known(),
+                    "11".repeat(32)
+                ),
+            ),
+            ("/accounts", "{}".to_owned()),
+            ("/accounts", r#"{"publicKeys": ["11"]}"#.to_owned()),
+            ("/mosaics", r#"{"mosaicIds": ["12"]}"#.to_owned()),
+            (
+                "/mosaics",
+                serde_json::json!({ "mosaicIds": many }).to_string(),
+            ),
+        ] {
+            let (status, response) = post(path, &body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path} {body}");
+            assert_eq!(response["code"], "InvalidArgument");
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_a_batch_at_a_past_height() {
+        let response = router(snapshot(), node(submit(Arc::default())))
+            .oneshot(
+                Request::post("/mosaics?height=7")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mosaicIds": ["6BED913FA20223F8"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[HEIGHT_HEADER], "7");
+        for (height, status) in [(4, StatusCode::GONE), (11, StatusCode::CONFLICT)] {
+            let (got, _) = post(
+                &format!("/accounts?height={height}"),
+                &format!(r#"{{"addresses": ["{}"]}}"#, known()),
+            )
+            .await;
+            assert_eq!(got, status, "{height}");
+        }
     }
 
     #[tokio::test]

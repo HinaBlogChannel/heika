@@ -201,6 +201,15 @@ impl DbReader {
         .map_err(|error| StateError::Other(error.to_string()))
     }
 
+    /// 状態の行を `keys` の順に。なければ `None`。全部を同じ高さで読む
+    fn rows(&self, view: &View, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, StateError> {
+        match view {
+            View::Now => self.db.state_rows_of(keys),
+            View::At(past) => keys.iter().map(|key| past.state(key)).collect(),
+        }
+        .map_err(|error| StateError::Other(error.to_string()))
+    }
+
     /// 高さ `height` の状態の木 `cache` の根。差分が残っていなければ `None`
     fn root_at(&self, cache: SubCache, height: u64) -> Result<Option<Hash256>, String> {
         match self
@@ -322,31 +331,42 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl heika_api::Reader for DbReader {
-    fn account(
+    fn accounts(
         &self,
-        address: &Address,
+        addresses: &[Address],
         at: Option<u64>,
-    ) -> Result<Option<AccountJson>, StateError> {
+    ) -> Result<Vec<AccountJson>, StateError> {
         let (view, _) = self.view(at)?;
-        let Some(row) = self.row(&view, &row_key(SubCache::AccountState, &address.0))? else {
-            return Ok(None);
-        };
-        let account = decode_account_row(&row).map_err(|error| error.to_string())?;
-        Ok(Some(
-            AccountJson::from_state_bytes(&account.to_state_bytes(self.currency))
-                .map_err(|error| error.to_string())?,
-        ))
+        let keys: Vec<_> = addresses
+            .iter()
+            .map(|address| row_key(SubCache::AccountState, &address.0))
+            .collect();
+        let mut out = Vec::new();
+        for row in self.rows(&view, &keys)?.into_iter().flatten() {
+            let account = decode_account_row(&row).map_err(|error| error.to_string())?;
+            out.push(
+                AccountJson::from_state_bytes(&account.to_state_bytes(self.currency))
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(out)
     }
 
-    fn mosaic(&self, id: u64, at: Option<u64>) -> Result<Option<MosaicStateJson>, StateError> {
+    fn mosaics(&self, ids: &[u64], at: Option<u64>) -> Result<Vec<MosaicStateJson>, StateError> {
         let (view, _) = self.view(at)?;
-        let Some(row) = self.row(&view, &row_key(SubCache::Mosaic, &id.to_le_bytes()))? else {
-            return Ok(None);
-        };
-        Ok(Some(
-            MosaicStateJson::from_state_bytes(&state_bytes(&id.to_le_bytes(), &row))
-                .map_err(|error| error.to_string())?,
-        ))
+        let keys: Vec<_> = ids
+            .iter()
+            .map(|id| row_key(SubCache::Mosaic, &id.to_le_bytes()))
+            .collect();
+        let mut out = Vec::new();
+        for (id, row) in ids.iter().zip(self.rows(&view, &keys)?) {
+            let Some(row) = row else { continue };
+            out.push(
+                MosaicStateJson::from_state_bytes(&state_bytes(&id.to_le_bytes(), &row))
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(out)
     }
 
     fn namespace(&self, id: u64, at: Option<u64>) -> Result<Option<NamespaceInfo>, StateError> {

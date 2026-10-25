@@ -839,6 +839,20 @@ impl Db {
         self.current(STATE, key)
     }
 
+    /// 今の状態の行を、`keys` の順に。1つの読み取りで読むので、途中でブロックが入っても同じ高さの値になる
+    pub fn state_rows_of(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, DbError> {
+        let transaction = self.begin_read()?;
+        let table = transaction.open_table(STATE).map_err(db_error)?;
+        keys.iter()
+            .map(|key| {
+                Ok(table
+                    .get(key.as_slice())
+                    .map_err(db_error)?
+                    .map(|value| value.value().to_vec()))
+            })
+            .collect()
+    }
+
     /// 今の木のノード `key`（[`heika_state_transition::tree::node_key`]）。なければ `None`
     pub fn trie_node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
         self.current(TRIE_TABLES.current, key)
@@ -3226,11 +3240,15 @@ mod tests {
     }
 
     #[test]
-    fn reads_current_rows_one_by_one_and_by_prefix() {
+    fn reads_current_rows_one_by_one_in_a_batch_and_by_prefix() {
         let dir = TempDir::new();
         let db = pruning_fixture(&dir.0);
         assert_eq!(db.state_row(b"a").unwrap().as_deref(), Some(&b"a5"[..]));
         assert_eq!(db.state_row(b"c").unwrap(), None);
+        assert_eq!(
+            db.state_rows_of(&[b"c".to_vec(), b"a".to_vec()]).unwrap(),
+            vec![None, Some(b"a5".to_vec())]
+        );
         assert_eq!(db.trie_node(b"n").unwrap().as_deref(), Some(&b"n4"[..]));
         let mut seen = Vec::new();
         db.for_each_state_row(b"", &mut |key, value| {

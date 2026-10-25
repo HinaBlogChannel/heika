@@ -1,0 +1,24 @@
+[package]
+name = "intent-dex"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "預けない交換。署名済みの注文を、ハーベスターが自分のブロックの中で約定させる"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+heika-chain = { path = "../../crates/heika-chain" }
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+serde_json = "1.0.151"
+sha3 = "0.12.0"
+# REST はこの PC の中のノードだけに聞くので、TLS は使わない
+ureq = { version = "3.4.2", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"

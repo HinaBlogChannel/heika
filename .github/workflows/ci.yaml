@@ -121,6 +121,7 @@ jobs:
             examples/sunboru-kusa
             examples/sunboru-kusa/discover
             examples/instant-rebate
+            examples/intent-dex
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -141,6 +142,12 @@ jobs:
           cargo clippy --all-targets --locked -- -D warnings
       - name: 即時還元を確かめる
         working-directory: examples/instant-rebate
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: 預けない交換を確かめる
+        working-directory: examples/intent-dex
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

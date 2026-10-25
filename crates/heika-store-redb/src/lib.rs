@@ -19,6 +19,10 @@
 //! - `search`: 検索表（[`search`]）。REST の検索のために、今の状態の行を別の切り口で並べ直したキー → なし
 //! - `search_past`: 検索表から消えたキー → なし。昔の高さで検索するときの候補（[`Searches::PAST`]）
 //! - `namespace_names`: ネームスペースの ID → 親の ID（ルートは 0）と名前。ブロックの登録から拾う（[`Searches::NAMESPACES`]）
+//! - `transaction_hashes`: トランザクション（アグリゲートの中のものは除く）のハッシュ → （高さ、ブロックの中の番号）
+//!   （[`Searches::TRANSACTIONS`]）
+//! - `address_transactions`: （関わったアドレス、高さ、ブロックの中の番号）→ なし。アドレスからトランザクションを引く
+//!   （[`Searches::TRANSACTIONS`]）
 //!
 //! `meta` の `format` に、この形の版（[`FORMAT`]）を書く。違う版の DB は開かない。
 //!
@@ -36,10 +40,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
+use heika_core::hash::Hash256;
 use heika_state_transition::executor::ExecError;
 use heika_state_transition::executor::source::StateSource;
 
-pub use search::{MetadataFields, Searches};
+pub use search::{MetadataFields, Searches, TransactionNetwork};
+
+use heika_block::statement::BlockStatement;
+use search::IndexedTransaction;
 
 use redb::{
     AccessGuard, Database, Durability, Key, ReadOnlyDatabase, ReadOnlyTable, ReadTransaction,
@@ -71,6 +79,19 @@ const NAMES: TableDefinition<u64, &[u8]> = TableDefinition::new("namespace_names
 const NAMES_BACKFILL: &str = "namespace_names_backfill";
 /// 作る検索（[`Searches`] のビット）をしまう `meta` の名前
 const SEARCH_META: &str = "search";
+/// トランザクションのハッシュ → （高さ、ブロックの中の番号）。枝を取り替えたら、外れたブロックの分を消す。
+/// ブロックを刈り込んでも消さないので、引いた先のブロックがないこともある
+const TRANSACTION_HASHES: TableDefinition<&[u8], (u64, u32)> =
+    TableDefinition::new("transaction_hashes");
+/// （関わったアドレス、高さ、ブロックの中の番号）→ なし（[`search::address_key`]）。関わったアドレスは
+/// [`search::involved_addresses`] と、ステートメントから解決した先（[`search::resolved_addresses`]）。
+/// 枝を取り替えたら、外れたブロックの分を消す。ブロックを刈り込んでも消さない
+const ADDRESS_TRANSACTIONS: TableDefinition<&[u8], ()> =
+    TableDefinition::new("address_transactions");
+/// ハッシュとアドレスの表を、しまってあるブロックから作る残りをしまう `meta` の名前（[`NAMES_BACKFILL`] と同じ形）
+const TRANSACTIONS_BACKFILL: &str = "transaction_hashes_backfill";
+/// トランザクションの索引を作るのに要るネットワークの値（[`TransactionNetwork`]）をしまう `meta` の名前
+const NETWORK_META: &str = "transaction_network";
 
 /// 今の値、差分、索引の3つの表と、差分を残し始めた高さをしまう `meta` の名前
 #[derive(Clone, Copy)]
@@ -173,6 +194,10 @@ pub enum DbError {
     Format(Option<u32>),
     /// `history` をまだ作っていない高さがあるので、昔の値は引けない
     NotIndexed { through: u64 },
+    /// トランザクションの索引を作るのに、ネットワークの値がない（[`Db::set_transaction_network`]）
+    NoNetwork,
+    /// しまってあるネットワークの値が、渡されたものと違う（別のネットワークの DB）
+    OtherNetwork,
 }
 
 impl fmt::Display for DbError {
@@ -203,6 +228,14 @@ impl fmt::Display for DbError {
                 "DB: 形の版が {version} で、この版で読める {FORMAT} と違います"
             ),
             Self::Format(None) => write!(f, "DB: 形の版の印がありません"),
+            Self::NoNetwork => write!(
+                f,
+                "DB: トランザクションの索引を作るのに要る、ネットワークの値がありません"
+            ),
+            Self::OtherNetwork => write!(
+                f,
+                "DB: しまってあるネットワークの値（generation hash seed など）が、このネットワークのものと違います"
+            ),
         }
     }
 }
@@ -242,6 +275,8 @@ pub struct Db {
     quiet_through: [Option<u64>; 2],
     /// 作る検索。`meta` の `search` と同じ
     search: Searches,
+    /// トランザクションの索引を作るのに要るネットワークの値。`meta` の `transaction_network` と同じ
+    network: Option<TransactionNetwork>,
 }
 
 impl Db {
@@ -270,6 +305,12 @@ impl Db {
         transaction.open_table(SEARCH).map_err(db_error)?;
         transaction.open_table(SEARCH_PAST).map_err(db_error)?;
         transaction.open_table(NAMES).map_err(db_error)?;
+        transaction
+            .open_table(TRANSACTION_HASHES)
+            .map_err(db_error)?;
+        transaction
+            .open_table(ADDRESS_TRANSACTIONS)
+            .map_err(db_error)?;
         for tables in [STATE_TABLES, TRIE_TABLES] {
             transaction.open_table(tables.current).map_err(db_error)?;
             transaction
@@ -298,7 +339,10 @@ impl Db {
                 format => check_format(format.as_deref())?,
             }
         }
-        let search = read_searches(&transaction.open_table(META).map_err(db_error)?)?;
+        let (search, network) = {
+            let meta = transaction.open_table(META).map_err(db_error)?;
+            (read_searches(&meta)?, read_network(&meta)?)
+        };
         transaction.commit().map_err(db_error)?;
         Ok(Self {
             handle: Handle::Write(database),
@@ -307,20 +351,21 @@ impl Db {
             defer_history: false,
             quiet_through: [None; 2],
             search,
+            network,
         })
     }
 
     /// 読むだけに開く。
     pub fn open_read_only(directory: &Path) -> Result<Self, DbError> {
         let database = ReadOnlyDatabase::open(directory.join(FILE_NAME)).map_err(db_error)?;
-        let (format, search) = {
+        let (format, search, network) = {
             let transaction = database.begin_read().map_err(db_error)?;
             let meta = transaction.open_table(META).map_err(db_error)?;
             let format = meta
                 .get(FORMAT_META)
                 .map_err(db_error)?
                 .map(|value| value.value().to_vec());
-            (format, read_searches(&meta)?)
+            (format, read_searches(&meta)?, read_network(&meta)?)
         };
         check_format(format.as_deref())?;
         Ok(Self {
@@ -330,7 +375,61 @@ impl Db {
             defer_history: false,
             quiet_through: [None; 2],
             search,
+            network,
         })
+    }
+
+    /// トランザクションの索引（[`Searches::TRANSACTIONS`]）を作るのに要る、ネットワークの値を覚える。まだなければ
+    /// `meta` に書く。generation hash seed かネットワークの識別子が違うものがしまってあれば、別のネットワークの DB
+    /// なので [`DbError::OtherNetwork`]。使用料の受け取り先だけが違えば、書き換えて、索引をしまってあるブロックから
+    /// 作り直す（[`Db::backfill_transactions`]）
+    pub fn set_transaction_network(&mut self, network: TransactionNetwork) -> Result<(), DbError> {
+        match self.network {
+            Some(stored) if stored == network => return Ok(()),
+            Some(stored)
+                if stored.generation_hash_seed != network.generation_hash_seed
+                    || stored.identifier != network.identifier =>
+            {
+                return Err(DbError::OtherNetwork);
+            }
+            _ => {}
+        }
+        let Handle::Write(database) = &self.handle else {
+            return Err(DbError::ReadOnly);
+        };
+        self.check_space()?;
+        let rebuild = self.network.is_some() && self.search.contains(Searches::TRANSACTIONS);
+        let transaction = database.begin_write().map_err(db_error)?;
+        {
+            let mut meta = transaction.open_table(META).map_err(db_error)?;
+            meta.insert(NETWORK_META, network.encode().as_slice())
+                .map_err(db_error)?;
+            if rebuild {
+                transaction
+                    .open_table(TRANSACTION_HASHES)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                transaction
+                    .open_table(ADDRESS_TRANSACTIONS)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
+                let first = blocks.first().map_err(db_error)?.map(|(h, _)| h.value());
+                let last = blocks.last().map_err(db_error)?.map(|(h, _)| h.value());
+                if let (Some(first), Some(last)) = (first, last) {
+                    let pending = [first.to_le_bytes(), last.to_le_bytes()].concat();
+                    meta.insert(TRANSACTIONS_BACKFILL, pending.as_slice())
+                        .map_err(db_error)?;
+                }
+            }
+        }
+        transaction.commit().map_err(db_error)?;
+        self.network = Some(network);
+        Ok(())
     }
 
     /// 作っている検索
@@ -348,6 +447,9 @@ impl Db {
         let Handle::Write(database) = &self.handle else {
             return Err(DbError::ReadOnly);
         };
+        if searches.contains(Searches::TRANSACTIONS) && self.network.is_none() {
+            return Err(DbError::NoNetwork);
+        }
         self.check_space()?;
         let (old, new) = (self.search, searches);
         let transaction = database.begin_write().map_err(db_error)?;
@@ -423,23 +525,32 @@ impl Db {
                 }
             }
             let mut meta = transaction.open_table(META).map_err(db_error)?;
-            // 名前の表は、足したらしまってあるブロックから作り（[`Db::backfill_names`]）、外したら消す
-            if added.contains(Searches::NAMESPACES) {
-                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
-                let range = (
-                    blocks
-                        .first()
-                        .map_err(db_error)?
-                        .map(|(height, _)| height.value()),
-                    blocks
-                        .last()
-                        .map_err(db_error)?
-                        .map(|(height, _)| height.value()),
-                );
-                if let (Some(first), Some(last)) = range {
+            // 名前とハッシュの表は、足したらしまってあるブロックから作り（[`Db::backfill_names`]、
+            // [`Db::backfill_transactions`]）、外したら消す
+            let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
+            let range = (
+                blocks
+                    .first()
+                    .map_err(db_error)?
+                    .map(|(height, _)| height.value()),
+                blocks
+                    .last()
+                    .map_err(db_error)?
+                    .map(|(height, _)| height.value()),
+            );
+            for (search, pending_key) in [
+                (Searches::NAMESPACES, NAMES_BACKFILL),
+                (Searches::TRANSACTIONS, TRANSACTIONS_BACKFILL),
+            ] {
+                if added.contains(search)
+                    && let (Some(first), Some(last)) = range
+                {
                     let pending = [first.to_le_bytes(), last.to_le_bytes()].concat();
-                    meta.insert(NAMES_BACKFILL, pending.as_slice())
+                    meta.insert(pending_key, pending.as_slice())
                         .map_err(db_error)?;
+                }
+                if removed.contains(search) {
+                    meta.remove(pending_key).map_err(db_error)?;
                 }
             }
             if removed.contains(Searches::NAMESPACES) {
@@ -449,7 +560,20 @@ impl Db {
                     .extract_if(|_, _| true)
                     .map_err(db_error)?
                     .for_each(drop);
-                meta.remove(NAMES_BACKFILL).map_err(db_error)?;
+            }
+            if removed.contains(Searches::TRANSACTIONS) {
+                transaction
+                    .open_table(TRANSACTION_HASHES)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                transaction
+                    .open_table(ADDRESS_TRANSACTIONS)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
             }
             meta.insert(SEARCH_META, &[new.bits()][..])
                 .map_err(db_error)?;
@@ -467,13 +591,100 @@ impl Db {
         stopping: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<bool, DbError> {
+        self.backfill(
+            NAMES_BACKFILL,
+            stopping,
+            progress,
+            &|transaction, blocks| {
+                let mut names = transaction.open_table(NAMES).map_err(db_error)?;
+                for (_, block) in blocks {
+                    for (id, parent, name) in search::names_in_block(block) {
+                        let value = [&parent.to_le_bytes()[..], &name].concat();
+                        names.insert(id, value.as_slice()).map_err(db_error)?;
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// トランザクションのハッシュとアドレスの表を、しまってあるブロックとステートメントから作る
+    /// （[`Searches::TRANSACTIONS`] を足したとき）。作り方は [`Db::backfill_names`] と同じ
+    pub fn backfill_transactions(
+        &self,
+        stopping: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<bool, DbError> {
+        use rayon::prelude::*;
+        if self.meta(TRANSACTIONS_BACKFILL)?.is_none() {
+            return Ok(true);
+        }
+        let network = self.network.ok_or(DbError::NoNetwork)?;
+        self.backfill(
+            TRANSACTIONS_BACKFILL,
+            stopping,
+            progress,
+            &|transaction, blocks| {
+                let statements: Vec<Option<Vec<u8>>> = {
+                    let table = transaction.open_table(STATEMENTS).map_err(db_error)?;
+                    blocks
+                        .iter()
+                        .map(|(height, _)| {
+                            Ok(table
+                                .get(*height)
+                                .map_err(db_error)?
+                                .map(|value| value.value().to_vec()))
+                        })
+                        .collect::<Result<_, DbError>>()?
+                };
+                // 読んで求めるのが重いので、ブロックごとに並列に
+                let indexed: Vec<(u64, Vec<IndexedTransaction>)> = blocks
+                    .par_iter()
+                    .zip(statements.par_iter())
+                    .map(|((height, block), statement)| {
+                        (
+                            *height,
+                            indexed_with_resolutions(block, statement.as_deref(), &network),
+                        )
+                    })
+                    .collect();
+                let mut hashes = transaction
+                    .open_table(TRANSACTION_HASHES)
+                    .map_err(db_error)?;
+                let mut addresses = transaction
+                    .open_table(ADDRESS_TRANSACTIONS)
+                    .map_err(db_error)?;
+                for (height, transactions) in indexed {
+                    for entry in transactions {
+                        hashes
+                            .insert(entry.hash.0.as_slice(), (height, entry.index))
+                            .map_err(db_error)?;
+                        for address in &entry.addresses {
+                            let key = search::address_key(address, height, entry.index);
+                            addresses.insert(key.as_slice(), ()).map_err(db_error)?;
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// しまってあるブロックを、`meta` の `pending_key` にある残りの分だけ、まとまりごとに `add` に渡してコミットする
+    fn backfill(
+        &self,
+        pending_key: &str,
+        stopping: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(u64, u64),
+        add: &BackfillAdd<'_>,
+    ) -> Result<bool, DbError> {
         /// 1回のコミットで読むブロックの数
         const CHUNK: u64 = 100_000;
         let Handle::Write(database) = &self.handle else {
             return Err(DbError::ReadOnly);
         };
         loop {
-            let Some(pending) = self.meta(NAMES_BACKFILL)? else {
+            let Some(pending) = self.meta(pending_key)? else {
                 return Ok(true);
             };
             if stopping() {
@@ -484,27 +695,143 @@ impl Db {
             self.check_space()?;
             let transaction = database.begin_write().map_err(db_error)?;
             {
-                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
-                let mut names = transaction.open_table(NAMES).map_err(db_error)?;
-                for row in blocks.range(next..=last).map_err(db_error)? {
-                    let (_, block) = row.map_err(db_error)?;
-                    for (id, parent, name) in search::names_in_block(block.value()) {
-                        let value = [&parent.to_le_bytes()[..], &name].concat();
-                        names.insert(id, value.as_slice()).map_err(db_error)?;
-                    }
-                }
+                let blocks: Vec<(u64, Vec<u8>)> = {
+                    let table = transaction.open_table(BLOCKS).map_err(db_error)?;
+                    table
+                        .range(next..=last)
+                        .map_err(db_error)?
+                        .map(|row| {
+                            let (height, block) = row.map_err(db_error)?;
+                            Ok((height.value(), block.value().to_vec()))
+                        })
+                        .collect::<Result<_, DbError>>()?
+                };
+                add(&transaction, &blocks)?;
                 let mut meta = transaction.open_table(META).map_err(db_error)?;
                 if last >= through {
-                    meta.remove(NAMES_BACKFILL).map_err(db_error)?;
+                    meta.remove(pending_key).map_err(db_error)?;
                 } else {
                     let pending = [(last + 1).to_le_bytes(), through.to_le_bytes()].concat();
-                    meta.insert(NAMES_BACKFILL, pending.as_slice())
+                    meta.insert(pending_key, pending.as_slice())
                         .map_err(db_error)?;
                 }
             }
             transaction.commit().map_err(db_error)?;
             progress(last, through);
         }
+    }
+
+    /// しまってあるブロックを、高さが `heights` の中のものだけ、低い順に（`reverse` なら高い順に）`visit` に渡す。
+    /// `after` があれば、その順でその高さから（その高さのブロックも渡す。続きを決めるのは呼ぶ側）。
+    /// `visit` が `false` を返したら止める
+    pub fn for_each_block(
+        &self,
+        heights: std::ops::RangeInclusive<u64>,
+        after: Option<u64>,
+        reverse: bool,
+        visit: &mut dyn FnMut(u64, &[u8]) -> bool,
+    ) -> Result<(), DbError> {
+        let (mut low, mut high) = (*heights.start(), *heights.end());
+        if let Some(after) = after {
+            if reverse {
+                high = high.min(after);
+            } else {
+                low = low.max(after);
+            }
+        }
+        if low > high {
+            return Ok(());
+        }
+        let transaction = self.begin_read()?;
+        let table = transaction.open_table(BLOCKS).map_err(db_error)?;
+        let range = table.range(low..=high).map_err(db_error)?;
+        let mut visit_row = |row: Result<(AccessGuard<u64>, AccessGuard<&[u8]>), StorageError>| {
+            let (height, block) = row.map_err(db_error)?;
+            Ok::<_, DbError>(visit(height.value(), block.value()))
+        };
+        if reverse {
+            for row in range.rev() {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        } else {
+            for row in range {
+                if !visit_row(row)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `address` が関わったトランザクション（アグリゲートの中のものは除く）の（高さ、ブロックの中の番号）を、高さが
+    /// `heights` の中のものだけ、古い順に（`reverse` なら新しい順に）`visit` に渡す。`after` があれば、その順で
+    /// それより後のものから。`visit` が `false` を返したら止める。表を作っていなければ何も渡さない
+    pub fn for_each_address_transaction(
+        &self,
+        address: &[u8; 24],
+        heights: std::ops::RangeInclusive<u64>,
+        after: Option<(u64, u32)>,
+        reverse: bool,
+        visit: &mut dyn FnMut(u64, u32) -> bool,
+    ) -> Result<(), DbError> {
+        let transaction = self.begin_read()?;
+        let Some(table) = open_if_exists(&transaction, ADDRESS_TRANSACTIONS)? else {
+            return Ok(());
+        };
+        let mut low = search::address_key(address, *heights.start(), 0);
+        let mut high = search::address_key(address, *heights.end(), u32::MAX);
+        if let Some((height, index)) = after {
+            let at = search::address_key(address, height, index);
+            if reverse {
+                high = at;
+            } else {
+                low = at;
+            }
+        }
+        if low > high {
+            return Ok(());
+        }
+        let range = table
+            .range(low.as_slice()..=high.as_slice())
+            .map_err(db_error)?;
+        let mut visit_key = |key: &[u8]| {
+            let height = u64::from_be_bytes(key[24..32].try_into().expect("8 バイト"));
+            let index = u32::from_be_bytes(key[32..36].try_into().expect("4 バイト"));
+            // `after` そのものは渡さない
+            if after == Some((height, index)) {
+                return true;
+            }
+            visit(height, index)
+        };
+        if reverse {
+            for row in range.rev() {
+                if !visit_key(row.map_err(db_error)?.0.value()) {
+                    break;
+                }
+            }
+        } else {
+            for row in range {
+                if !visit_key(row.map_err(db_error)?.0.value()) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// トランザクション（アグリゲートの中のものは除く）が入った高さと、ブロックの中の番号。表になければ `None`。
+    /// 枝を取り替えたり刈り込んだりしたあとは、そのブロックにもうないこともあるので、引いた側で確かめる
+    pub fn transaction_location(&self, hash: &Hash256) -> Result<Option<(u64, u32)>, DbError> {
+        let transaction = self.begin_read()?;
+        let Some(table) = open_if_exists(&transaction, TRANSACTION_HASHES)? else {
+            return Ok(None);
+        };
+        Ok(table
+            .get(hash.0.as_slice())
+            .map_err(db_error)?
+            .map(|value| value.value()))
     }
 
     /// ネームスペースの名前と親の ID（ルートは 0）。登録を見ていなければ `None`
@@ -1444,6 +1771,8 @@ impl Db {
             copier.table(SEARCH, progress)?,
             copier.table(SEARCH_PAST, progress)?,
             copier.table(NAMES, progress)?,
+            copier.table(TRANSACTION_HASHES, progress)?,
+            copier.table(ADDRESS_TRANSACTIONS, progress)?,
         ];
         if whole.contains(&false) {
             return Ok(false);
@@ -1639,6 +1968,7 @@ impl Db {
             defer_history: self.defer_history,
             quiet_through: self.quiet_through,
             search: self.search,
+            network: self.network,
         })
     }
 }
@@ -1698,6 +2028,15 @@ fn search_range<'a>(
 }
 
 /// `meta` に覚えた、作る検索
+fn read_network(
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Option<TransactionNetwork>, DbError> {
+    Ok(meta
+        .get(NETWORK_META)
+        .map_err(db_error)?
+        .and_then(|value| TransactionNetwork::decode(value.value())))
+}
+
 fn read_searches(
     meta: &impl ReadableTable<&'static str, &'static [u8]>,
 ) -> Result<Searches, DbError> {
@@ -1925,6 +2264,26 @@ impl Now {
     }
 }
 
+/// ブロックの索引に入れるものに、ステートメント（あれば）からエイリアスを解決した先のアドレスも足したもの
+fn indexed_with_resolutions(
+    block: &[u8],
+    statement: Option<&[u8]>,
+    network: &TransactionNetwork,
+) -> Vec<IndexedTransaction> {
+    let mut indexed = search::indexed_transactions(block, network);
+    if let Some(statement) = statement.and_then(|bytes| BlockStatement::from_bytes(bytes).ok()) {
+        for entry in &mut indexed {
+            let resolved = search::resolved_addresses(&statement, entry.index, &entry.addresses);
+            entry.addresses.extend(resolved);
+        }
+    }
+    indexed
+}
+
+/// しまってあるブロックから表を作るところ（[`Db::backfill`]）。まとまりの（高さ、ブロック）を受け取って書く
+type BackfillAdd<'a> =
+    dyn Fn(&WriteTransaction, &[(u64, Vec<u8>)]) -> Result<(), DbError> + Sync + 'a;
+
 /// 昔の高さの状態を引くための、開いた表
 struct Past {
     height: u64,
@@ -2003,19 +2362,92 @@ pub struct Batch {
     quiet_through: [Option<u64>; 2],
     /// 作る検索（[`Db::set_search`]）
     search: Searches,
+    /// トランザクションの索引を作る（[`Db::set_transaction_network`]）
+    network: Option<TransactionNetwork>,
 }
 
 impl Batch {
     /// ブロックを足す。高さの順を守るのは呼ぶ側。
-    /// [`Searches::NAMESPACES`] なら、ネームスペースの登録から名前の表も足す
+    /// [`Searches::NAMESPACES`] なら、ネームスペースの登録から名前の表も足す。[`Searches::TRANSACTIONS`] なら、
+    /// トランザクションのハッシュとアドレスの表も足し、その高さにあったブロック（枝を取り替えたとき）の分を消す。
+    /// エイリアスを解決した先のアドレスは、ステートメントを足すとき（[`Batch::put_statement`]）に足す
     pub fn put_block(&mut self, height: u64, block: &[u8]) -> Result<(), DbError> {
         let mut table = self.transaction.open_table(BLOCKS).map_err(db_error)?;
-        table.insert(height, block).map_err(db_error)?;
+        let replaced = table
+            .insert(height, block)
+            .map_err(db_error)?
+            .map(|old| old.value().to_vec());
+        drop(table);
+        if self.search.contains(Searches::TRANSACTIONS) {
+            let network = self.network.ok_or(DbError::NoNetwork)?;
+            if let Some(old) = replaced {
+                // 外れるブロックのステートメントは、まだ書き換えていない
+                let statement = self
+                    .transaction
+                    .open_table(STATEMENTS)
+                    .map_err(db_error)?
+                    .get(height)
+                    .map_err(db_error)?
+                    .map(|value| value.value().to_vec());
+                self.remove_indexed(
+                    height,
+                    &indexed_with_resolutions(&old, statement.as_deref(), &network),
+                )?;
+            }
+            let indexed = search::indexed_transactions(block, &network);
+            let mut hashes = self
+                .transaction
+                .open_table(TRANSACTION_HASHES)
+                .map_err(db_error)?;
+            let mut addresses = self
+                .transaction
+                .open_table(ADDRESS_TRANSACTIONS)
+                .map_err(db_error)?;
+            for entry in &indexed {
+                hashes
+                    .insert(entry.hash.0.as_slice(), (height, entry.index))
+                    .map_err(db_error)?;
+                for address in &entry.addresses {
+                    let key = search::address_key(address, height, entry.index);
+                    addresses.insert(key.as_slice(), ()).map_err(db_error)?;
+                }
+            }
+        }
         if self.search.contains(Searches::NAMESPACES) {
             let mut names = self.transaction.open_table(NAMES).map_err(db_error)?;
             for (id, parent, name) in search::names_in_block(block) {
                 let value = [&parent.to_le_bytes()[..], &name].concat();
                 names.insert(id, value.as_slice()).map_err(db_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 外れるブロックの、ハッシュとアドレスの表の行を消す。ハッシュは、ほかの高さに入り直していれば残す
+    fn remove_indexed(
+        &mut self,
+        height: u64,
+        indexed: &[IndexedTransaction],
+    ) -> Result<(), DbError> {
+        let mut hashes = self
+            .transaction
+            .open_table(TRANSACTION_HASHES)
+            .map_err(db_error)?;
+        let mut addresses = self
+            .transaction
+            .open_table(ADDRESS_TRANSACTIONS)
+            .map_err(db_error)?;
+        for entry in indexed {
+            let here = hashes
+                .get(entry.hash.0.as_slice())
+                .map_err(db_error)?
+                .is_some_and(|value| value.value().0 == height);
+            if here {
+                hashes.remove(entry.hash.0.as_slice()).map_err(db_error)?;
+            }
+            for address in &entry.addresses {
+                let key = search::address_key(address, height, entry.index);
+                addresses.remove(key.as_slice()).map_err(db_error)?;
             }
         }
         Ok(())
@@ -2035,9 +2467,41 @@ impl Batch {
         Ok(())
     }
 
+    /// ステートメントを足す。[`Searches::TRANSACTIONS`] なら、その高さのブロック（先に [`Batch::put_block`] で
+    /// 足したもの）のトランザクションに、エイリアスを解決した先のアドレスも足す
     pub fn put_statement(&mut self, height: u64, statement: &[u8]) -> Result<(), DbError> {
         let mut table = self.transaction.open_table(STATEMENTS).map_err(db_error)?;
         table.insert(height, statement).map_err(db_error)?;
+        drop(table);
+        if self.search.contains(Searches::TRANSACTIONS) {
+            let network = self.network.ok_or(DbError::NoNetwork)?;
+            // エイリアスを解決しなかったブロックなら、足すものはない（ほとんどのブロック）
+            let statement = match BlockStatement::from_bytes(statement) {
+                Ok(statement) if !statement.address_resolution_statements.is_empty() => statement,
+                _ => return Ok(()),
+            };
+            let block = self
+                .transaction
+                .open_table(BLOCKS)
+                .map_err(db_error)?
+                .get(height)
+                .map_err(db_error)?
+                .map(|value| value.value().to_vec());
+            let Some(block) = block else {
+                return Ok(());
+            };
+            let mut addresses = self
+                .transaction
+                .open_table(ADDRESS_TRANSACTIONS)
+                .map_err(db_error)?;
+            for entry in search::indexed_transactions(&block, &network) {
+                for address in search::resolved_addresses(&statement, entry.index, &entry.addresses)
+                {
+                    let key = search::address_key(&address, height, entry.index);
+                    addresses.insert(key.as_slice(), ()).map_err(db_error)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2783,6 +3247,188 @@ mod tests {
         );
     }
 
+    /// 署名者 [0x11; 32] から `recipient` への送金を1件入れた、通常のブロックのバイト列
+    fn block_sending(recipient: [u8; 24], message: &[u8]) -> Vec<u8> {
+        let transfer = heika_transaction::Transfer::new(
+            heika_transaction::UnresolvedAddress(recipient),
+            Default::default(),
+            message.to_vec(),
+        )
+        .unwrap();
+        let transaction = heika_transaction::Transaction::new(
+            heika_core::key::PublicKey([0x11; 32]),
+            heika_core::network::NetworkIdentifier::MAINNET,
+            0,
+            0,
+            heika_transaction::Body::Transfer(transfer),
+        )
+        .to_bytes();
+        let mut block = vec![0; 376];
+        block[110..112].copy_from_slice(&0x8143u16.to_le_bytes());
+        block.extend_from_slice(&transaction);
+        block.resize(block.len().next_multiple_of(8), 0);
+        let size = block.len() as u32;
+        block[..4].copy_from_slice(&size.to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn transaction_indexes_come_from_blocks_and_statements() {
+        use heika_block::statement::{AddressResolutionStatement, ReceiptSource, ResolutionEntry};
+        let network = search::tests::test_network();
+        // ブロックの中の1つ目のトランザクションのハッシュ。ブロックのヘッダーは 376 バイト
+        let hash_of = |block: &[u8]| {
+            let size = u32::from_le_bytes(block[376..380].try_into().unwrap()) as usize;
+            heika_transaction::Transaction::from_bytes(&block[376..376 + size])
+                .unwrap()
+                .hash(&network.generation_hash_seed)
+        };
+        let signer = heika_core::address::Address::from_public_key(
+            &heika_core::key::PublicKey([0x11; 32]),
+            heika_core::network::NetworkIdentifier::MAINNET,
+        )
+        .0;
+        let dir = TempDir::new();
+        let mut db = Db::open(&dir.0).unwrap();
+        let listed = |db: &Db, address: &[u8; 24]| {
+            let mut out = Vec::new();
+            db.for_each_address_transaction(address, 0..=u64::MAX, None, false, &mut |h, i| {
+                out.push((h, i));
+                true
+            })
+            .unwrap();
+            out
+        };
+        // ネットワークの値がなければ作れない。しまったら、違うものは受け付けない
+        assert!(matches!(
+            db.set_search(Searches::TRANSACTIONS),
+            Err(DbError::NoNetwork)
+        ));
+        db.set_transaction_network(network).unwrap();
+        db.set_transaction_network(network).unwrap();
+        let other = TransactionNetwork {
+            generation_hash_seed: heika_core::network::GenerationHashSeed([0x78; 32]),
+            ..network
+        };
+        assert!(matches!(
+            db.set_transaction_network(other),
+            Err(DbError::OtherNetwork)
+        ));
+        drop(db);
+        let mut db = Db::open(&dir.0).unwrap();
+        assert!(matches!(
+            db.set_transaction_network(other),
+            Err(DbError::OtherNetwork)
+        ));
+
+        // 有効にする前のブロックは、しまってあるブロックとステートメントから作る。2 番目のブロックは、
+        // エイリアス [0x99; 24] に送り、ステートメントで [0x66; 24] に解決した
+        let alias = [0x99; 24];
+        let statement = BlockStatement {
+            transaction_statements: Vec::new(),
+            address_resolution_statements: vec![AddressResolutionStatement {
+                unresolved: heika_transaction::UnresolvedAddress(alias),
+                entries: vec![ResolutionEntry {
+                    source: ReceiptSource {
+                        primary_id: 1,
+                        secondary_id: 0,
+                    },
+                    resolved: heika_core::address::Address([0x66; 24]),
+                }],
+            }],
+            mosaic_resolution_statements: Vec::new(),
+        }
+        .to_bytes();
+        let mut batch = db.batch().unwrap();
+        batch
+            .put_block(1, &block_sending([0x55; 24], b"a"))
+            .unwrap();
+        batch.put_block(2, &block_sending(alias, b"b")).unwrap();
+        batch.put_statement(2, &statement).unwrap();
+        batch.commit().unwrap();
+        let a = hash_of(&block_sending([0x55; 24], b"a"));
+        db.set_search(Searches::TRANSACTIONS).unwrap();
+        assert_eq!(db.transaction_location(&a).unwrap(), None);
+        assert!(db.backfill_transactions(&|| false, &mut |_, _| {}).unwrap());
+        assert_eq!(db.transaction_location(&a).unwrap(), Some((1, 0)));
+        assert_eq!(listed(&db, &signer), vec![(1, 0), (2, 0)]);
+        assert_eq!(listed(&db, &[0x55; 24]), vec![(1, 0)]);
+        assert_eq!(listed(&db, &alias), vec![(2, 0)]);
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
+        assert!(
+            db.backfill_transactions(&|| false, &mut |_, _| panic!())
+                .unwrap()
+        );
+
+        // 有効なあいだは、足すブロックとステートメントから
+        let mut batch = db.batch().unwrap();
+        batch.put_block(3, &block_sending(alias, b"c")).unwrap();
+        batch.put_statement(3, &statement).unwrap();
+        batch.commit().unwrap();
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0), (3, 0)]);
+        // 新しい順、高さの範囲、続き
+        let mut seen = Vec::new();
+        db.for_each_address_transaction(&signer, 2..=3, None, true, &mut |h, i| {
+            seen.push((h, i));
+            true
+        })
+        .unwrap();
+        assert_eq!(seen, vec![(3, 0), (2, 0)]);
+        let mut seen = Vec::new();
+        db.for_each_address_transaction(&signer, 0..=u64::MAX, Some((1, 0)), false, &mut |h, i| {
+            seen.push((h, i));
+            false
+        })
+        .unwrap();
+        assert_eq!(seen, vec![(2, 0)]);
+
+        // 枝を取り替えたら、外れたブロックの分（解決した先も）は消える
+        let (c, d) = (
+            hash_of(&block_sending(alias, b"c")),
+            hash_of(&block_sending([0x55; 24], b"d")),
+        );
+        let mut batch = db.batch().unwrap();
+        batch
+            .put_block(3, &block_sending([0x55; 24], b"d"))
+            .unwrap();
+        batch.put_statement(3, &[]).unwrap_or(());
+        batch.commit().unwrap();
+        assert_eq!(db.transaction_location(&c).unwrap(), None);
+        assert_eq!(db.transaction_location(&d).unwrap(), Some((3, 0)));
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
+        assert_eq!(listed(&db, &alias), vec![(2, 0)]);
+        assert_eq!(listed(&db, &[0x55; 24]), vec![(1, 0), (3, 0)]);
+
+        // 使用料の受け取り先だけが替われば、書き換えて作り直す
+        let moved = TransactionNetwork {
+            mosaic_rental_fee_sink: [0xA3; 24],
+            ..network
+        };
+        db.set_transaction_network(moved).unwrap();
+        assert!(listed(&db, &signer).is_empty());
+        assert!(db.backfill_transactions(&|| false, &mut |_, _| {}).unwrap());
+        assert_eq!(listed(&db, &signer), vec![(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
+        drop(db);
+        let mut db = Db::open(&dir.0).unwrap();
+        db.set_transaction_network(moved).unwrap();
+        assert!(
+            db.backfill_transactions(&|| false, &mut |_, _| panic!())
+                .unwrap()
+        );
+
+        // 外したら消し、また足したら作り直す。止める合図なら、続きを残して返る
+        db.set_search(Searches::NONE).unwrap();
+        assert_eq!(db.transaction_location(&a).unwrap(), None);
+        assert!(listed(&db, &signer).is_empty());
+        db.set_search(Searches::TRANSACTIONS).unwrap();
+        assert!(!db.backfill_transactions(&|| true, &mut |_, _| {}).unwrap());
+        assert!(db.backfill_transactions(&|| false, &mut |_, _| {}).unwrap());
+        assert_eq!(db.transaction_location(&a).unwrap(), Some((1, 0)));
+        assert_eq!(listed(&db, &signer), vec![(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
+    }
+
     #[test]
     fn past_states_come_from_changesets() {
         let dir = TempDir::new();
@@ -3247,6 +3893,33 @@ mod tests {
         );
         assert_eq!(db.state_at(b"a", 3).unwrap().as_deref(), Some(&b"a3"[..]));
         assert_eq!(db.state_at(b"a", 4).unwrap().as_deref(), Some(&b"a4"[..]));
+    }
+
+    #[test]
+    fn walks_blocks_in_either_order() {
+        let dir = TempDir::new();
+        let db = Db::open(&dir.0).unwrap();
+        let mut batch = db.batch().unwrap();
+        for height in 1..=5 {
+            batch.put_block(height, &[height as u8]).unwrap();
+        }
+        batch.commit().unwrap();
+        let walk = |heights, after, reverse, stop_after: usize| {
+            let mut seen = Vec::new();
+            db.for_each_block(heights, after, reverse, &mut |height, block| {
+                assert_eq!(block, [height as u8]);
+                seen.push(height);
+                seen.len() < stop_after
+            })
+            .unwrap();
+            seen
+        };
+        assert_eq!(walk(1..=5, None, false, 9), vec![1, 2, 3, 4, 5]);
+        assert_eq!(walk(2..=4, None, true, 9), vec![4, 3, 2]);
+        assert_eq!(walk(1..=5, Some(3), false, 9), vec![3, 4, 5]);
+        assert_eq!(walk(1..=5, Some(3), true, 2), vec![3, 2]);
+        assert_eq!(walk(4..=5, Some(3), false, 9), vec![4, 5]);
+        assert!(walk(1..=2, Some(3), false, 9).is_empty());
     }
 
     #[test]

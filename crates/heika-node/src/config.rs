@@ -271,6 +271,8 @@ pub enum Search {
     Metadata,
     /// `/namespaces` の検索（持ち主、別名から）と、名前（`/namespaces/names` など）
     Namespaces,
+    /// `/transactions/confirmed/{hash}` と `/transactionStatus/{hash}` を、直近のブロックより前でも答える
+    Transactions,
 }
 
 /// `full` と `light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
@@ -309,6 +311,7 @@ impl Storage {
             .fold(Searches::NONE, |searches, search| match search {
                 Search::Metadata => searches.union(Searches::METADATA),
                 Search::Namespaces => searches.union(Searches::NAMESPACES),
+                Search::Transactions => searches.union(Searches::TRANSACTIONS),
             });
         if self.mode == Mode::Archive && searches != Searches::NONE {
             searches.union(Searches::PAST)

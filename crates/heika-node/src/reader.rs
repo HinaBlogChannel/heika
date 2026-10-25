@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use heika_api::{
     AliasTarget, KeyedStates, MetadataFilter, MetadataPosition, NamespaceFilter, PageRequest,
-    PartialFilter, StateError,
+    PartialFilter, StateError, TransactionFilter,
 };
 use heika_block::Block;
 use heika_block::statement::BlockStatement;
@@ -37,7 +37,9 @@ use heika_rest::state::{
     AccountJson, MetadataEntryJson, MosaicStateJson, MultisigGraphLevel, MultisigJson,
     NamespaceInfo, NamespaceNameJson, RootNamespaceState,
 };
-use heika_rest::transaction::{TransactionInfo, TransactionJson, TransactionMeta};
+use heika_rest::transaction::{
+    TransactionInfo, TransactionJson, TransactionMeta, transaction_position,
+};
 use heika_state_transition::executor::persist::{
     decode_account_row, height_of_meta, lock_or_restriction_state, row_key,
 };
@@ -89,16 +91,25 @@ impl DbReader {
         }
     }
 
-    /// 直近のブロックに入った `hash` のトランザクションと、入った高さと、ブロックの中の番号
+    /// 直近のブロック（ハッシュの表を作っていれば、しまってある全部のブロック）に入った `hash` のトランザクションと、
+    /// 入った高さと、ブロックの中の番号
     fn recent_transaction(
         &self,
         hash: &Hash256,
-    ) -> Result<Option<(Transaction, u64, u32)>, String> {
+    ) -> Result<Option<(Transaction, u64, u32, Block)>, String> {
         let found = self
             .recent
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .find(hash);
+        // 直近のブロックになければ、ハッシュの表（storage.search の transactions）から
+        let found = match found {
+            Some(found) => Some(found),
+            None => self
+                .db
+                .transaction_location(hash)
+                .map_err(|error| error.to_string())?,
+        };
         let Some((height, index)) = found else {
             return Ok(None);
         };
@@ -111,7 +122,33 @@ impl DbReader {
             .nth(index as usize)
             .and_then(|bytes| Transaction::from_bytes(bytes).ok())
             .filter(|transaction| transaction.hash(&self.seed) == *hash);
-        Ok(transaction.map(|transaction| (transaction, height, index)))
+        Ok(transaction.map(|transaction| (transaction, height, index, block)))
+    }
+
+    /// 承認されたトランザクションを REST の形にする。`block` は入ったブロック
+    fn confirmed_info(
+        &self,
+        transaction: &Transaction,
+        block: &Block,
+        height: u64,
+        index: u32,
+        id: Option<String>,
+    ) -> TransactionInfo {
+        TransactionInfo {
+            id,
+            meta: TransactionMeta {
+                height: Some(height.to_string()),
+                hash: Some(transaction.hash(&self.seed).to_string()),
+                merkle_component_hash: Some(
+                    transaction.merkle_component_hash(&self.seed).to_string(),
+                ),
+                index: Some(index),
+                aggregate_hash: None,
+                timestamp: Some(block.timestamp.to_string()),
+                fee_multiplier: Some(block.fee_multiplier),
+            },
+            transaction: TransactionJson::from(transaction),
+        }
     }
 
     /// 連署を待つものを、集まった連署を付けて REST の形にする。承認されていないので高さは "0"
@@ -119,6 +156,7 @@ impl DbReader {
         let bytes = self.partials.lock().stitched(hash)?;
         let transaction = Transaction::from_bytes(&bytes).ok()?;
         Some(TransactionInfo {
+            id: None,
             meta: TransactionMeta {
                 height: Some("0".to_owned()),
                 hash: Some(hash.to_string()),
@@ -127,6 +165,8 @@ impl DbReader {
                 ),
                 index: Some(0),
                 aggregate_hash: None,
+                timestamp: None,
+                fee_multiplier: None,
             },
             transaction: TransactionJson::from(&transaction),
         })
@@ -329,6 +369,50 @@ fn existed(past: &At, key: &[u8]) -> Result<bool, DbError> {
     Ok(past
         .state(&row)?
         .is_some_and(|value| row_yields(key, &value)))
+}
+
+/// 承認されたトランザクションが、検索の絞り込みに合うか。catapult の REST の条件と同じく、宛先は送金、シークレットロック、
+/// シークレットの証明の `recipientAddress`、モザイクと額は送金の `mosaics` のどれか（額はモザイクと別に、どれかが範囲に入る）
+fn transaction_matches(filter: &TransactionFilter, transaction: &Transaction) -> bool {
+    if let Some(key) = filter.signer
+        && transaction.signer_public_key != key
+    {
+        return false;
+    }
+    if !filter.types.is_empty() && !filter.types.contains(&transaction.body.transaction_type()) {
+        return false;
+    }
+    if let Some(recipient) = filter.recipient {
+        let found = match &transaction.body {
+            Body::Transfer(transfer) => transfer.recipient_address().0,
+            Body::SecretLock(lock) => lock.recipient_address.0,
+            Body::SecretProof(proof) => proof.recipient_address.0,
+            _ => return false,
+        };
+        if found != recipient {
+            return false;
+        }
+    }
+    if let Some(mosaic) = filter.mosaic {
+        let Body::Transfer(transfer) = &transaction.body else {
+            return false;
+        };
+        let mosaics = transfer.mosaics();
+        if !mosaics.keys().any(|id| id.0 == mosaic) {
+            return false;
+        }
+        if let Some(from) = filter.from_amount
+            && !mosaics.values().any(|&amount| amount >= from)
+        {
+            return false;
+        }
+        if let Some(to) = filter.to_amount
+            && !mosaics.values().any(|&amount| amount <= to)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// 状態を引く先
@@ -871,23 +955,132 @@ impl heika_api::Reader for DbReader {
         }
         Ok(self
             .recent_transaction(hash)?
-            .map(|(transaction, height, _)| status("confirmed", transaction.deadline, height)))
+            .map(|(transaction, height, _, _)| status("confirmed", transaction.deadline, height)))
+    }
+
+    fn search_transactions(
+        &self,
+        filter: &TransactionFilter,
+        page: PageRequest,
+        after: Option<(u64, u32)>,
+    ) -> Result<Option<Vec<TransactionInfo>>, String> {
+        // アドレス（署名者と宛先も、関わったアドレスに入る）があれば、アドレスの表から候補を取る。なければブロックを順に読む
+        let indexed = filter
+            .address
+            .or(filter
+                .signer
+                .map(|key| Address::from_public_key(&key, self.network)))
+            .map(|address| address.0)
+            .or(filter.recipient);
+        if indexed.is_some() && !self.db.searches().contains(Searches::TRANSACTIONS) {
+            return Ok(None);
+        }
+        let heights = filter.from_height..=filter.to_height;
+        let mut skip = (page.number - 1) * page.size;
+        let mut out = Vec::new();
+        let mut failed = None;
+        // 候補の1件を確かめて、合えば足す。ページが埋まったら `false`
+        let mut take = |block: &Block, height: u64, index: u32| -> bool {
+            let Some(transaction) = block
+                .transactions()
+                .nth(index as usize)
+                .and_then(|bytes| Transaction::from_bytes(bytes).ok())
+            else {
+                return true;
+            };
+            if !transaction_matches(filter, &transaction) {
+                return true;
+            }
+            if skip > 0 {
+                skip -= 1;
+                return true;
+            }
+            out.push(self.confirmed_info(
+                &transaction,
+                block,
+                height,
+                index,
+                Some(transaction_position(height, index)),
+            ));
+            out.len() < page.size
+        };
+        match indexed {
+            Some(address) => {
+                let mut cached: Option<(u64, Block)> = None;
+                self.db
+                    .for_each_address_transaction(
+                        &address,
+                        heights,
+                        after,
+                        page.descending,
+                        &mut |height, index| {
+                            if cached.as_ref().is_none_or(|(at, _)| *at != height) {
+                                // 刈り込んだブロックの分は、索引に残っていても返せない
+                                match self.read_block(height) {
+                                    Ok(Some(block)) => cached = Some((height, block)),
+                                    Ok(None) => return true,
+                                    Err(error) => {
+                                        failed = Some(error);
+                                        return false;
+                                    }
+                                }
+                            }
+                            let Some((_, block)) = &cached else {
+                                return true;
+                            };
+                            take(block, height, index)
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                self.db
+                    .for_each_block(
+                        heights,
+                        after.map(|(height, _)| height),
+                        page.descending,
+                        &mut |height, bytes| {
+                            let Ok(block) = Block::from_bytes(bytes) else {
+                                return true;
+                            };
+                            let count = block.transactions().count() as u32;
+                            let mut indexes: Vec<u32> = (0..count).collect();
+                            if page.descending {
+                                indexes.reverse();
+                            }
+                            for index in indexes {
+                                // 続きのブロックでは、`after` より後のものだけ
+                                if let Some((at, after_index)) = after
+                                    && at == height
+                                    && (if page.descending {
+                                        index >= after_index
+                                    } else {
+                                        index <= after_index
+                                    })
+                                {
+                                    continue;
+                                }
+                                if !take(&block, height, index) {
+                                    return false;
+                                }
+                            }
+                            true
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        Ok(Some(out))
     }
 
     fn confirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
         Ok(self
             .recent_transaction(hash)?
-            .map(|(transaction, height, index)| TransactionInfo {
-                meta: TransactionMeta {
-                    height: Some(height.to_string()),
-                    hash: Some(hash.to_string()),
-                    merkle_component_hash: Some(
-                        transaction.merkle_component_hash(&self.seed).to_string(),
-                    ),
-                    index: Some(index),
-                    aggregate_hash: None,
-                },
-                transaction: TransactionJson::from(&transaction),
+            .map(|(transaction, height, index, block)| {
+                self.confirmed_info(&transaction, &block, height, index, None)
             }))
     }
 
@@ -968,6 +1161,74 @@ impl heika_api::Reader for DbReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use heika_core::key::PublicKey;
+
+    #[test]
+    fn transaction_filters_follow_catapult_conditions() {
+        let network = NetworkIdentifier::MAINNET;
+        let mosaics = [(0xAAu64, 10u64), (0xBB, 3)]
+            .into_iter()
+            .map(|(id, amount)| (heika_transaction::UnresolvedMosaicId(id), amount))
+            .collect();
+        let transfer = Transaction::new(
+            PublicKey([0x11; 32]),
+            network,
+            0,
+            0,
+            Body::Transfer(
+                heika_transaction::Transfer::new(
+                    heika_transaction::UnresolvedAddress([0x55; 24]),
+                    mosaics,
+                    Vec::new(),
+                )
+                .unwrap(),
+            ),
+        );
+        let base = TransactionFilter {
+            address: None,
+            signer: None,
+            recipient: None,
+            types: Vec::new(),
+            mosaic: None,
+            from_amount: None,
+            to_amount: None,
+            from_height: 0,
+            to_height: u64::MAX,
+        };
+        let matches = |filter: TransactionFilter| transaction_matches(&filter, &transfer);
+        assert!(matches(base.clone()));
+        assert!(matches(TransactionFilter {
+            signer: Some(PublicKey([0x11; 32])),
+            recipient: Some([0x55; 24]),
+            types: vec![0x4141, 0x4154],
+            ..base.clone()
+        }));
+        assert!(!matches(TransactionFilter {
+            signer: Some(PublicKey([0x12; 32])),
+            ..base.clone()
+        }));
+        assert!(!matches(TransactionFilter {
+            recipient: Some([0x56; 24]),
+            ..base.clone()
+        }));
+        assert!(!matches(TransactionFilter {
+            types: vec![0x4141],
+            ..base.clone()
+        }));
+        // 額は、モザイクと別に、どれかが範囲に入ればよい（catapult の MongoDB の条件と同じ）
+        let by_mosaic = |mosaic, from_amount, to_amount| {
+            matches(TransactionFilter {
+                mosaic: Some(mosaic),
+                from_amount,
+                to_amount,
+                ..base.clone()
+            })
+        };
+        assert!(by_mosaic(0xAA, None, None));
+        assert!(!by_mosaic(0xCC, None, None));
+        assert!(by_mosaic(0xAA, Some(4), Some(9)));
+        assert!(!by_mosaic(0xAA, Some(11), None));
+    }
 
     fn filter() -> MetadataFilter {
         MetadataFilter::default()

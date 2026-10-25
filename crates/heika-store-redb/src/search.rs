@@ -14,9 +14,17 @@
 //! [`Db::set_search`]: crate::Db::set_search
 //! [`Db::for_each_search_key_with_past`]: crate::Db::for_each_search_key_with_past
 
+use std::collections::BTreeSet;
+
+use heika_block::statement::BlockStatement;
 use heika_core::address::Address;
+use heika_core::hash::Hash256;
+use heika_core::key::PublicKey;
+use heika_core::network::{GenerationHashSeed, NetworkIdentifier};
 use heika_core::patricia::SubCache;
-use heika_transaction::{Body, MetadataKey, MetadataType, NamespaceId, NamespaceRegistrationType};
+use heika_transaction::{
+    Body, LinkAction, MetadataKey, MetadataType, NamespaceId, NamespaceRegistrationType,
+};
 
 /// 作る検索。ビットの組
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -30,6 +38,10 @@ impl Searches {
     ///
     /// [`Db::namespace_name`]: crate::Db::namespace_name
     pub const NAMESPACES: Self = Self(2);
+    /// トランザクションを、ハッシュから引く（[`Db::transaction_location`]）。ブロックから作る
+    ///
+    /// [`Db::transaction_location`]: crate::Db::transaction_location
+    pub const TRANSACTIONS: Self = Self(4);
     /// 作る検索を、昔の高さでも引けるようにする。状態の差分を全部残すアーカイブのためのもの
     pub const PAST: Self = Self(0x80);
 
@@ -141,6 +153,180 @@ impl NamespaceRow {
         }
         keys
     }
+}
+
+/// トランザクションの索引（[`Searches::TRANSACTIONS`]）を作るのに要る、ネットワークの値
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransactionNetwork {
+    /// トランザクションのハッシュに入る
+    pub generation_hash_seed: GenerationHashSeed,
+    /// 公開鍵からアドレスを求める
+    pub identifier: NetworkIdentifier,
+    /// モザイクの定義とネームスペースの登録で、catapult が関わったアドレスに入れる使用料の受け取り先。どの高さでも
+    /// 今の受け取り先（受け取り先が替わる前の高さでも、替わった後のもの）。mainnet の catapult の REST の答えで確かめた
+    pub mosaic_rental_fee_sink: [u8; 24],
+    pub namespace_rental_fee_sink: [u8; 24],
+}
+
+impl TransactionNetwork {
+    const SIZE: usize = 32 + 1 + 24 + 24;
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::SIZE);
+        out.extend_from_slice(&self.generation_hash_seed.0);
+        out.push(self.identifier.0);
+        out.extend_from_slice(&self.mosaic_rental_fee_sink);
+        out.extend_from_slice(&self.namespace_rental_fee_sink);
+        out
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        (bytes.len() == Self::SIZE).then(|| Self {
+            generation_hash_seed: GenerationHashSeed(bytes[..32].try_into().expect("32 バイト")),
+            identifier: NetworkIdentifier(bytes[32]),
+            mosaic_rental_fee_sink: bytes[33..57].try_into().expect("24 バイト"),
+            namespace_rental_fee_sink: bytes[57..].try_into().expect("24 バイト"),
+        })
+    }
+}
+
+/// ブロックの中の1つのトランザクション（アグリゲートの中は除く）の、索引に入れるもの
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedTransaction {
+    /// ブロックの中の番号（0 から）
+    pub index: u32,
+    pub hash: Hash256,
+    /// 関わったアドレス（[`involved_addresses`]）
+    pub addresses: BTreeSet<[u8; 24]>,
+}
+
+/// ブロック `block` のトランザクションの、索引に入れるもの。読めないものは飛ばす
+pub(crate) fn indexed_transactions(
+    block: &[u8],
+    network: &TransactionNetwork,
+) -> Vec<IndexedTransaction> {
+    let Ok(block) = heika_block::Block::from_bytes(block) else {
+        return Vec::new();
+    };
+    block
+        .transactions()
+        .enumerate()
+        .filter_map(|(index, bytes)| {
+            let transaction = heika_transaction::Transaction::from_bytes(bytes).ok()?;
+            Some(IndexedTransaction {
+                index: index as u32,
+                hash: transaction.hash(&network.generation_hash_seed),
+                addresses: involved_addresses(&transaction, network),
+            })
+        })
+        .collect()
+}
+
+/// トランザクションが関わったアドレス。catapult の `model::ExtractAddresses` と同じく、トランザクションが出す
+/// アカウントの登録の通知（`AccountAddressNotification` と `AccountPublicKeyNotification`）のアドレスを、解決する前の
+/// まま集める。署名者と、中身ごとに決まった相手。アグリゲートは中のトランザクションの署名者と相手も入り、連署者は
+/// 入らない（catapult は連署者の通知を出さない）
+pub(crate) fn involved_addresses(
+    transaction: &heika_transaction::Transaction,
+    network: &TransactionNetwork,
+) -> BTreeSet<[u8; 24]> {
+    let mut out = BTreeSet::new();
+    let signer = |key: &PublicKey| Address::from_public_key(key, network.identifier).0;
+    out.insert(signer(&transaction.signer_public_key));
+    match &transaction.body {
+        Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate) => {
+            for embedded in aggregate.transactions() {
+                out.insert(signer(&embedded.signer_public_key));
+                body_addresses(&embedded.body, network, &mut out);
+            }
+        }
+        body => body_addresses(body, network, &mut out),
+    }
+    out
+}
+
+/// 中身ごとの、アカウントの登録の通知を出す相手（catapult のそれぞれのトランザクションのプラグイン）
+fn body_addresses(body: &Body, network: &TransactionNetwork, out: &mut BTreeSet<[u8; 24]>) {
+    match body {
+        Body::Transfer(transfer) => {
+            out.insert(transfer.recipient_address().0);
+        }
+        Body::SecretLock(lock) => {
+            out.insert(lock.recipient_address.0);
+        }
+        // モザイクとネームスペースのメタデータは、相手の通知を出さない
+        Body::AccountMetadata(metadata) => {
+            out.insert(metadata.target_address.0);
+        }
+        Body::MosaicSupplyRevocation(revocation) => {
+            out.insert(revocation.source_address.0);
+        }
+        Body::MultisigAccountModification(modification) => {
+            out.extend(
+                modification
+                    .address_additions
+                    .iter()
+                    .map(|address| address.0),
+            );
+        }
+        Body::AccountKeyLink(link) if link.link_action == LinkAction::Link => {
+            out.insert(Address::from_public_key(&link.linked_public_key, network.identifier).0);
+        }
+        Body::MosaicDefinition(_) => {
+            out.insert(network.mosaic_rental_fee_sink);
+        }
+        Body::NamespaceRegistration(_) => {
+            out.insert(network.namespace_rental_fee_sink);
+        }
+        _ => {}
+    }
+}
+
+/// `addresses` のうちエイリアスのものを、ブロックのステートメントの解決から、このトランザクション（ブロックの中の
+/// 番号 `index`）で使った先のアドレスにする。catapult の `AddressExtractor` の `AddResolvedAddresses` と同じく、
+/// このトランザクションの解決と、その前に最後に解決した先（このトランザクションの最初の解決が中の
+/// トランザクションのものなら）を足す
+pub(crate) fn resolved_addresses(
+    statement: &BlockStatement,
+    index: u32,
+    addresses: &BTreeSet<[u8; 24]>,
+) -> BTreeSet<[u8; 24]> {
+    // catapult のトランザクションの番号は 1 から
+    let primary_id = index + 1;
+    let mut out = BTreeSet::new();
+    for resolution in &statement.address_resolution_statements {
+        if !addresses.contains(&resolution.unresolved.0) {
+            continue;
+        }
+        let mut add_previous = true;
+        for entry in resolution.entries.iter().rev() {
+            let source = entry.source;
+            if primary_id < source.primary_id {
+                continue;
+            }
+            if primary_id == source.primary_id {
+                out.insert(entry.resolved.0);
+                if source.secondary_id == 0 {
+                    add_previous = false;
+                }
+                continue;
+            }
+            if add_previous {
+                out.insert(entry.resolved.0);
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// アドレスの索引のキー。アドレス、高さ、ブロックの中の番号（ビッグエンディアン）
+pub(crate) fn address_key(address: &[u8; 24], height: u64, index: u32) -> [u8; 36] {
+    let mut key = [0; 36];
+    key[..24].copy_from_slice(address);
+    key[24..32].copy_from_slice(&height.to_be_bytes());
+    key[32..].copy_from_slice(&index.to_be_bytes());
+    key
 }
 
 /// ブロック `block` のネームスペースの登録（アグリゲートの中も）から、ID、親の ID（ルートは 0）、名前。
@@ -420,7 +606,7 @@ pub(crate) fn caches(searches: Searches) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn fields(metadata_type: u8) -> MetadataFields {
@@ -534,5 +720,163 @@ mod tests {
         assert!(keys_of(Searches::NONE, &key, Some(&row)).is_empty());
         assert!(keys_of(Searches::METADATA, &[0], Some(&row)).is_empty());
         assert!(keys_of(Searches::METADATA, &key, None).is_empty());
+    }
+
+    /// 試しのネットワーク。受け取り先は 0xA1 と 0xA2 で埋めたもの
+    pub(crate) fn test_network() -> TransactionNetwork {
+        TransactionNetwork {
+            generation_hash_seed: GenerationHashSeed([0x77; 32]),
+            identifier: NetworkIdentifier::MAINNET,
+            mosaic_rental_fee_sink: [0xA1; 24],
+            namespace_rental_fee_sink: [0xA2; 24],
+        }
+    }
+
+    fn address_of(key: u8) -> [u8; 24] {
+        Address::from_public_key(&PublicKey([key; 32]), NetworkIdentifier::MAINNET).0
+    }
+
+    fn transaction(signer: u8, body: Body) -> heika_transaction::Transaction {
+        heika_transaction::Transaction::new(
+            PublicKey([signer; 32]),
+            NetworkIdentifier::MAINNET,
+            0,
+            0,
+            body,
+        )
+    }
+
+    fn transfer_to(recipient: [u8; 24]) -> Body {
+        Body::Transfer(
+            heika_transaction::Transfer::new(
+                heika_transaction::UnresolvedAddress(recipient),
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn metadata(target: [u8; 24]) -> heika_transaction::Metadata {
+        heika_transaction::Metadata {
+            target_address: heika_transaction::UnresolvedAddress(target),
+            scoped_metadata_key: 1,
+            value_size_delta: 0,
+            value: Vec::new().try_into().unwrap(),
+        }
+    }
+
+    #[test]
+    fn involved_addresses_follow_catapult_notifications() {
+        let network = test_network();
+        let set = |addresses: &[[u8; 24]]| addresses.iter().copied().collect::<BTreeSet<_>>();
+        // 署名者と宛先
+        assert_eq!(
+            involved_addresses(&transaction(0x11, transfer_to([0x55; 24])), &network),
+            set(&[address_of(0x11), [0x55; 24]])
+        );
+        // アカウントのメタデータは宛先が入り、モザイクのメタデータは入らない
+        let account = Body::AccountMetadata(metadata([0x56; 24]));
+        assert_eq!(
+            involved_addresses(&transaction(0x11, account), &network),
+            set(&[address_of(0x11), [0x56; 24]])
+        );
+        let mosaic = Body::MosaicMetadata(heika_transaction::MosaicMetadata {
+            target_mosaic_id: heika_transaction::UnresolvedMosaicId(1),
+            metadata: metadata([0x56; 24]),
+        });
+        assert_eq!(
+            involved_addresses(&transaction(0x11, mosaic), &network),
+            set(&[address_of(0x11)])
+        );
+        // 紐づけは、つなぐときだけ相手の鍵のアドレスが入る
+        let link = |link_action| {
+            Body::AccountKeyLink(heika_transaction::KeyLink {
+                linked_public_key: PublicKey([0x22; 32]),
+                link_action,
+            })
+        };
+        assert_eq!(
+            involved_addresses(&transaction(0x11, link(LinkAction::Link)), &network),
+            set(&[address_of(0x11), address_of(0x22)])
+        );
+        assert_eq!(
+            involved_addresses(&transaction(0x11, link(LinkAction::Unlink)), &network),
+            set(&[address_of(0x11)])
+        );
+        // モザイクの定義は、使用料の受け取り先が入る
+        let definition = Body::MosaicDefinition(heika_transaction::MosaicDefinition {
+            id: heika_transaction::MosaicId(1),
+            duration: 0,
+            nonce: 0,
+            flags: heika_transaction::MosaicFlags::SUPPLY_MUTABLE,
+            divisibility: 0,
+        });
+        assert_eq!(
+            involved_addresses(&transaction(0x11, definition), &network),
+            set(&[address_of(0x11), [0xA1; 24]])
+        );
+        // アグリゲートは中の署名者と相手が入り、連署者は入らない
+        let mut aggregate =
+            heika_transaction::Aggregate::new(vec![heika_transaction::EmbeddedTransaction::new(
+                PublicKey([0x33; 32]),
+                NetworkIdentifier::MAINNET,
+                transfer_to([0x57; 24]),
+            )])
+            .unwrap();
+        aggregate.add_cosignature(heika_transaction::Cosignature {
+            signer_public_key: PublicKey([0x44; 32]),
+            signature: heika_core::signature::Signature([0; 64]),
+        });
+        assert_eq!(
+            involved_addresses(
+                &transaction(0x11, Body::AggregateComplete(aggregate)),
+                &network
+            ),
+            set(&[address_of(0x11), address_of(0x33), [0x57; 24]])
+        );
+    }
+
+    #[test]
+    fn resolved_addresses_follow_the_address_extractor() {
+        use heika_block::statement::{
+            AddressResolutionStatement, BlockStatement, ReceiptSource, ResolutionEntry,
+        };
+        let alias = [0x99; 24];
+        let entry = |primary_id, secondary_id, resolved: u8| ResolutionEntry {
+            source: ReceiptSource {
+                primary_id,
+                secondary_id,
+            },
+            resolved: Address([resolved; 24]),
+        };
+        // 1番目で A に、3番目の中の2つ目で B に、5番目で C に解決した
+        let statement = BlockStatement {
+            transaction_statements: Vec::new(),
+            address_resolution_statements: vec![AddressResolutionStatement {
+                unresolved: heika_transaction::UnresolvedAddress(alias),
+                entries: vec![entry(1, 0, 0xA), entry(3, 2, 0xB), entry(5, 0, 0xC)],
+            }],
+            mosaic_resolution_statements: Vec::new(),
+        };
+        let used: BTreeSet<_> = [alias, [0x55; 24]].into_iter().collect();
+        let resolved = |index| {
+            resolved_addresses(&statement, index, &used)
+                .into_iter()
+                .map(|address| address[0])
+                .collect::<Vec<_>>()
+        };
+        // 番号は 0 から。自分の解決がなければ、前に最後に解決した先
+        assert_eq!(resolved(0), vec![0xA]);
+        assert_eq!(resolved(1), vec![0xA]);
+        // 中のトランザクションで解決したなら、その前の解決も
+        assert_eq!(resolved(2), vec![0xA, 0xB]);
+        assert_eq!(resolved(3), vec![0xB]);
+        // トランザクションそのもので解決したなら、それだけ
+        assert_eq!(resolved(4), vec![0xC]);
+        assert_eq!(resolved(9), vec![0xC]);
+        // エイリアスを使っていなければ足さない
+        let plain: BTreeSet<_> = [[0x55; 24]].into_iter().collect();
+        assert!(resolved_addresses(&statement, 4, &plain).is_empty());
     }
 }

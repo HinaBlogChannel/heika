@@ -33,7 +33,7 @@ use heika_rest::node::{
 };
 use heika_state_transition::config::{ChainConfig, load_network_parameters};
 use heika_state_transition::executor::persist::height_of_meta;
-use heika_store_redb::Db;
+use heika_store_redb::{Db, TransactionNetwork};
 use heika_tls::{ConnectError, Identity};
 use heika_transaction::{Body, DetachedCosignature, Transaction};
 
@@ -228,6 +228,13 @@ fn catch_up_if_behind(
     let mut db = Db::open(&spec.data_directory)?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     check_storage_mode(&db, spec.storage.mode)?;
+    // トランザクションの索引を作るのに要る。別のネットワークの DB なら、ここで止まる
+    db.set_transaction_network(TransactionNetwork {
+        generation_hash_seed: setup.parameters.generation_hash_seed,
+        identifier: setup.parameters.identifier,
+        mosaic_rental_fee_sink: setup.config.mosaic_rental_fee_sink.at(u64::MAX).0,
+        namespace_rental_fee_sink: setup.config.namespace_rental_fee_sink.at(u64::MAX).0,
+    })?;
     // 足した検索表は、今の状態の行から作る
     let searches = spec.storage.searches();
     if db.searches() != searches {
@@ -243,6 +250,20 @@ fn catch_up_if_behind(
     let done = db.backfill_names(stopping, &mut |at, through| {
         if last_report.elapsed() >= Duration::from_secs(10) || at >= through {
             eprintln!("ネームスペースの名前を、しまってあるブロックから拾っています（高さ {at} / {through}）");
+            last_report = Instant::now();
+        }
+    })?;
+    if !done {
+        return Ok(());
+    }
+    // トランザクションのハッシュの表を足したなら、これもしまってあるブロックから
+    let started = Instant::now();
+    let done = db.backfill_transactions(stopping, &mut |at, through| {
+        if last_report.elapsed() >= Duration::from_secs(10) || at >= through {
+            eprintln!(
+                "トランザクションのハッシュとアドレスを、しまってあるブロックから拾っています（高さ {at} / {through}、{} 秒）",
+                started.elapsed().as_secs()
+            );
             last_report = Instant::now();
         }
     })?;

@@ -26,8 +26,27 @@ const EMBEDDED_HEADER_SIZE: usize = 4 + 4 + 32 + 4 + 1 + 1 + 2;
 /// `TransactionInfoDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct TransactionInfo {
+    /// 検索のページ送り（`offset`）に渡す位置。catapult の REST では MongoDB の ID、heika では高さとブロックの中の
+    /// 番号（[`transaction_position`]）。1件ずつ引く口では返さない
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub meta: TransactionMeta,
     pub transaction: TransactionJson,
+}
+
+/// 承認されたトランザクションの位置。高さ（16 桁）とブロックの中の番号（8 桁）をつないだ16進
+pub fn transaction_position(height: u64, index: u32) -> String {
+    format!("{height:016X}{index:08X}")
+}
+
+/// [`transaction_position`] を読む。読めなければ `None`
+pub fn parse_transaction_position(text: &str) -> Option<(u64, u32)> {
+    if text.len() != 24 || !text.is_ascii() {
+        return None;
+    }
+    let height = u64::from_str_radix(&text[..16], 16).ok()?;
+    let index = u32::from_str_radix(&text[16..], 16).ok()?;
+    Some((height, index))
 }
 
 /// `TransactionMetaDTO` と `EmbeddedTransactionMetaDTO`。どちらの形でも読めるように、項目はどれも省けるようにする。
@@ -48,6 +67,11 @@ pub struct TransactionMeta {
     /// 中のトランザクションだけにある、親のアグリゲートのハッシュ
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_hash: Option<String>,
+    /// 入ったブロックの時刻と、手数料の倍率。catapult の REST が承認されたものに足す
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_multiplier: Option<u32>,
 }
 
 /// トランザクションの JSON。種類ごとの本体の項目は、どれか1つの種類のものだけが入る。
@@ -1000,12 +1024,15 @@ fn body_json(body: &Body) -> BodyJson {
                     .iter()
                     .enumerate()
                     .map(|(index, embedded)| TransactionInfo {
+                        id: None,
                         meta: TransactionMeta {
                             height: None,
                             hash: None,
                             merkle_component_hash: None,
                             index: Some(index as u32),
                             aggregate_hash: None,
+                            timestamp: None,
+                            fee_multiplier: None,
                         },
                         transaction: TransactionJson::from(embedded),
                     })

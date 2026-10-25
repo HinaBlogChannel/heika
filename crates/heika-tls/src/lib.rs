@@ -1081,10 +1081,12 @@ mod tests {
     fn accepts_a_catapult_chain_and_answers_a_request() {
         let (chain, key) = chain(1);
         let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        // 証明書の期限は今の時刻から作るので、比べる相手は同じものを使う
+        let (client_chain, client_key) = self::chain(3);
+        let client_identity = Identity::new(&client_chain, &client_key).unwrap();
         let mut client =
-            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+            Connection::open(&address, &client_identity, Duration::from_secs(5)).unwrap();
         let mut server = accepted.recv().unwrap().unwrap();
-        let (client_chain, _) = self::chain(3);
         let expected: Vec<_> = client_chain
             .iter()
             .map(|certificate| certificate.to_der().to_vec())

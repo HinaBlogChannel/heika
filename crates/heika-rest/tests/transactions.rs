@@ -301,3 +301,20 @@ fn writes_the_rest_json_of_a_transaction() {
     expected["transactions"][0]["meta"] = json!({ "index": 0 });
     assert_eq!(written, expected);
 }
+
+#[test]
+fn transaction_positions_round_trip_and_sort_like_the_chain() {
+    use heika_rest::transaction::{parse_transaction_position, transaction_position};
+
+    let position = transaction_position(5_893_007, 12, 3);
+    assert_eq!(position, "00000059EB8F0000000C0003");
+    assert_eq!(
+        parse_transaction_position(&position),
+        Some((5_893_007, 12, 3))
+    );
+    // 文字列の順が、高さ、ブロックの中の番号、アグリゲートの中の番号の順になる
+    assert!(transaction_position(1, 0, 9) < transaction_position(1, 1, 0));
+    assert!(transaction_position(1, u32::MAX, 0) < transaction_position(2, 0, 0));
+    assert_eq!(parse_transaction_position("00000059EB8F0000000C000"), None);
+    assert_eq!(parse_transaction_position("00000059EB8F0000000C000G"), None);
+}

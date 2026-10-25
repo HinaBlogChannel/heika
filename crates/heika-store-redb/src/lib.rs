@@ -380,16 +380,54 @@ impl Db {
     }
 
     /// トランザクションの索引（[`Searches::TRANSACTIONS`]）を作るのに要る、ネットワークの値を覚える。まだなければ
-    /// `meta` に書き、違うものがしまってあれば [`DbError::OtherNetwork`]
+    /// `meta` に書く。generation hash seed かネットワークの識別子が違うものがしまってあれば、別のネットワークの DB
+    /// なので [`DbError::OtherNetwork`]。使用料の受け取り先だけが違えば、書き換えて、索引をしまってあるブロックから
+    /// 作り直す（[`Db::backfill_transactions`]）
     pub fn set_transaction_network(&mut self, network: TransactionNetwork) -> Result<(), DbError> {
         match self.network {
             Some(stored) if stored == network => return Ok(()),
-            Some(_) => return Err(DbError::OtherNetwork),
-            None => {}
+            Some(stored)
+                if stored.generation_hash_seed != network.generation_hash_seed
+                    || stored.identifier != network.identifier =>
+            {
+                return Err(DbError::OtherNetwork);
+            }
+            _ => {}
         }
-        let mut batch = self.batch()?;
-        batch.put_meta(NETWORK_META, &network.encode())?;
-        batch.commit()?;
+        let Handle::Write(database) = &self.handle else {
+            return Err(DbError::ReadOnly);
+        };
+        self.check_space()?;
+        let rebuild = self.network.is_some() && self.search.contains(Searches::TRANSACTIONS);
+        let transaction = database.begin_write().map_err(db_error)?;
+        {
+            let mut meta = transaction.open_table(META).map_err(db_error)?;
+            meta.insert(NETWORK_META, network.encode().as_slice())
+                .map_err(db_error)?;
+            if rebuild {
+                transaction
+                    .open_table(TRANSACTION_HASHES)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                transaction
+                    .open_table(ADDRESS_TRANSACTIONS)
+                    .map_err(db_error)?
+                    .extract_if(|_, _| true)
+                    .map_err(db_error)?
+                    .for_each(drop);
+                let blocks = transaction.open_table(BLOCKS).map_err(db_error)?;
+                let first = blocks.first().map_err(db_error)?.map(|(h, _)| h.value());
+                let last = blocks.last().map_err(db_error)?.map(|(h, _)| h.value());
+                if let (Some(first), Some(last)) = (first, last) {
+                    let pending = [first.to_le_bytes(), last.to_le_bytes()].concat();
+                    meta.insert(TRANSACTIONS_BACKFILL, pending.as_slice())
+                        .map_err(db_error)?;
+                }
+            }
+        }
+        transaction.commit().map_err(db_error)?;
         self.network = Some(network);
         Ok(())
     }
@@ -3225,7 +3263,7 @@ mod tests {
         db.set_transaction_network(network).unwrap();
         db.set_transaction_network(network).unwrap();
         let other = TransactionNetwork {
-            mosaic_rental_fee_sink: [0xA3; 24],
+            generation_hash_seed: heika_core::network::GenerationHashSeed([0x78; 32]),
             ..network
         };
         assert!(matches!(
@@ -3316,6 +3354,24 @@ mod tests {
         assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
         assert_eq!(listed(&db, &alias), vec![(2, 0)]);
         assert_eq!(listed(&db, &[0x55; 24]), vec![(1, 0), (3, 0)]);
+
+        // 使用料の受け取り先だけが替われば、書き換えて作り直す
+        let moved = TransactionNetwork {
+            mosaic_rental_fee_sink: [0xA3; 24],
+            ..network
+        };
+        db.set_transaction_network(moved).unwrap();
+        assert!(listed(&db, &signer).is_empty());
+        assert!(db.backfill_transactions(&|| false, &mut |_, _| {}).unwrap());
+        assert_eq!(listed(&db, &signer), vec![(1, 0), (2, 0), (3, 0)]);
+        assert_eq!(listed(&db, &[0x66; 24]), vec![(2, 0)]);
+        drop(db);
+        let mut db = Db::open(&dir.0).unwrap();
+        db.set_transaction_network(moved).unwrap();
+        assert!(
+            db.backfill_transactions(&|| false, &mut |_, _| panic!())
+                .unwrap()
+        );
 
         // 外したら消し、また足したら作り直す。止める合図なら、続きを残して返る
         db.set_search(Searches::NONE).unwrap();

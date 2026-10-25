@@ -232,8 +232,8 @@ fn catch_up_if_behind(
     db.set_transaction_network(TransactionNetwork {
         generation_hash_seed: setup.parameters.generation_hash_seed,
         identifier: setup.parameters.identifier,
-        mosaic_rental_fee_sink: setup.config.mosaic_rental_fee_sink.at(0).0,
-        namespace_rental_fee_sink: setup.config.namespace_rental_fee_sink.at(0).0,
+        mosaic_rental_fee_sink: setup.config.mosaic_rental_fee_sink.at(u64::MAX).0,
+        namespace_rental_fee_sink: setup.config.namespace_rental_fee_sink.at(u64::MAX).0,
     })?;
     // 足した検索表は、今の状態の行から作る
     let searches = spec.storage.searches();

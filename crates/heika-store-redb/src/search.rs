@@ -162,8 +162,8 @@ pub struct TransactionNetwork {
     pub generation_hash_seed: GenerationHashSeed,
     /// 公開鍵からアドレスを求める
     pub identifier: NetworkIdentifier,
-    /// モザイクの定義とネームスペースの登録で、catapult が関わったアドレスに入れる使用料の受け取り先。catapult は
-    /// 高さを渡さずに集めるので、受け取り先が替わる前のもの（`HeightDependentAddress::at(0)`）
+    /// モザイクの定義とネームスペースの登録で、catapult が関わったアドレスに入れる使用料の受け取り先。どの高さでも
+    /// 今の受け取り先（受け取り先が替わる前の高さでも、替わった後のもの）。mainnet の catapult の REST の答えで確かめた
     pub mosaic_rental_fee_sink: [u8; 24],
     pub namespace_rental_fee_sink: [u8; 24],
 }

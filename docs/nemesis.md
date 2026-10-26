@@ -24,7 +24,7 @@ Nemesis の秘密鍵は、標準入力からだけ読む。`nemesis.properties` 
 | `00000/hashes.dat` | 高さごとのブロックのハッシュ |
 | `proof.index.dat`、`00000/00001.proof`、`00000/proof.heights.dat` | Nemesis を確定した、投票のない証明 |
 
-catapult のノードは、`config-user.properties` の `seedDirectory` にこのフォルダーを書けば、ここから始める。
+heika のノードは、設定の `network.nemesisSeed` にこのフォルダーを書けば、ここから始める（[peer.md](peer.md)）。catapult のノードは、`config-user.properties` の `seedDirectory` に書けば、ここから始める。
 
 ## 作るもの
 
@@ -45,4 +45,4 @@ catapult のノードは、`config-user.properties` の `seedDirectory` にこ�
 - catapult のノードが起動するときに確かめること（ハーベストのモザイクを配った合計が `totalChainImportance` と同じか、`maxMosaicAtomicUnits` を超えないか）を、作る前に確かめる
 - 追加のトランザクションは、署名がこのネットワークのものか（generation hash seed が合うか）も確かめる
 
-ルートのネームスペースが1つのとき（`symbol` と `symbol.xym` だけなど）は、catapult の nemgen と同じファイルができることを、テストネットの設定から作ったネットワークで確かめてある。
+ルートのネームスペースが1つのとき（`symbol` と `symbol.xym` だけなど）は、catapult の nemgen と同じファイルができることを、テストネットの設定から作ったネットワークで確かめてある。そのネットワークで、heika のノード2台がこの seed から始めてブロックを作り、catapult のノードも同じ seed から始めて、heika の作ったチェーンを取り込んだ。

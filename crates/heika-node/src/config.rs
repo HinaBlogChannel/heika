@@ -76,9 +76,14 @@ pub struct Network {
     /// （ネットワークの設定が変わって、heika がまだ追いついていないときなど）
     #[serde(default)]
     pub resources: Option<PathBuf>,
-    /// `type: custom` のときだけ。Nemesis のブロックのハッシュ（16進）
+    /// `type: custom` のときだけ。Nemesis のブロックのハッシュ（16進）。`nemesisSeed` を書けば省ける
     #[serde(default)]
     pub nemesis_hash: Option<String>,
+    /// `type: custom` のときだけ。Nemesis の seed フォルダー（`heika experimental nemgen` か catapult の nemgen で
+    /// 作ったもの）。DB が空なら、ピアから取らずにここの Nemesis から始め、ピアにつながらなくても先端の段階に
+    /// 進む（新しいネットワークの最初のノード）。`nemesisHash` も書けば、合うかを確かめる
+    #[serde(default)]
+    pub nemesis_seed: Option<PathBuf>,
 }
 
 /// ノードの設定（`spec`）
@@ -461,15 +466,18 @@ impl Manifest {
                 "network.type: custom には network.resources が要ります".to_owned(),
             ));
         }
-        match (network.network_type, &network.nemesis_hash) {
-            (NetworkType::Custom, None) => {
+        let pinned = network.nemesis_hash.is_some() || network.nemesis_seed.is_some();
+        match (network.network_type, pinned) {
+            (NetworkType::Custom, false) => {
                 return Err(ConfigError(
-                    "network.type: custom には network.nemesisHash が要ります".to_owned(),
+                    "network.type: custom には network.nemesisHash か network.nemesisSeed が要ります"
+                        .to_owned(),
                 ));
             }
-            (NetworkType::Mainnet | NetworkType::Testnet, Some(_)) => {
+            (NetworkType::Mainnet | NetworkType::Testnet, true) => {
                 return Err(ConfigError(
-                    "network.nemesisHash は network.type: custom のときだけ書きます".to_owned(),
+                    "network.nemesisHash と network.nemesisSeed は network.type: custom のときだけ書きます"
+                        .to_owned(),
                 ));
             }
             _ => {}
@@ -618,6 +626,20 @@ spec:
         assert!(Manifest::parse(&with_hash).is_ok());
         let testnet_with_hash = with_hash.replace("type: custom", "type: testnet");
         assert!(Manifest::parse(&testnet_with_hash).is_err());
+        // seed を書けばハッシュは省ける。seed もほかのネットワークには書かない
+        let with_seed = custom.replace(
+            "resources: /resources",
+            "resources: /resources\n    nemesisSeed: /seed",
+        );
+        assert_eq!(
+            Manifest::parse(&with_seed)
+                .unwrap()
+                .spec
+                .network
+                .nemesis_seed,
+            Some(PathBuf::from("/seed"))
+        );
+        assert!(Manifest::parse(&with_seed.replace("type: custom", "type: mainnet")).is_err());
         // resources は custom にだけ要る。メインネットとテストネットは決め打ちの設定を使う
         let without_resources = MINIMAL.replace("    resources: /resources\n", "");
         assert_eq!(

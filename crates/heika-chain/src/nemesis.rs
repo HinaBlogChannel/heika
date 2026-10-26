@@ -664,6 +664,27 @@ fn decode(bytes: &[u8]) -> Result<Block, NemesisError> {
         .map_err(|error| NemesisError(format!("組んだブロックが読めません: {error}")))
 }
 
+/// `seed` フォルダーの中の、Nemesis のブロックを含むファイル
+pub const SEED_BLOCK_FILE: &str = "00000/00001.dat";
+
+/// `seed` の [`SEED_BLOCK_FILE`] の中身から、Nemesis のブロックを読む。ブロックのあとに続くハッシュなどは読まない
+pub fn read_seed_block(element: &[u8]) -> Result<Block, NemesisError> {
+    let size = element
+        .get(..4)
+        .map(|size| u32::from_le_bytes(size.try_into().expect("4 bytes")) as usize)
+        .filter(|&size| size <= element.len())
+        .ok_or_else(|| NemesisError(format!("{SEED_BLOCK_FILE} が短すぎます")))?;
+    let block = Block::from_bytes(&element[..size]).map_err(|error| {
+        NemesisError(format!("{SEED_BLOCK_FILE} のブロックが読めません: {error}"))
+    })?;
+    if block.height != 1 || block.block_type != heika_block::BlockType::Nemesis {
+        return error(format!(
+            "{SEED_BLOCK_FILE} のブロックが Nemesis ではありません"
+        ));
+    }
+    Ok(block)
+}
+
 impl Nemesis {
     /// catapult のノードの `seed` フォルダーに置くファイル（パスと中身）。`seedDirectory` に置けば、catapult の
     /// ノードはここから始める。ブロック、ステートメント、高さ 1 のハッシュ、Nemesis を確定した証明
@@ -706,7 +727,7 @@ impl Nemesis {
         vec![
             ("index.dat", 1u64.to_le_bytes().to_vec()),
             ("00000/hashes.dat", hashes),
-            ("00000/00001.dat", element),
+            (SEED_BLOCK_FILE, element),
             ("00000/00001.stmt", self.statement.to_bytes()),
             ("proof.index.dat", round),
             ("00000/proof.heights.dat", vec![0; 16]),
@@ -855,7 +876,7 @@ mod tests {
         let hash = nemesis.block.hash();
         assert_eq!(file("index.dat"), &1u64.to_le_bytes());
         assert_eq!(&file("00000/hashes.dat")[32..], &hash.0);
-        let element = file("00000/00001.dat");
+        let element = file(SEED_BLOCK_FILE);
         let size = nemesis.block.as_bytes().len();
         assert_eq!(&element[..size], nemesis.block.as_bytes());
         assert_eq!(&element[size..size + 32], &hash.0);
@@ -866,6 +887,9 @@ mod tests {
             nemesis.statement
         );
         assert_eq!(&file("00000/00001.proof")[24..], &hash.0);
+        // 書いたものから、同じブロックが読める
+        assert_eq!(read_seed_block(element).unwrap(), nemesis.block);
+        assert!(read_seed_block(&element[..100]).is_err());
     }
 
     #[test]

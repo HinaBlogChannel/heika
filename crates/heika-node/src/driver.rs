@@ -15,6 +15,7 @@ use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
+use heika_chain::nemesis::{SEED_BLOCK_FILE, read_seed_block};
 use heika_chain::produce::{Assemble, Pending};
 use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::{nemesis_hash, verify_alone};
@@ -112,6 +113,8 @@ struct Setup<'a> {
     spec: &'a NodeConfig,
     parameters: &'static NetworkParameters,
     nemesis: Hash256,
+    /// `network.nemesisSeed` から読んだ Nemesis のブロック。DB が空なら、ピアから取らずにこれから始める
+    local_nemesis: Option<Block>,
     config: ChainConfig,
     identity: Arc<Identity>,
     /// 設定ファイルの鍵
@@ -129,16 +132,40 @@ impl<'a> Setup<'a> {
         assemble: Option<Arc<dyn Assemble>>,
     ) -> Result<Self, NodeError> {
         let parameters = network_parameters(spec)?;
-        let nemesis = match &spec.network.nemesis_hash {
-            Some(hash) => hash
-                .parse()
-                .map_err(|_| "network.nemesisHash が読めません")?,
-            None => nemesis_hash(parameters.identifier).ok_or("知らないネットワークです")?,
+        let local_nemesis = spec
+            .network
+            .nemesis_seed
+            .as_ref()
+            .map(|seed| -> Result<Block, NodeError> {
+                let path = seed.join(SEED_BLOCK_FILE);
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("{} を読めません: {error}", path.display()))?;
+                Ok(read_seed_block(&bytes)?)
+            })
+            .transpose()?;
+        let pinned = spec
+            .network
+            .nemesis_hash
+            .as_ref()
+            .map(|hash| hash.parse().map_err(|_| "network.nemesisHash が読めません"))
+            .transpose()?;
+        let nemesis = match (pinned, &local_nemesis) {
+            (Some(hash), Some(block)) if block.hash() != hash => {
+                return Err(
+                    "network.nemesisSeed の Nemesis が network.nemesisHash と違います".into(),
+                );
+            }
+            (Some(hash), _) => hash,
+            (None, Some(block)) => block.hash(),
+            (None, None) => {
+                nemesis_hash(parameters.identifier).ok_or("知らないネットワークです")?
+            }
         };
         Ok(Self {
             spec,
             parameters,
             nemesis,
+            local_nemesis,
             config: chain_config(spec)?,
             identity: Arc::new(load_identity(&spec.certificates.directory)?),
             harvesters: read_harvesters(spec)?,
@@ -270,10 +297,38 @@ fn catch_up_if_behind(
     if !done {
         return Ok(());
     }
-    let executed = match db.meta(EXECUTOR_META)? {
+    let mut executed = match db.meta(EXECUTOR_META)? {
         Some(meta) => height_of_meta(&meta)?,
         None => 0,
     };
+    if executed == 0
+        && let Some(block) = &setup.local_nemesis
+    {
+        let no_peers = || -> Result<ClientConnection, NodeError> {
+            Err("手元の Nemesis を実行するときは、ピアにつながりません".into())
+        };
+        let context = catch_up::Context {
+            parameters: setup.parameters,
+            nemesis: setup.nemesis,
+            stopping,
+            connect: &no_peers,
+        };
+        executed = catch_up::execute(
+            &mut db,
+            setup.config.clone(),
+            &context,
+            catch_up::Source::Local {
+                blocks: vec![block.clone()],
+            },
+            keep(spec)?,
+            catch_up::DEFAULT_SAVE_EVERY,
+            None,
+        )?;
+        if stopping() {
+            return Ok(());
+        }
+        println!("network.nemesisSeed の Nemesis から始めました");
+    }
     let book = setup.book(&db)?;
     let known: BTreeMap<String, KnownPeer> = book.records().into_iter().collect();
     let mut addresses = best(&known, usize::MAX);
@@ -291,6 +346,13 @@ fn catch_up_if_behind(
         );
         if !peers.is_empty() {
             break peers;
+        }
+        // Nemesis を手元に持つノードは、新しいネットワークの最初のノードかもしれないので、ひとりで先へ進む
+        if setup.local_nemesis.is_some() && executed > 0 {
+            println!(
+                "住所録のノードにつながりません。Nemesis を手元に持っているので、ひとりで先端の段階に進みます"
+            );
+            return Ok(());
         }
         eprintln!(
             "住所録のノードにつながりません。{} 秒おいて試し直します",

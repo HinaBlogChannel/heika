@@ -54,7 +54,7 @@ spec:
     mode: light            # archive / full / light
 ```
 
-- `network.type`: `mainnet` と `testnet` は、ネットワークの設定（`config-network.properties` などにあたる値）を heika が持っているので、ほかに何も要らない。`network.resources` にノードの `resources` フォルダーを書けば、代わりにそこから読む（ネットワークの設定が変わって、heika がまだ追いついていないときなど）。`custom` には、`network.resources` と `network.nemesisHash`（Nemesis のブロックのハッシュ）が要る
+- `network.type`: `mainnet` と `testnet` は、ネットワークの設定（`config-network.properties` などにあたる値）を heika が持っているので、ほかに何も要らない。`network.resources` にノードの `resources` フォルダーを書けば、代わりにそこから読む（ネットワークの設定が変わって、heika がまだ追いついていないときなど）。`custom` には、`network.resources` と、`network.nemesisHash`（Nemesis のブロックのハッシュ）か `network.nemesisSeed`（Nemesis の seed フォルダー）が要る。`nemesisSeed` を書くと、DB が空ならピアから取らずにそこの Nemesis から始め、住所録のノードにつながらなくても先端の段階に進む。新しいネットワークの最初のノードに使う（[nemesis.md](nemesis.md)）。ただし、同じチェーンのピアが1つもいないあいだはハーベストしないので、ブロックができ始めるのは2台目がつながってから
 - `dataDirectory`: ブロックと状態をしまうフォルダー
 - `certificates.directory`: `tls.crt`（ノードの証明書と CA の証明書の鎖）と `tls.key`（ノードの鍵）のあるフォルダー。`heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとほかのノードに嫌われるので、いつも同じ証明書を使う
 - `seed`: 住所録が空か、どこにもつながらないときに、最初につなぐノード（`ホスト:ポート`）。そのノードからほかのノードの一覧をもらい、住所録に足していく

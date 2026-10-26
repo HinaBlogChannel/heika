@@ -61,6 +61,15 @@ pub enum Source {
         proof_peers: Vec<ClientConnection>,
         finalized: u64,
     },
+    /// 手元にあるブロック（Nemesis の seed など）。高さの順に。しまってあるブロックと同じに確かめて実行し、しまう
+    Local { blocks: Vec<Block> },
+}
+
+/// 読むスレッドが、ブロックをどこから読むか
+enum Reader {
+    Stored,
+    Peers(Discovered),
+    Local(Vec<Block>),
 }
 
 /// `db` の実行した高さから、`source` のブロックを、確定の高さ（`to` があればそこまで）まで実行して書く。`keep` なら
@@ -135,8 +144,12 @@ pub fn execute(
         executor.remember_transactions(block)?;
     }
     let fetching = matches!(source, Source::Peers { .. });
-    let (peer, proof_job, last) = match source {
-        Source::Stored => (None, None, db.blocks_tip()?),
+    let (reader, proof_job, last) = match source {
+        Source::Stored => (Reader::Stored, None, db.blocks_tip()?),
+        Source::Local { blocks } => {
+            let last = blocks.last().map_or(0, |block| block.height);
+            (Reader::Local(blocks), None, last)
+        }
         Source::Peers {
             discovered,
             mut proof_peers,
@@ -152,7 +165,7 @@ pub fn execute(
                 .and_then(|peer| peer.finalization_statistics().ok())
                 .map(|statistics| statistics.round.epoch);
             (
-                Some(discovered),
+                Reader::Peers(discovered),
                 current.map(|current| (proof_peers, current)),
                 finalized,
             )
@@ -254,11 +267,19 @@ pub fn execute(
             let (vrf_sender, vrf_jobs) = mpsc::sync_channel::<VrfJob>(256);
             let db = &db;
             let vrf_failure = &vrf_failure;
-            let fetching = peer.is_some();
-            let reader = scope.spawn(move || match peer {
-                None => read_stored(db, start, target, &block_sender),
-                Some(found) => {
+            let fetching = matches!(reader, Reader::Peers(_));
+            let reader = scope.spawn(move || match reader {
+                Reader::Stored => read_stored(db, start, target, &block_sender),
+                Reader::Peers(found) => {
                     fetch::fetch(found, context, start_tip, target, &block_sender);
+                }
+                Reader::Local(blocks) => {
+                    for block in blocks.into_iter().filter(|block| block.height > start) {
+                        let bytes = block.as_bytes().to_vec();
+                        if block_sender.send(Ok((block, Some(bytes)))).is_err() {
+                            break;
+                        }
+                    }
                 }
             });
             let proof_fetcher = proof_job.map(|(peers, epochs)| {

@@ -675,6 +675,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         let (registrations, registered) = mpsc::channel::<(PeerId, Sender<Request>)>();
         // 次に未承認のトランザクションを頼むピアを選ぶための、前に頼んだピア
         let mut pull_from: Option<PeerId> = None;
+        let mut partial_from: Option<PeerId> = None;
         println!("高さ {} から先端を追います", chain.height());
         let result = (|| -> Result<Outcome, NodeError> {
             for event in &inbox {
@@ -695,8 +696,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                             }
                             mempool.lock().prune(network_now(parameters));
                             partials.lock().prune(network_now(parameters));
-                            // catapult と同じく、ピアを順に1つずつ選んで、知らない未承認のトランザクションと、
-                            // 連署を待つものを頼む
+                            // catapult と同じく、ピアを順に1つずつ選んで、知らない未承認のトランザクションを頼む
                             pull_from = next_peer(&senders, pull_from);
                             if let Some(peer) = pull_from {
                                 let request = {
@@ -708,8 +708,20 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     }
                                 };
                                 let _ = senders[&peer].send(request);
+                            }
+                            // 連署を待つものは、Api のロールのピアにだけ順に頼む。catapult は partialtransaction 拡張を
+                            // Api のノードにだけ入れ、入れていないノードは知らない要求として接続を切る
+                            let api = peers.with_roles(NodeRoles::API);
+                            partial_from = api
+                                .iter()
+                                .find(|id| Some(**id) > partial_from)
+                                .or(api.first())
+                                .copied();
+                            if let Some(peer) = partial_from
+                                && let Some(sender) = senders.get(&peer)
+                            {
                                 let known = partials.lock().short_hash_pairs();
-                                let _ = senders[&peer].send(Request::PullPartial {
+                                let _ = sender.send(Request::PullPartial {
                                     min_deadline: network_now(parameters),
                                     known,
                                 });
@@ -854,8 +866,11 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     continue;
                                 }
                                 let body = Arc::new(body);
-                                for (id, sender) in &senders {
-                                    if Some(*id) != from {
+                                // 頼むときと同じく、Api のロールのピアにだけ押し付ける
+                                for id in peers.with_roles(NodeRoles::API) {
+                                    if Some(id) != from
+                                        && let Some(sender) = senders.get(&id)
+                                    {
                                         let _ = sender.send(Request::Push {
                                             packet_type,
                                             body: Arc::clone(&body),

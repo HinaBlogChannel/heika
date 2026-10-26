@@ -73,6 +73,26 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let Some(proof) = proof else {
             return Ok(());
         };
+        self.accept_proof(Some(peer), epoch, proof).await
+    }
+
+    /// 自分で投票を数えて組んだ証明。ピアの証明と同じに確かめてしまう。catapult も、自分で組んだ証明をしまって
+    /// 確定を進めるので、catapult のいないネットワークでもエポックが進む
+    pub(super) async fn on_own_proof(
+        &mut self,
+        epoch: u32,
+        proof: Vec<u8>,
+    ) -> Result<(), ChainError> {
+        self.accept_proof(None, epoch, proof).await
+    }
+
+    /// 証明を確かめ、確定より先なら、しまって確定を上げる。`peer` はくれたピア（自分で組んだものなら `None`）
+    async fn accept_proof(
+        &mut self,
+        peer: Option<PeerId>,
+        epoch: u32,
+        proof: Vec<u8>,
+    ) -> Result<(), ChainError> {
         let voters = VotingSet::decode(
             &self
                 .store
@@ -89,10 +109,15 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         ) {
             Ok(header) => header,
             Err(error) => {
-                self.drop_peer(
-                    peer,
-                    format!("ピア {} の証明が通らないので外します: {error}", peer.0),
-                );
+                match peer {
+                    Some(peer) => self.drop_peer(
+                        peer,
+                        format!("ピア {} の証明が通らないので外します: {error}", peer.0),
+                    ),
+                    None => self.progress(format!(
+                        "自分で数えたエポック {epoch} の証明が通りません: {error}"
+                    )),
+                }
                 return Ok(());
             }
         };
@@ -104,7 +129,9 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             .into());
         }
         if header.round <= self.finalized.round {
-            if header.round.epoch < self.finalized.round.epoch {
+            if header.round.epoch < self.finalized.round.epoch
+                && let Some(peer) = peer
+            {
                 self.store_earlier(peer, epoch, &proof, &header).await?;
             }
             return Ok(());
@@ -112,12 +139,20 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         if header.height <= self.tip.height
             && block_at(self.store, header.height).await?.hash() != header.hash
         {
-            self.progress(format!(
-                "確かめた証明が指す高さ {} のブロックが、自分の枝のものと違います。ピア {} と分かれ目を探します",
-                header.height, peer.0
-            ));
-            if matches!(self.sync, Sync::Idle) {
-                self.compare(peer);
+            match peer {
+                Some(peer) => {
+                    self.progress(format!(
+                        "確かめた証明が指す高さ {} のブロックが、自分の枝のものと違います。ピア {} と分かれ目を探します",
+                        header.height, peer.0
+                    ));
+                    if matches!(self.sync, Sync::Idle) {
+                        self.compare(peer);
+                    }
+                }
+                None => self.progress(format!(
+                    "自分で数えた証明が指す高さ {} のブロックが、自分の枝のものと違います",
+                    header.height
+                )),
             }
             return Ok(());
         }

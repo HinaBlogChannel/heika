@@ -370,7 +370,7 @@ pub struct Executor {
 pub struct Produced {
     pub state_hash: Hash256,
     pub receipts_hash: Hash256,
-    /// importance ブロックの足（投票できる数、ハーベストできる数、投票の残高の合計）。importance ブロックでなければ `None`
+    /// importance ブロックと Nemesis の足（投票できる数、ハーベストできる数、投票の残高の合計）。ほかのブロックは `None`
     pub footer: Option<(u32, u64, u64)>,
     pub statement: BlockStatement,
 }
@@ -508,6 +508,10 @@ impl Executor {
         if importance_height != self.last_importance_height {
             self.recalculate_importances(importance_height);
             self.last_importance_height = importance_height;
+        }
+        if nemesis && self.producing {
+            // catapult の nemgen は、Nemesis の足をエポック 0 で、つまりエポックで絞らずに数える
+            self.produced_footer = Some(self.voting_footer(None));
         }
         if block.block_type == BlockType::Importance {
             if self.producing {

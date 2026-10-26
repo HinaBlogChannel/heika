@@ -5,6 +5,7 @@ pub mod chain;
 pub mod env;
 pub mod event;
 pub mod memory;
+pub mod nemesis;
 pub mod produce;
 pub mod store;
 pub mod verify;

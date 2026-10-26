@@ -5,11 +5,7 @@ use super::*;
 impl<S: ChainStore + StateSource> Chain<'_, S> {
     /// ピアの言う確定が自分の確かめたものより新しく、そのエポックの投票者が決まっていれば、証明を頼む
     pub(super) async fn on_finalized(&mut self, peer: PeerId, header: FinalizedBlockHeader) {
-        if header.round <= self.finalized.round
-            || self
-                .proof_requested
-                .is_some_and(|requested| requested >= header.round)
-        {
+        if header.round <= self.finalized.round || self.proof_requested.covers(header.round) {
             return;
         }
         let epoch = header.round.epoch;
@@ -17,7 +13,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         if !matches!(self.store.voters(epoch).await, Ok(Some(_))) {
             return;
         }
-        self.proof_requested = Some(header.round);
+        self.proof_requested.request(peer, header.round);
         self.command(peer, PeerCommand::PullProof { epoch });
     }
 
@@ -25,7 +21,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
     /// 1つ頼む。先端で新しいエポックの証明をしまうと、追いつく段階でしまったものとのあいだが抜けることがある。
     /// 先端の段階を離れていたあいだに終わったエポックは、途中のポイントの証明のままになっている
     pub(super) async fn backfill_proofs(&mut self) -> Result<(), ChainError> {
-        if self.proof_requested.is_some() {
+        if self.proof_requested.is_waiting() {
             return Ok(());
         }
         // ブロックを消した高さまでのエポックは、証明を突き合わせるブロックがないので取らない
@@ -49,7 +45,8 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let Some(peer) = self.peers.keys().next().copied() else {
             return Ok(());
         };
-        self.proof_requested = Some(FinalizationRound { epoch, point: 0 });
+        self.proof_requested
+            .request(peer, FinalizationRound { epoch, point: 0 });
         self.command(peer, PeerCommand::PullProof { epoch });
         Ok(())
     }
@@ -72,7 +69,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         epoch: u32,
         proof: Option<Vec<u8>>,
     ) -> Result<(), ChainError> {
-        self.proof_requested = None;
+        self.proof_requested.answered(peer, epoch);
         let Some(proof) = proof else {
             return Ok(());
         };
@@ -190,5 +187,70 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             partial: stored.is_some(),
         });
         Ok(())
+    }
+}
+
+/// 頼んで返事を待っている証明と、頼んだピア。同じものを何度も頼まない。頼んだピアがそのエポックを返すか、
+/// 頼んだピアが外れたら解く。ほかのピアの遅れた返事や、ほかのピアが外れたことでは解かない
+#[derive(Debug, Default)]
+pub(super) struct ProofRequest(Option<(PeerId, FinalizationRound)>);
+
+impl ProofRequest {
+    fn is_waiting(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// `round` かそれより新しいラウンドを待っているか
+    fn covers(&self, round: FinalizationRound) -> bool {
+        self.0.is_some_and(|(_, requested)| requested >= round)
+    }
+
+    fn request(&mut self, peer: PeerId, round: FinalizationRound) {
+        self.0 = Some((peer, round));
+    }
+
+    fn answered(&mut self, peer: PeerId, epoch: u32) {
+        if self
+            .0
+            .is_some_and(|(requested, round)| requested == peer && round.epoch == epoch)
+        {
+            self.0 = None;
+        }
+    }
+
+    pub(super) fn forget(&mut self, peer: PeerId) {
+        if self.0.is_some_and(|(requested, _)| requested == peer) {
+            self.0 = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_request_is_released_only_by_the_peer_asked() {
+        let round = |epoch| FinalizationRound { epoch, point: 0 };
+        let mut request = ProofRequest::default();
+        request.request(PeerId(1), round(5));
+        assert!(request.covers(round(5)));
+        assert!(!request.covers(round(6)));
+
+        // ほかのピアの返事や、違うエポックの返事、ほかのピアが外れたことでは解かない
+        request.answered(PeerId(2), 5);
+        request.answered(PeerId(1), 4);
+        request.forget(PeerId(2));
+        assert!(request.is_waiting());
+
+        // 頼んだピアが外れたら、ほかのピアに頼み直せる
+        request.forget(PeerId(1));
+        assert!(!request.is_waiting());
+        request.request(PeerId(2), round(5));
+        // 外れたピアの遅れた返事は、頼み直したものを解かない
+        request.answered(PeerId(1), 5);
+        assert!(request.is_waiting());
+        request.answered(PeerId(2), 5);
+        assert!(!request.is_waiting());
     }
 }

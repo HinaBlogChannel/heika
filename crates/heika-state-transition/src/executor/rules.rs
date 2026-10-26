@@ -762,7 +762,20 @@ impl Executor {
         let mut current_block = current.is_none_or(|r| r.descriptor & RESTRICTION_BLOCK != 0);
         let mut failure = None;
         let added: BTreeSet<_> = additions.iter().collect();
-        if deletions.iter().any(|value| added.contains(value)) {
+        // 値の大きさはフラグの種類で決まる。トランザクションの種類と食い違えば、catapult は
+        // AccountRestriction の大きさの確かめで例外を投げて弾く
+        let size = match directional & 0x0007 {
+            0x0001 => 24,
+            0x0002 => 8,
+            _ => 2,
+        };
+        if additions
+            .iter()
+            .chain(&deletions)
+            .any(|value| value.len() != size)
+        {
+            failure = Some("値の大きさがフラグの種類と合わない");
+        } else if deletions.iter().any(|value| added.contains(value)) {
             failure = Some("足すものと外すものが重なる");
         } else if !deletions.is_empty() && !has_any {
             failure = Some("制限がないのに外す");
@@ -1633,6 +1646,12 @@ mod tests {
             set_restriction(executor, owner, 0x4004, false, &[&OPERATION_RESTRICTION]);
         };
         assert_eq!(check(&allowing_operation, 0x4004, &[], &[operation()]), 1);
+
+        // トランザクションの種類とフラグの種類が食い違う。アドレスをモザイクの受け取りの拒否に、など
+        assert_eq!(check(&none, 0x8002, &[other()], &[]), 1);
+        assert_eq!(check(&none, 0x8001, &[5u64.to_le_bytes().to_vec()], &[]), 1);
+        assert_eq!(check(&none, 0xC004, &[other()], &[]), 1);
+        assert_eq!(check(&blocking_other, 0x8002, &[], &[other()]), 1);
     }
 
     #[test]

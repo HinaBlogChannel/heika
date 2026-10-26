@@ -16,4 +16,7 @@ libc = "0.2.190"
 rayon = "1.12.0"
 redb = "4.4.0"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]

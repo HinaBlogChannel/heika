@@ -2779,9 +2779,35 @@ fn free_space(path: &Path) -> std::io::Result<u64> {
     Ok(u64::from(stat.f_bavail) * u64::from(stat.f_frsize))
 }
 
-#[cfg(not(unix))]
+/// `path` のあるボリュームで、このユーザーが使える空き（クォータがあれば、その残り）
+#[cfg(windows)]
+fn free_space(path: &Path) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut available = 0;
+    // SAFETY: path は NUL で終わり、要らない 2 つは NULL でよい
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(available)
+}
+
+/// 空きを調べられないなら、足りているとはみなさない
+#[cfg(not(any(unix, windows)))]
 fn free_space(_path: &Path) -> std::io::Result<u64> {
-    Ok(u64::MAX)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "この環境では空き容量を調べられません。min_free_gigabytes を 0 にしてください",
+    ))
 }
 
 impl StateSource for Db {
@@ -3474,6 +3500,9 @@ mod tests {
             vec![(b"a".to_vec(), Some(b"a1".to_vec())), (b"b".to_vec(), None)]
         );
 
+        // 空きは本当に読めている（読めない環境で、足りているとみなしていない）
+        let free = free_space(&dir.0).unwrap();
+        assert!(0 < free && free < u64::MAX);
         db.set_min_free(u64::MAX);
         assert!(matches!(db.batch(), Err(DbError::LowSpace { .. })));
     }

@@ -1,13 +1,18 @@
 //! 試験的な機能。コマンドの形も、設定の中身も、断りなく変わる。
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Subcommand;
+use heika_chain::nemesis::{NemesisProperties, generate};
+use heika_core::key::PrivateKey;
 use heika_core::network::NetworkIdentifier;
 use heika_node::config::{Manifest, NetworkType};
 use heika_node::harvesters::MemoryHarvesters;
+use heika_state_transition::config::{ChainConfig, load_network_parameters};
 
+use crate::read_secret;
 use crate::wallet::HarvestKeystoreArgs;
 
 #[derive(Subcommand)]
@@ -15,6 +20,20 @@ pub enum ExperimentalCommand {
     /// ピアとしてネットワークに入るノード
     #[command(subcommand)]
     Peer(PeerCommand),
+    /// Nemesis のブロックを作り、ノードが最初に読む seed フォルダーを書く。入力は catapult の
+    /// catapult.tools.nemgen と同じ nemesis.properties で、同じブロックができる。ただし Nemesis の秘密鍵は
+    /// properties に書かず、標準入力で渡す
+    Nemgen {
+        /// ネットワークの設定（config-network.properties など）のある resources フォルダー
+        #[arg(long)]
+        resources: PathBuf,
+        /// nemesis.properties。transactionsDirectory は、今いるフォルダーから数える
+        #[arg(long)]
+        nemesis: PathBuf,
+        /// seed を書くフォルダー。もうあれば書かない
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -81,7 +100,74 @@ pub fn run(command: ExperimentalCommand) -> Result<(), String> {
             let manifest = Manifest::load(&config).map_err(|error| error.to_string())?;
             heika_node::copy::copy_pruned(&manifest, &to).map_err(|error| error.to_string())
         }
+        ExperimentalCommand::Nemgen {
+            resources,
+            nemesis,
+            out,
+        } => nemgen(&resources, &nemesis, &out),
     }
+}
+
+fn nemgen(resources: &Path, nemesis: &Path, out: &Path) -> Result<(), String> {
+    if out.exists() {
+        return Err(format!("{} はもうあります", out.display()));
+    }
+    let text = fs::read_to_string(nemesis)
+        .map_err(|error| format!("{} を読めません: {error}", nemesis.display()))?;
+    let properties = NemesisProperties::parse(&text).map_err(|error| error.to_string())?;
+    let config = ChainConfig::load(resources).map_err(|error| error.to_string())?;
+    let parameters = load_network_parameters(resources).map_err(|error| error.to_string())?;
+    let additional = match &properties.transactions_directory {
+        Some(directory) => read_transactions(Path::new(directory))?,
+        None => Vec::new(),
+    };
+    let signer: PrivateKey = read_secret("Nemesis の秘密鍵", "nemesis.key")?;
+    let built = generate(&properties, config, &parameters, &signer, &additional)
+        .map_err(|error| error.to_string())?;
+    for (path, bytes) in built.seed_files(&properties.generation_hash_seed) {
+        let path = out.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("{} を作れません: {error}", parent.display()))?;
+        }
+        fs::write(&path, bytes)
+            .map_err(|error| format!("{} を書けません: {error}", path.display()))?;
+    }
+    let block = &built.block;
+    let footer = block.importance_footer.as_ref();
+    println!("Nemesis を {} に書きました", out.display());
+    println!("ハッシュ: {}", block.hash());
+    println!(
+        "トランザクション: {} 件（追加 {} 件）",
+        block.transactions().count(),
+        additional.len()
+    );
+    if let Some(footer) = footer {
+        println!(
+            "ハーベストできるアカウント: {}、投票できるアカウント: {}",
+            footer.harvesting_eligible_accounts_count, footer.voting_eligible_accounts_count
+        );
+    }
+    Ok(())
+}
+
+/// 追加のトランザクションを、フォルダーのファイル名の順に読む（nemgen と同じ）。1ファイルに1件
+fn read_transactions(directory: &Path) -> Result<Vec<Vec<u8>>, String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("{} を読めません: {error}", directory.display()))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("{} を読めません: {error}", directory.display()))?;
+        paths.push(entry.path());
+    }
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| {
+            fs::read(path).map_err(|error| format!("{} を読めません: {error}", path.display()))
+        })
+        .collect()
 }
 
 /// SIGINT と SIGTERM で印を立てる。SIGHUP は受けない（nohup で流したものが止まらないように）

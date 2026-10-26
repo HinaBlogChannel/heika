@@ -288,13 +288,18 @@ impl Executor {
 
     /// 今の状態で決まる importance ブロックの足（投票できる数、ハーベストできる数、投票の残高の合計）
     pub(super) fn importance_footer(&self, height: u64) -> (u32, u64, u64) {
-        let finalization = &self.config.finalization;
         let epoch = if height < self.config.total_voting_balance_calculation_fix {
             None
         } else {
-            let grouping = finalization.voting_set_grouping;
+            let grouping = self.config.finalization.voting_set_grouping;
             Some(1 + u64::from(!height.is_multiple_of(grouping)) + height / grouping)
         };
+        self.voting_footer(epoch)
+    }
+
+    /// 足を、`epoch` に投票の鍵を持つアカウントだけで数える。`None` ならエポックで絞らない（catapult のエポック 0）
+    pub(super) fn voting_footer(&self, epoch: Option<u64>) -> (u32, u64, u64) {
+        let finalization = &self.config.finalization;
         let mosaic = self.config.harvesting_mosaic_id;
         let (mut count, mut total) = (0u32, 0u64);
         // 投票の残高の下限は、大口の下限より高いので、大口の中を見れば足りる

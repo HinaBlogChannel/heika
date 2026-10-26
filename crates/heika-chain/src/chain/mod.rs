@@ -307,7 +307,8 @@ pub enum Notice {
         epoch: u32,
         point: u32,
         height: u64,
-        peer: PeerId,
+        /// 証明をくれたピア。自分で投票を数えて組んだものなら `None`
+        peer: Option<PeerId>,
         checkpoints: usize,
         rows: Option<u64>,
         /// 刈り込みに消し残しがあり、次の確定で続きを消す
@@ -406,10 +407,13 @@ impl fmt::Display for Notice {
                 rows,
                 remaining,
             } => {
+                let from = match peer {
+                    Some(peer) => format!("ピア {}", peer.0),
+                    None => "自分で数えたもの".to_owned(),
+                };
                 write!(
                     f,
-                    "エポック {epoch} ポイント {point} の証明を確かめました: 高さ {height} をファイナライズ（ピア {}、消したチェックポイント {checkpoints}",
-                    peer.0
+                    "エポック {epoch} ポイント {point} の証明を確かめました: 高さ {height} をファイナライズ（{from}、消したチェックポイント {checkpoints}"
                 )?;
                 if let Some(rows) = rows {
                     write!(f, "、消した差分 {rows} 行")?;
@@ -909,6 +913,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
                 self.answered(peer);
                 self.on_proof(peer, epoch, proof).await?;
             }
+            ChainEvent::OwnProof { epoch, proof } => self.on_own_proof(epoch, proof).await?,
             ChainEvent::Failed {
                 peer,
                 error,
@@ -1006,7 +1011,7 @@ mod tests {
             epoch: 4082,
             point: 17,
             height: 5_876_316,
-            peer: PeerId(2),
+            peer: Some(PeerId(2)),
             checkpoints: 0,
             rows,
             remaining: false,

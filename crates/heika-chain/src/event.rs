@@ -64,6 +64,8 @@ pub enum ChainEvent {
         peer: PeerId,
         header: FinalizedBlockHeader,
     },
+    /// 自分で投票を数えて組んだ証明（ファイナライズを見ているとき）。ピアの証明と同じに確かめてしまう
+    OwnProof { epoch: u32, proof: Vec<u8> },
     /// 頼んだエポックの証明。まだなければ `None`
     Proof {
         peer: PeerId,

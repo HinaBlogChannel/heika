@@ -2,7 +2,7 @@
 //! 指示を、スレッドとソケットで実際にする。受信箱は1本で、ピアのスレッド、つなぎに行くスレッド、時刻のスレッド、
 //! 待ち受けが、そこに出来事を入れる。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -530,7 +530,16 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                         keys: Box::new(keys),
                         data_directory: spec.data_directory.clone(),
                     };
-                    (Some(voting), read_status(&spec.data_directory)?)
+                    // 投票し直すなら、前に書いた投票状況は読まず、最後の確定の次のポイントから始める（catapult と同じ）
+                    let status = if setup.config.finalization.enable_revote_on_boot {
+                        println!(
+                            "enableRevoteOnBoot なので、最後の確定の次のポイントで投票し直します"
+                        );
+                        None
+                    } else {
+                        read_status(&spec.data_directory)?
+                    };
+                    (Some(voting), status)
                 }
                 None => (None, None),
             };
@@ -552,6 +561,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     };
     // 次に投票のメッセージを頼むピアを選ぶための、前に頼んだピア
     let mut votes_from: Option<PeerId> = None;
+    // 前の Tick で見た、投票するピア
+    let mut greeted_voters: BTreeSet<PeerId> = BTreeSet::new();
     let mut peers = Peers::new(book, parameters, *identity.key(), spec.peers);
     let announce = spec
         .listen
@@ -740,6 +751,31 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                     let (min, max, known) = observer.request();
                                     let _ = sender.send(Request::PullVotes { min, max, known });
                                 }
+                                // 新しく加わった投票するピアには、手元の今のラウンドのメッセージを押し付ける。heika は
+                                // 自分からつないだピアにしか引けないので、相手が自分につないでいなければ、つながる前に
+                                // 出した投票はそのままでは届かない（catapult は投票するノードのみなにつないで引く）
+                                let fresh: Vec<PeerId> = voting
+                                    .iter()
+                                    .filter(|id| !greeted_voters.contains(id))
+                                    .copied()
+                                    .collect();
+                                greeted_voters = voting.iter().copied().collect();
+                                if !fresh.is_empty() {
+                                    let (min, max, _) = observer.request();
+                                    let body = observer.unknown_to(min, max, &HashSet::new());
+                                    if !body.is_empty() {
+                                        let body = Arc::new(body);
+                                        for id in fresh {
+                                            if let Some(sender) = senders.get(&id) {
+                                                let _ = sender.send(Request::Push {
+                                                    packet_type:
+                                                        packet_type::PUSH_FINALIZATION_MESSAGES,
+                                                    body: Arc::clone(&body),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
                                 let db = store.db();
                                 let status = chain.status();
                                 let voters = |epoch| {
@@ -778,6 +814,13 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                         messages: ticked.outgoing,
                                         except: None,
                                     });
+                                }
+                                // 自分で数えた証明で、中核の確定を進める（catapult のいないネットワークでも進む）
+                                if let Some((epoch, proof)) = ticked.proof {
+                                    pending.push(NodeEvent::Chain(ChainEvent::OwnProof {
+                                        epoch,
+                                        proof,
+                                    }));
                                 }
                             }
                             if let Some(outcome) = now_or_never(chain.handle(ChainEvent::Tick))? {

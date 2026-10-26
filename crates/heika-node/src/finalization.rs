@@ -55,6 +55,8 @@ pub struct Ticked {
     pub notices: Vec<String>,
     /// 自分が作ったメッセージ（投票するピアに配る）
     pub outgoing: Vec<Vec<u8>>,
+    /// 投票を数えて組み、確かめが通った証明（エポックと証明）。中核に渡して確定を進める
+    pub proof: Option<(u32, Vec<u8>)>,
 }
 
 /// 投票を数える（鍵があれば投票もする）
@@ -193,8 +195,8 @@ impl Observer {
         }
         self.poll(view, &mut ticked);
 
-        // 自分の前の確定（まだなければ、始めたときの中核の確定）から進んだら確定する。catapult は自分で組んだ証明を
-        // しまうので、同じ高さを二度確定しない。ここではしまわないので、自分の確定と比べる
+        // 自分の前の確定（まだなければ、始めたときの中核の確定）から進んだら確定する。catapult と同じく、組んだ
+        // 証明は中核に渡してしまう（`Ticked::proof`）。中核が受け入れたかによらず、自分の確定と比べる
         let previous = self
             .observed
             .map_or(self.started_at, |observed| observed.height);
@@ -214,6 +216,9 @@ impl Observer {
                     None => "",
                 }
             ));
+            if matches!(verified, Some(Ok(_))) {
+                ticked.proof = Some((header.round.epoch, done.proof));
+            }
             self.observed = Some(header);
         }
 

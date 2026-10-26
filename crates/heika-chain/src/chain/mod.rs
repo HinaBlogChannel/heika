@@ -660,8 +660,8 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     sync: Sync,
     /// 確かめた一番新しいファイナライズ。そこより下は分かれていない
     finalized: FinalizedBlockHeader,
-    /// 頼んで返事を待っている証明のラウンド。同じものを何度も頼まない
-    proof_requested: Option<FinalizationRound>,
+    /// 頼んで返事を待っている証明
+    proof_requested: finality::ProofRequest,
     /// ここより前のエポックの証明は、しまってあるか、取り直しを一度頼んだ。抜けを探すのはここから
     backfilled: u32,
     /// 刈り込むなら、残す差分
@@ -715,7 +715,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
         };
         Ok(Self {
             finalized,
-            proof_requested: None,
+            proof_requested: finality::ProofRequest::default(),
             backfilled: 1,
             store,
             env,
@@ -980,6 +980,8 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
         if self.sync.peer() == Some(id) {
             self.sync = Sync::Idle;
         }
+        // 頼んだ証明は返ってこないので、次の Tick でほかのピアに頼み直す
+        self.proof_requested.forget(id);
     }
 
     fn notify(&mut self, notice: Notice) {

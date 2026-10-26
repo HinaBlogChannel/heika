@@ -172,6 +172,9 @@ pub struct FinalizationConfig {
     pub step_duration: u64,
     /// `prevoteBlocksMultiple`。prevote の最後の高さを、この倍数にそろえる
     pub prevote_blocks_multiple: u64,
+    /// `enableRevoteOnBoot`。起動したときに、前に書いた投票状況を使わず、最後の確定の次のポイントで投票し直す。
+    /// 投票者がそろって起動し直すと、前のラウンドのメッセージを誰も持たずに止まるのを防ぐ（プライベートなネットワーク用）
+    pub enable_revote_on_boot: bool,
     /// このエポックから、`ineligible_voters` を投票者から外す
     pub treasury_reissuance_epoch: u32,
     pub ineligible_voters: Vec<[u8; 24]>,
@@ -460,6 +463,17 @@ impl ChainConfig {
                 step_duration: finalization.milliseconds("finalization", "stepDuration")?,
                 prevote_blocks_multiple: finalization
                     .number("finalization", "prevoteBlocksMultiple")?,
+                enable_revote_on_boot: match finalization.get("finalization", "enableRevoteOnBoot")
+                {
+                    // catapult の設定には必ずあるが、なければ catapult の既定と同じく false
+                    Err(_) | Ok("false") => false,
+                    Ok("true") => true,
+                    Ok(other) => {
+                        return Err(ConfigError(format!(
+                            "[finalization] enableRevoteOnBoot が true か false ではありません: {other}"
+                        )));
+                    }
+                },
                 treasury_reissuance_epoch: finalization
                     .number("finalization", "treasuryReissuanceEpoch")?
                     .try_into()

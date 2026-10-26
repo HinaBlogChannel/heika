@@ -110,6 +110,7 @@ pub(super) fn config() -> ChainConfig {
             max_hashes_per_point: 256,
             step_duration: 300_000,
             prevote_blocks_multiple: 4,
+            enable_revote_on_boot: false,
             treasury_reissuance_epoch: 481,
             ineligible_voters: vec![
                 bytes("68019560FCAFA4088D09898B7C13283D636C7E3A9FB502E0"),

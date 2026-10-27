@@ -115,7 +115,14 @@ pub struct Mempool {
     per_signer: HashMap<PublicKey, usize>,
     bytes: usize,
     next_order: u64,
+    /// ブロックを作ってみて弾いたもの → 期限。`/transactionStatus` で `failed` と答える。期限が過ぎたら忘れる
+    rejected: HashMap<Hash256, u64>,
+    /// 弾いたものの期限の早い順。数が [`MAX_REJECTED`] を超えたら、期限の早いものから忘れる
+    rejected_by_deadline: BTreeSet<(u64, [u8; 32])>,
 }
+
+/// 弾いたものとして覚えておく数の上限
+const MAX_REJECTED: usize = 1000;
 
 impl Mempool {
     pub fn new(parameters: &'static NetworkParameters, config: Config) -> Self {
@@ -129,6 +136,8 @@ impl Mempool {
             per_signer: HashMap::new(),
             bytes: 0,
             next_order: 0,
+            rejected: HashMap::new(),
+            rejected_by_deadline: BTreeSet::new(),
         }
     }
 
@@ -225,6 +234,10 @@ impl Mempool {
             self.remove(&hash);
         }
         self.insert(hash, candidate, transaction.deadline, signer);
+        // 前に弾いたものでも、受け付け直したら弾いたことは忘れる（状態が変われば通りうる）
+        if let Some(deadline) = self.rejected.remove(&hash) {
+            self.rejected_by_deadline.remove(&(deadline, hash.0));
+        }
         Ok(hash)
     }
 
@@ -319,6 +332,36 @@ impl Mempool {
         for hash in expired {
             self.remove(&hash);
         }
+        while let Some(&(deadline, hash)) = self.rejected_by_deadline.first() {
+            if deadline >= now {
+                break;
+            }
+            self.rejected_by_deadline.pop_first();
+            self.rejected.remove(&Hash256(hash));
+        }
+    }
+
+    /// ブロックを作ってみて弾かれたので外し、期限まで弾いたものとして覚える。持っていたら真。
+    /// catapult は状態に依る確かめを未承認のうちにするので、そこで弾いたものを `failed` と答える。heika は作るときに
+    /// 確かめるので、ここで覚えたものを同じく答える
+    pub fn reject(&mut self, hash: &Hash256) -> bool {
+        let Some(deadline) = self.entries.get(hash).map(|entry| entry.deadline) else {
+            return false;
+        };
+        self.remove(hash);
+        if self.rejected.len() >= MAX_REJECTED
+            && let Some((_, oldest)) = self.rejected_by_deadline.pop_first()
+        {
+            self.rejected.remove(&Hash256(oldest));
+        }
+        self.rejected.insert(*hash, deadline);
+        self.rejected_by_deadline.insert((deadline, hash.0));
+        true
+    }
+
+    /// ブロックを作ってみて弾いたものなら、その期限
+    pub fn rejected(&self, hash: &Hash256) -> Option<u64> {
+        self.rejected.get(hash).copied()
     }
 
     /// 時刻 `timestamp` のブロックに入れられる候補。選ぶのは [`heika_chain::produce::choose`]
@@ -425,6 +468,28 @@ mod tests {
         assert!(!pool.remove(&hash));
         assert!(pool.is_empty());
         assert_eq!(pool.bytes(), 0);
+    }
+
+    #[test]
+    fn remembers_rejected_ones_until_their_deadline() {
+        let mut pool = mempool(Config::default());
+        let bytes = transfer(1, 0, NOW + HOUR, b"");
+        let hash = pool.add(bytes.clone(), NOW, 2).unwrap();
+        assert_eq!(pool.rejected(&hash), None);
+        assert!(pool.reject(&hash));
+        // 外したうえで、期限まで弾いたものとして答える
+        assert!(!pool.contains(&hash));
+        assert_eq!(pool.rejected(&hash), Some(NOW + HOUR));
+        assert!(!pool.reject(&hash));
+        // 受け付け直したら忘れる
+        pool.add(bytes, NOW, 2).unwrap();
+        assert_eq!(pool.rejected(&hash), None);
+        assert!(pool.reject(&hash));
+        // 期限が過ぎたら忘れる
+        pool.prune(NOW + HOUR);
+        assert_eq!(pool.rejected(&hash), Some(NOW + HOUR));
+        pool.prune(NOW + HOUR + 1);
+        assert_eq!(pool.rejected(&hash), None);
     }
 
     #[test]

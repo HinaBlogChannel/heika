@@ -57,6 +57,9 @@ use crate::recent::SharedRecent;
 /// 手数料の倍率を見る、直近のブロックの数。catapult の REST の `numBlocksTransactionFeeStats` の既定値
 const FEE_STATS_BLOCKS: u64 = 300;
 
+/// ブロックを作ってみて弾いたトランザクションの、`/transactionStatus` のコード
+const REJECTED_CODE: &str = "Failure_Heika_Rejected_When_Harvesting";
+
 /// アグリゲートのトランザクションの種類（完了と保留）
 const AGGREGATE_TYPES: [u16; 2] = [0x4141, 0x4241];
 
@@ -980,6 +983,17 @@ impl heika_api::Reader for DbReader {
         };
         if let Some(deadline) = self.mempool.lock().deadline(hash) {
             return Ok(Some(status("unconfirmed", deadline, 0)));
+        }
+        // ブロックを作ってみて、残高など状態に依ることで弾いたもの。catapult は理由ごとのコードを返すが、heika の
+        // 実行の誤りは理由のコードを持たないので、1つのコードで答える（理由はノードのログに出る）
+        if let Some(deadline) = self.mempool.lock().rejected(hash) {
+            return Ok(Some(TransactionStatus {
+                group: "failed".to_owned(),
+                code: Some(REJECTED_CODE.to_owned()),
+                hash: hash.to_string(),
+                deadline: Some(deadline.to_string()),
+                height: None,
+            }));
         }
         if let Some(deadline) = self.partials.lock().deadline(hash) {
             return Ok(Some(status("partial", deadline, 0)));

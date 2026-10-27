@@ -4,6 +4,8 @@ pub mod address;
 mod base32;
 mod ed25519;
 pub mod hash;
+#[cfg(feature = "hazmat")]
+pub mod hazmat;
 mod hex;
 pub mod key;
 pub mod merkle;

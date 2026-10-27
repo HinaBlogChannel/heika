@@ -124,6 +124,7 @@ jobs:
             examples/sunboru-kusa/discover
             examples/instant-rebate
             examples/intent-dex
+            examples/adaptor-swap
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -150,6 +151,12 @@ jobs:
           cargo test --locked
       - name: 預けない交換を確かめる
         working-directory: examples/intent-dex
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: 原子的な交換の Symbol 側を確かめる
+        working-directory: examples/adaptor-swap
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

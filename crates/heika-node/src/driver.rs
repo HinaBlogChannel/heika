@@ -1048,7 +1048,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 chain.height() + 1,
                             ),
                             Action::Dropped(hash) => {
-                                mempool.lock().remove(&hash);
+                                mempool.lock().reject(&hash);
                             }
                         }
                     }

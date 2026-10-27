@@ -45,6 +45,8 @@ jobs:
       - run: cargo test --locked
       - name: heika-cert を feature つきのモジュールも含めて
         run: cargo test -p heika-cert --all-features --locked
+      - name: heika-core を hazmat つきで
+        run: cargo test -p heika-core --features hazmat --locked
 
   # Windows でだけ使うコードと、Unix でだけ読み込むものの取り違えを見つける
   windows:

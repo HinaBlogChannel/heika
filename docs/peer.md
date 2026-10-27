@@ -93,7 +93,7 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 
 `--config` の `dataDirectory` の DB を、その設定の `storage.mode` の残し方で刈り込んで、`--to` のフォルダーに写す。たとえばアーカイブのデータを指し、`storage.mode` だけを `light` にした設定を渡すと、ライトの写しができる。`archive` なら全部写すので、詰め直しになる。ノードを止めてから使い（動いていれば DB を開けずに止まる）、`--to` に DB がもうあれば写さない。できた写しを `dataDirectory` に置き換えて起動する。
 
-`storage.partialState` は、アカウントの表を全部はメモリに持たずに要るものだけを読むかで、`light` ではいつも真、ほかは書かなければ真。`storage.cache.stateMegabytes`（既定 64）と `storage.cache.databaseMegabytes`（既定 256）で、読んだ状態と DB のキャッシュの量を決める。
+`storage.partialState` は、アカウントの表を全部はメモリに持たずに要るものだけを読むかで、`light` ではいつも真、ほかは書かなければ真。`storage.cache.stateMegabytes`（既定 64）と `storage.cache.databaseMegabytes`（既定 256）で、読んだ状態と DB のキャッシュの量を決める。追いつく段階では DB のキャッシュは `storage.cache.catchUpMegabytes`（既定 16384）までにする。大きいほど速く書けるが、アーカイブでは DB が大きいので、ほぼこの量までメモリを使う。メモリが少ないマシンでは下げる。
 
 `storage.search` に名前を並べると、REST の検索のための検索表を DB に作る（たとえば `search: [metadata]`）。書かなければ作らないので、ライトの軽さはそのまま。今の状態の行を別の切り口で並べ直しただけのもので、ブロックと同じ書き込みで直し、巻き戻しでは状態の差分から戻す。途中で足せば、起動したときに今の状態の行から作る（メインネットのメタデータ 12 万件なら数秒）。外せば、その行を消す（詰め直すなら `peer copy`）。`storage.mode: archive` なら、検索表から消えたキーも残し、`?height=` 付きで昔の高さでも検索できる（候補を両方の表から取り、その高さの状態の行で確かめる）。アーカイブで途中から足せば、状態の差分の前の値から作る。ほかの残し方では、今の状態だけを検索できる。
 

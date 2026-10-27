@@ -2806,7 +2806,7 @@ fn free_space(path: &Path) -> std::io::Result<u64> {
 fn free_space(_path: &Path) -> std::io::Result<u64> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "この環境では空き容量を調べられません。min_free_gigabytes を 0 にしてください",
+        "この環境では空き容量を調べられません。minFree を 0 にしてください",
     ))
 }
 

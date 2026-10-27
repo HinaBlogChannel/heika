@@ -252,11 +252,8 @@ fn catch_up_if_behind(
     stopping: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), NodeError> {
     let spec = setup.spec;
-    let mut db = Db::open_with_cache(
-        &spec.data_directory,
-        spec.storage.cache.catch_up_megabytes << 20,
-    )?;
-    db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
+    let mut db = Db::open_with_cache(&spec.data_directory, spec.storage.cache.catch_up.as_usize())?;
+    db.set_min_free(spec.min_free.0);
     check_storage_mode(&db, spec.storage.mode)?;
     // トランザクションの索引を作るのに要る。別のネットワークの DB なら、ここで止まる
     db.set_transaction_network(TransactionNetwork {
@@ -457,13 +454,10 @@ fn catch_up_if_behind(
 fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Outcome, NodeError> {
     let spec = setup.spec;
     let (parameters, identity) = (setup.parameters, &setup.identity);
-    let mut db = Db::open_with_cache(
-        &spec.data_directory,
-        spec.storage.cache.database_megabytes << 20,
-    )?;
-    db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
+    let mut db = Db::open_with_cache(&spec.data_directory, spec.storage.cache.database.as_usize())?;
+    db.set_min_free(spec.min_free.0);
     let book = setup.book(&db)?;
-    let store = CachedStore::new(Arc::new(db), spec.storage.cache.state_megabytes << 20);
+    let store = CachedStore::new(Arc::new(db), spec.storage.cache.state.as_usize());
     let mut chain = now_or_never(Chain::new(
         &store,
         &SystemEnv,

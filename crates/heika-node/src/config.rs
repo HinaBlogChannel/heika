@@ -104,9 +104,9 @@ pub struct NodeConfig {
     /// 何を残すか、どれだけメモリに持つか
     #[serde(default)]
     pub storage: Storage,
-    /// ディスクの空きがこれより少なければ、書く前に止める（GB）
-    #[serde(default = "default_min_free_gigabytes")]
-    pub min_free_gigabytes: u64,
+    /// ディスクの空きがこれより少なければ、書く前に止める
+    #[serde(default = "default_min_free")]
+    pub min_free: ByteSize,
     /// 接続を受ける。なければ、自分からつなぐだけ
     #[serde(default)]
     pub listen: Option<Listen>,
@@ -329,24 +329,24 @@ impl Storage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Cache {
-    /// 要るものだけを読むときに、読んだ状態を覚えておく量（MB）
-    #[serde(default = "default_state_megabytes")]
-    pub state_megabytes: usize,
-    /// 先端の段階で DB を開くときの、DB のキャッシュの上限（MB）
-    #[serde(default = "default_database_megabytes")]
-    pub database_megabytes: usize,
-    /// 追いつく段階で DB を開くときの、DB のキャッシュの上限（MB）。大きいほど速く書けるが、アーカイブでは
+    /// 要るものだけを読むときに、読んだ状態を覚えておく量
+    #[serde(default = "default_state_cache")]
+    pub state: ByteSize,
+    /// 先端の段階で DB を開くときの、DB のキャッシュの上限
+    #[serde(default = "default_database_cache")]
+    pub database: ByteSize,
+    /// 追いつく段階で DB を開くときの、DB のキャッシュの上限。大きいほど速く書けるが、アーカイブでは
     /// DB が大きいので、ほぼこの量までメモリを使う
-    #[serde(default = "default_catch_up_megabytes")]
-    pub catch_up_megabytes: usize,
+    #[serde(default = "default_catch_up_cache")]
+    pub catch_up: ByteSize,
 }
 
 impl Default for Cache {
     fn default() -> Self {
         Self {
-            state_megabytes: default_state_megabytes(),
-            database_megabytes: default_database_megabytes(),
-            catch_up_megabytes: default_catch_up_megabytes(),
+            state: default_state_cache(),
+            database: default_database_cache(),
+            catch_up: default_catch_up_cache(),
         }
     }
 }
@@ -413,20 +413,83 @@ fn default_peers() -> usize {
     8
 }
 
-fn default_min_free_gigabytes() -> u64 {
-    10
+fn default_min_free() -> ByteSize {
+    ByteSize(10_000_000_000)
 }
 
-fn default_state_megabytes() -> usize {
-    64
+fn default_state_cache() -> ByteSize {
+    ByteSize(64 << 20)
 }
 
-fn default_database_megabytes() -> usize {
-    256
+fn default_database_cache() -> ByteSize {
+    ByteSize(256 << 20)
 }
 
-fn default_catch_up_megabytes() -> usize {
-    heika_store_redb::DEFAULT_CACHE_SIZE >> 20
+fn default_catch_up_cache() -> ByteSize {
+    ByteSize(heika_store_redb::DEFAULT_CACHE_SIZE as u64)
+}
+
+/// 大きさ（バイト）。Kubernetes の quantity のように、整数に単位を続けて書く（`64Mi`、`16Gi`、`10G`）。
+/// `Ki` `Mi` `Gi` `Ti` は 1024 の冪、`k` `M` `G` `T` は 1000 の冪。単位がなければバイト
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteSize(pub u64);
+
+impl ByteSize {
+    /// 単位の名前と、その倍率
+    const UNITS: [(&'static str, u64); 8] = [
+        ("Ki", 1 << 10),
+        ("Mi", 1 << 20),
+        ("Gi", 1 << 30),
+        ("Ti", 1 << 40),
+        ("k", 1_000),
+        ("M", 1_000_000),
+        ("G", 1_000_000_000),
+        ("T", 1_000_000_000_000),
+    ];
+
+    /// `usize` に収まらなければ `usize::MAX`（キャッシュの上限に渡すため）
+    pub fn as_usize(self) -> usize {
+        usize::try_from(self.0).unwrap_or(usize::MAX)
+    }
+}
+
+impl std::str::FromStr for ByteSize {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("大きさ {text:?} を読めません（たとえば 64Mi、16Gi、10G）");
+        let split = text
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(split);
+        let number: u64 = number.parse().map_err(|_| invalid())?;
+        let scale = if unit.is_empty() {
+            1
+        } else {
+            Self::UNITS
+                .iter()
+                .find(|(name, _)| *name == unit)
+                .ok_or_else(invalid)?
+                .1
+        };
+        number.checked_mul(scale).map(Self).ok_or_else(invalid)
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// YAML では、単位のない数は数として、単位があれば文字列として来る
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(u64),
+            Text(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Number(bytes) => Ok(Self(bytes)),
+            Raw::Text(text) => text.parse().map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 /// 設定を読めなかったわけ
@@ -670,11 +733,23 @@ spec:
         assert!(!storage.partial_state());
         assert_eq!(storage.searches(), Searches::NONE);
         // 追いつく段階のキャッシュは、書かなければ今までどおり 16 GiB
-        assert_eq!(storage.cache.catch_up_megabytes, 16 << 10);
-        let small = format!("{MINIMAL}  storage:\n    cache:\n      catchUpMegabytes: 2048\n");
+        assert_eq!(storage.cache.catch_up, ByteSize(16 << 30));
+        let small = format!("{MINIMAL}  storage:\n    cache:\n      catchUp: 1Gi\n");
         let cache = Manifest::parse(&small).unwrap().spec.storage.cache;
-        assert_eq!(cache.catch_up_megabytes, 2048);
-        assert_eq!(cache.database_megabytes, 256);
+        assert_eq!(cache.catch_up, ByteSize(1 << 30));
+        assert_eq!(cache.database, ByteSize(256 << 20));
+        // 大きさは単位つきの文字列か、バイトの数で書く
+        let min_free = |value: &str| {
+            Manifest::parse(&format!("{MINIMAL}  minFree: {value}\n")).map(|m| m.spec.min_free)
+        };
+        assert_eq!(min_free("10G").unwrap(), ByteSize(10_000_000_000));
+        assert_eq!(min_free("512Ki").unwrap(), ByteSize(512 << 10));
+        assert_eq!(min_free("0").unwrap(), ByteSize(0));
+        for invalid in ["10GB", "1.5Gi", "Gi", "-1", "99999999999Ti"] {
+            assert!(min_free(invalid).is_err(), "{invalid}");
+        }
+        // 前の名前は読まない
+        assert!(Manifest::parse(&format!("{MINIMAL}  minFreeGigabytes: 10\n")).is_err());
         // 検索表は名前で選ぶ。知らない名前は読めない
         let search = format!("{MINIMAL}  storage:\n    search: [metadata]\n");
         let storage = Manifest::parse(&search).unwrap().spec.storage;

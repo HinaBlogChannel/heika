@@ -22,3 +22,5 @@ default = ["getrandom"]
 getrandom = ["dep:getrandom"]
 # ブラウザ（wasm32-unknown-unknown）で getrandom を使うときに、Web Crypto の乱数を使う。getrandom の版を合わせなくて済むように出しておく
 wasm_js = ["getrandom", "getrandom/wasm_js"]
+# 使い方を誤ると鍵が漏れる、Ed25519 の中の部品（hazmat）。アダプター署名のような、ふつうでない署名を組むときに使う
+hazmat = []

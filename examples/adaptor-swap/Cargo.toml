@@ -1,0 +1,22 @@
+[package]
+name = "adaptor-swap"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "原子的な交換の Symbol 側。連署を出すと、相手に秘密がばれる仕掛けをアダプター署名で作る"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+# アダプター署名は、heika の署名と検証と同じ部品（hazmat）で組む
+heika-core = { path = "../../crates/heika-core", features = ["hazmat"] }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+serde_json = "1.0.151"
+# REST はこの PC の中のノードだけに聞くので、TLS は使わない
+ureq = { version = "3.4.2", default-features = false }
+zeroize = "1.9.1"

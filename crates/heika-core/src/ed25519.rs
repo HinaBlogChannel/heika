@@ -91,7 +91,7 @@ pub fn verify(public_key: &[u8; 32], message: &[&[u8]], signature: &[u8; 64]) ->
 }
 
 /// h = H(R || A || M)。A は受け取ったバイト列のまま使う。
-fn challenge(encoded_r: &[u8; 32], public_key: &[u8; 32], message: &[&[u8]]) -> Scalar {
+pub(crate) fn challenge(encoded_r: &[u8; 32], public_key: &[u8; 32], message: &[&[u8]]) -> Scalar {
     let parts = [&encoded_r[..], &public_key[..]];
     Scalar::from_bytes_mod_order_wide(&sha512(parts.into_iter().chain(message.iter().copied())))
 }

@@ -335,6 +335,10 @@ pub struct Cache {
     /// 先端の段階で DB を開くときの、DB のキャッシュの上限（MB）
     #[serde(default = "default_database_megabytes")]
     pub database_megabytes: usize,
+    /// 追いつく段階で DB を開くときの、DB のキャッシュの上限（MB）。大きいほど速く書けるが、アーカイブでは
+    /// DB が大きいので、ほぼこの量までメモリを使う
+    #[serde(default = "default_catch_up_megabytes")]
+    pub catch_up_megabytes: usize,
 }
 
 impl Default for Cache {
@@ -342,6 +346,7 @@ impl Default for Cache {
         Self {
             state_megabytes: default_state_megabytes(),
             database_megabytes: default_database_megabytes(),
+            catch_up_megabytes: default_catch_up_megabytes(),
         }
     }
 }
@@ -418,6 +423,10 @@ fn default_state_megabytes() -> usize {
 
 fn default_database_megabytes() -> usize {
     256
+}
+
+fn default_catch_up_megabytes() -> usize {
+    heika_store_redb::DEFAULT_CACHE_SIZE >> 20
 }
 
 /// 設定を読めなかったわけ
@@ -660,6 +669,12 @@ spec:
         assert_eq!(storage.retention().state, None);
         assert!(!storage.partial_state());
         assert_eq!(storage.searches(), Searches::NONE);
+        // 追いつく段階のキャッシュは、書かなければ今までどおり 16 GiB
+        assert_eq!(storage.cache.catch_up_megabytes, 16 << 10);
+        let small = format!("{MINIMAL}  storage:\n    cache:\n      catchUpMegabytes: 2048\n");
+        let cache = Manifest::parse(&small).unwrap().spec.storage.cache;
+        assert_eq!(cache.catch_up_megabytes, 2048);
+        assert_eq!(cache.database_megabytes, 256);
         // 検索表は名前で選ぶ。知らない名前は読めない
         let search = format!("{MINIMAL}  storage:\n    search: [metadata]\n");
         let storage = Manifest::parse(&search).unwrap().spec.storage;

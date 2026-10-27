@@ -252,7 +252,10 @@ fn catch_up_if_behind(
     stopping: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), NodeError> {
     let spec = setup.spec;
-    let mut db = Db::open(&spec.data_directory)?;
+    let mut db = Db::open_with_cache(
+        &spec.data_directory,
+        spec.storage.cache.catch_up_megabytes << 20,
+    )?;
     db.set_min_free(spec.min_free_gigabytes * 1_000_000_000);
     check_storage_mode(&db, spec.storage.mode)?;
     // トランザクションの索引を作るのに要る。別のネットワークの DB なら、ここで止まる

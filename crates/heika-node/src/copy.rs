@@ -1,7 +1,7 @@
 //! 止めたノードの DB を、設定の残し方（`storage.mode`）で刈り込んで、新しいファイルに写す。
 //!
 //! アーカイブをライトにするとき、その場で刈り込むと、消すものが多くて書き直しも多く、ファイルも縮まない。
-//! 残すものだけを写せば、写しは小さく、すぐにできる。`archive` なら全部写すので、詰め直しになる。
+//! 残すものだけを写せば、写しは小さく、すぐにできる。`Archive` なら全部写すので、詰め直しになる。
 
 use std::path::Path;
 
@@ -34,7 +34,7 @@ pub fn copy_pruned(manifest: &Manifest, directory: &Path) -> Result<(), NodeErro
     let prune = Keep::plan(keep, &config, parameters, finalized, floor);
     println!(
         "確定した高さ {finalized} をもとに、{} の残し方で写します",
-        spec.storage.mode.as_str()
+        spec.storage.mode.name()
     );
     if let Some((state, trie)) = prune.history {
         println!(

@@ -45,16 +45,16 @@ metadata:
   name: my-peer
 spec:
   network:
-    type: mainnet          # mainnet / testnet / custom
+    type: Mainnet          # Mainnet / Testnet / Custom
   dataDirectory: /path/to/data
   certificates:
     directory: /path/to/certificates
   seed: <ホスト>:7900
   storage:
-    mode: light            # archive / full / light
+    mode: Light            # Archive / Full / Light
 ```
 
-- `network.type`: `mainnet` と `testnet` は、ネットワークの設定（`config-network.properties` などにあたる値）を heika が持っているので、ほかに何も要らない。`network.resources` にノードの `resources` フォルダーを書けば、代わりにそこから読む（ネットワークの設定が変わって、heika がまだ追いついていないときなど）。`custom` には、`network.resources` と、`network.nemesisHash`（Nemesis のブロックのハッシュ）か `network.nemesisSeed`（Nemesis の seed フォルダー）が要る。`nemesisSeed` を書くと、DB が空ならピアから取らずにそこの Nemesis から始め、住所録のノードにつながらなくても先端の段階に進む。新しいネットワークの最初のノードに使う（[nemesis.md](nemesis.md)）。ただし、同じチェーンのピアが1つもいないあいだはハーベストしないので、ブロックができ始めるのは2台目がつながってから
+- `network.type`: `Mainnet` と `Testnet` は、ネットワークの設定（`config-network.properties` などにあたる値）を heika が持っているので、ほかに何も要らない。`network.resources` にノードの `resources` フォルダーを書けば、代わりにそこから読む（ネットワークの設定が変わって、heika がまだ追いついていないときなど）。`Custom` には、`network.resources` と、`network.nemesisHash`（Nemesis のブロックのハッシュ）か `network.nemesisSeed`（Nemesis の seed フォルダー）が要る。`nemesisSeed` を書くと、DB が空ならピアから取らずにそこの Nemesis から始め、住所録のノードにつながらなくても先端の段階に進む。新しいネットワークの最初のノードに使う（[nemesis.md](nemesis.md)）。ただし、同じチェーンのピアが1つもいないあいだはハーベストしないので、ブロックができ始めるのは2台目がつながってから
 - `dataDirectory`: ブロックと状態をしまうフォルダー
 - `certificates.directory`: `tls.crt`（ノードの証明書と CA の証明書の鎖）と `tls.key`（ノードの鍵）のあるフォルダー。`heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとほかのノードに嫌われるので、いつも同じ証明書を使う
 - `seed`: 住所録が空か、どこにもつながらないときに、最初につなぐノード（`ホスト:ポート`）。そのノードからほかのノードの一覧をもらい、住所録に足していく
@@ -71,19 +71,19 @@ spec:
 
 ## 残し方
 
-`storage.mode` で選ぶ。既定は `full`。
+`storage.mode` で選ぶ。既定は `Full`。
 
 | | 状態と状態の証明 | ブロックとステートメント | ファイナライズの証明 |
 |---|---|---|---|
-| `archive` | 全部の高さ | 全部 | 全部 |
-| `full` | 確定より 2 エポック下まで | 全部 | 全部 |
-| `light` | 確定より 2 エポック下まで | 再開に要る分だけ | 最近の分だけ |
+| `Archive` | 全部の高さ | 全部 | 全部 |
+| `Full` | 確定より 2 エポック下まで | 全部 | 全部 |
+| `Light` | 確定より 2 エポック下まで | 再開に要る分だけ | 最近の分だけ |
 
-- `archive`: 昔のどの高さの状態も、その高さの StateHash への証明つきで引ける
-- `full`: 昔からのブロックを全部持つので、新しく入ってくるノードに渡せる
-- `light`: いちばん軽い。アカウントの表も全部はメモリに持たず、要るものだけを読む
+- `Archive`: 昔のどの高さの状態も、その高さの StateHash への証明つきで引ける
+- `Full`: 昔からのブロックを全部持つので、新しく入ってくるノードに渡せる
+- `Light`: いちばん軽い。アカウントの表も全部はメモリに持たず、要るものだけを読む
 
-一度動かしたデータより重い残し方（たくさん残す方）では起動しない。消したものは戻らないので、たとえば `light` で動かしたデータを `archive` にはできない。軽くする方は、刈り込めばよいのでできる。重くしたいときは、`dataDirectory` を空にして最初から追いつき直す。
+一度動かしたデータより重い残し方（たくさん残す方）では起動しない。消したものは戻らないので、たとえば `Light` で動かしたデータを `Archive` にはできない。軽くする方は、刈り込めばよいのでできる。重くしたいときは、`dataDirectory` を空にして最初から追いつき直す。
 
 軽くするとき、その場で刈り込むと、消すものが多くて時間がかかり、DB のファイルも縮まない。止めたノードから、残すものだけを写した新しい DB を作れる。
 
@@ -91,19 +91,19 @@ spec:
 heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 ```
 
-`--config` の `dataDirectory` の DB を、その設定の `storage.mode` の残し方で刈り込んで、`--to` のフォルダーに写す。たとえばアーカイブのデータを指し、`storage.mode` だけを `light` にした設定を渡すと、ライトの写しができる。`archive` なら全部写すので、詰め直しになる。ノードを止めてから使い（動いていれば DB を開けずに止まる）、`--to` に DB がもうあれば写さない。できた写しを `dataDirectory` に置き換えて起動する。
+`--config` の `dataDirectory` の DB を、その設定の `storage.mode` の残し方で刈り込んで、`--to` のフォルダーに写す。たとえばアーカイブのデータを指し、`storage.mode` だけを `Light` にした設定を渡すと、ライトの写しができる。`Archive` なら全部写すので、詰め直しになる。ノードを止めてから使い（動いていれば DB を開けずに止まる）、`--to` に DB がもうあれば写さない。できた写しを `dataDirectory` に置き換えて起動する。
 
-`storage.partialState` は、アカウントの表を全部はメモリに持たずに要るものだけを読むかで、`light` ではいつも真、ほかは書かなければ真。`storage.cache.state`（既定 `64Mi`）と `storage.cache.database`（既定 `256Mi`）で、読んだ状態と DB のキャッシュの量を決める。追いつく段階では DB のキャッシュは `storage.cache.catchUp`（既定 `16Gi`）までにする。大きいほど速く書けるが、アーカイブでは DB が大きいので、ほぼこの量までメモリを使う。メモリが少ないマシンでは下げる。
+`storage.partialState` は、アカウントの表を全部はメモリに持たずに要るものだけを読むかで、`Light` ではいつも真、ほかは書かなければ真。`storage.cache.state`（既定 `64Mi`）と `storage.cache.database`（既定 `256Mi`）で、読んだ状態と DB のキャッシュの量を決める。追いつく段階では DB のキャッシュは `storage.cache.catchUp`（既定 `16Gi`）までにする。大きいほど速く書けるが、アーカイブでは DB が大きいので、ほぼこの量までメモリを使う。メモリが少ないマシンでは下げる。
 
-`storage.search` に名前を並べると、REST の検索のための検索表を DB に作る（たとえば `search: [metadata]`）。書かなければ作らないので、ライトの軽さはそのまま。今の状態の行を別の切り口で並べ直しただけのもので、ブロックと同じ書き込みで直し、巻き戻しでは状態の差分から戻す。途中で足せば、起動したときに今の状態の行から作る（メインネットのメタデータ 12 万件なら数秒）。外せば、その行を消す（詰め直すなら `peer copy`）。`storage.mode: archive` なら、検索表から消えたキーも残し、`?height=` 付きで昔の高さでも検索できる（候補を両方の表から取り、その高さの状態の行で確かめる）。アーカイブで途中から足せば、状態の差分の前の値から作る。ほかの残し方では、今の状態だけを検索できる。
+`storage.search` に名前を並べると、REST の検索のための検索表を DB に作る（たとえば `search: [Metadata]`）。書かなければ作らないので、ライトの軽さはそのまま。今の状態の行を別の切り口で並べ直しただけのもので、ブロックと同じ書き込みで直し、巻き戻しでは状態の差分から戻す。途中で足せば、起動したときに今の状態の行から作る（メインネットのメタデータ 12 万件なら数秒）。外せば、その行を消す（詰め直すなら `peer copy`）。`storage.mode: Archive` なら、検索表から消えたキーも残し、`?height=` 付きで昔の高さでも検索できる（候補を両方の表から取り、その高さの状態の行で確かめる）。アーカイブで途中から足せば、状態の差分の前の値から作る。ほかの残し方では、今の状態だけを検索できる。
 
 | 名前 | 答える検索 |
 |---|---|
-| `metadata` | `/metadata` を、送り主、宛先、対象（モザイクかネームスペース）から引く |
-| `namespaces` | `/namespaces` を、持ち主と別名（アドレスかモザイク）から引く。ネームスペースの名前の表も作り、`/namespaces/names`、`/namespaces/account/names`、`/namespaces/mosaic/names` に答える |
-| `transactions` | トランザクションのハッシュから入った高さとブロックの中の番号を引く表と、関わったアドレスから引く表を作る。`/transactions/confirmed/{hash}` と `/transactionStatus/{hash}` に直近のブロックより前のものも答え、`/transactions/confirmed?address=` の検索に答える。ブロックから作るので、途中で足せば、起動したときにしまってあるブロックを全部読む（止めても続きから）。ブロックを刈り込む残し方では、刈り込んだブロックの分は答えない |
+| `Metadata` | `/metadata` を、送り主、宛先、対象（モザイクかネームスペース）から引く |
+| `Namespaces` | `/namespaces` を、持ち主と別名（アドレスかモザイク）から引く。ネームスペースの名前の表も作り、`/namespaces/names`、`/namespaces/account/names`、`/namespaces/mosaic/names` に答える |
+| `Transactions` | トランザクションのハッシュから入った高さとブロックの中の番号を引く表と、関わったアドレスから引く表を作る。`/transactions/confirmed/{hash}` と `/transactionStatus/{hash}` に直近のブロックより前のものも答え、`/transactions/confirmed?address=` の検索に答える。ブロックから作るので、途中で足せば、起動したときにしまってあるブロックを全部読む（止めても続きから）。ブロックを刈り込む残し方では、刈り込んだブロックの分は答えない |
 
-ネームスペースの名前は状態の木になく、登録のトランザクションにしかないので、名前の表はブロックから拾う。ID は親と名前から決まるので、ID と合う登録だけを入れ、足すだけで消さない（どのブロックから拾っても正しい）。`namespaces` を足したら、起動したときに、しまってあるブロックから拾う（止めても、次の起動で続きから）。ライトは古いブロックを持たないので、名前を知っているのは、しまってあるブロックとその後に登録されたものだけで、知らない名前は返さない。
+ネームスペースの名前は状態の木になく、登録のトランザクションにしかないので、名前の表はブロックから拾う。ID は親と名前から決まるので、ID と合う登録だけを入れ、足すだけで消さない（どのブロックから拾っても正しい）。`Namespaces` を足したら、起動したときに、しまってあるブロックから拾う（止めても、次の起動で続きから）。ライトは古いブロックを持たないので、名前を知っているのは、しまってあるブロックとその後に登録されたものだけで、知らない名前は返さない。
 
 ## 委任を引き受ける
 
@@ -139,17 +139,17 @@ heika experimental peer copy --config light.yaml --to <新しいフォルダー>
 | `POST /lock/hash`、`POST /lock/secret`、`POST /restrictions/account`、`POST /restrictions/mosaic` | まとめて引く。本文は catapult の REST と同じく `{"hashes": [...]}`、`{"compositeHashes": [...]}`、`{"addresses": [...]}`。答え方と上限は `POST /accounts` と同じ。アドレスやモザイクから探す検索（`/lock/hash?address=` など）は、まだない |
 | `/namespaces/{namespaceId}` | ネームスペースの今の状態。ルートでも子でも引ける。期限の高さ（`endHeight`。catapult と同じく、猶予の 30 日を足した高さ）を過ぎたものも、状態に残っていれば返し、`active` が `false`（状態の木からは外れている）。catapult の `meta.index`（持ち主の履歴の番号）は返さない |
 | `/metadata/{compositeHash}` | メタデータの今の状態。ID は1件を指すハッシュ（`compositeHash`） |
-| `/metadata` | メタデータの検索。`storage.search` に `metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。1件ごとの `id` は MongoDB の ID ではなく、その件の位置（送り主、種類、宛先、対象の ID、キーをつないだ16進）。前のページの最後の `id` を `offset` に渡すと、その次から返す。飛ばす分をなめないので、`pageNumber` で送るより深いページが速い。`?height=` はアーカイブだけで、ほかは 501 |
-| `/namespaces` | ネームスペースの検索。`storage.search` に `namespaces` があるときだけで、なければ 501。catapult の REST と同じく `ownerAddress`、`level0`、`registrationType`、`aliasType` で絞る。ページ送り、`id` と `offset`、アーカイブでの `?height=` はメタデータの検索と同じ（`id` は検索表のキーの16進で、同じ絞り込みの検索の `offset` にだけ渡せる） |
+| `/metadata` | メタデータの検索。`storage.search` に `Metadata` があるときだけで、なければ 501。catapult の REST と同じく `sourceAddress`、`targetAddress`、`scopedMetadataKey`、`targetId`、`metadataType` で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る。並びは登録の順ではなく項目の順（`order=desc` で逆）。1件ごとの `id` は MongoDB の ID ではなく、その件の位置（送り主、種類、宛先、対象の ID、キーをつないだ16進）。前のページの最後の `id` を `offset` に渡すと、その次から返す。飛ばす分をなめないので、`pageNumber` で送るより深いページが速い。`?height=` はアーカイブだけで、ほかは 501 |
+| `/namespaces` | ネームスペースの検索。`storage.search` に `Namespaces` があるときだけで、なければ 501。catapult の REST と同じく `ownerAddress`、`level0`、`registrationType`、`aliasType` で絞る。ページ送り、`id` と `offset`、アーカイブでの `?height=` はメタデータの検索と同じ（`id` は検索表のキーの16進で、同じ絞り込みの検索の `offset` にだけ渡せる） |
 | `POST /namespaces/names` | `{"namespaceIds": [...]}` の ID と、その親の名前（自分の部分）。名前を知らないものは返さない。1回に 100 件まで |
 | `POST /namespaces/account/names`、`POST /namespaces/mosaic/names` | `{"addresses": [...]}` か `{"mosaicIds": [...]}` を別名にしている、今有効なネームスペースの名前（`symbol.xym` のようにルートからつないだもの）。1回に 100 件まで |
 | `/accounts/{accountId}/merkle`、`/account/{address}/multisig/merkle`、`/lock/hash/{hash}/merkle`、`/lock/secret/{compositeHash}/merkle`、`/restrictions/account/{address}/merkle`、`/restrictions/mosaic/{compositeHash}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |
-| `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロック（`storage.search` に `transactions` があれば、しまってある全部のブロック）に入っていれば `confirmed` と高さ |
-| `/transactions/confirmed` | 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス。catapult の `meta.addresses` と同じく、署名者、宛先などのトランザクションの種類ごとに決まった相手、アグリゲートの中の署名者と相手、エイリアスを解決した先。連署者は入らない）、`signerPublicKey`、`recipientAddress`（送金、シークレットロック、シークレットの証明の宛先）、`type`（何回でも書ける）、`transferMosaicId` と `fromTransferAmount`、`toTransferAmount`（送金のモザイクと額。額はモザイクとは別に、どれかが範囲に入ればよい。catapult と同じ）、`height`、`fromHeight`、`toHeight` で絞る。`address`、`signerPublicKey`、`recipientAddress` で絞るには `storage.search` の `transactions` が要り、なければ 501。それらがなければ、しまってあるブロックを順に読むので、索引がなくても答える（めったにない種類だけで絞ると、全部のブロックを読むので時間がかかる。mainnet で 20 秒ほど）。`embedded=true` なら、catapult と同じく、アグリゲートの中のトランザクションも 1 件ずつ、外側のすぐ後に返す（中のものの `meta` は、入った高さ、`aggregateHash`、`aggregateId`（外側の `id`）、アグリゲートの中の番号の `index`）。中のものは署名者、宛先、種類、送金のモザイクと額では合うが、catapult と同じく `address` では合わない（catapult の中のトランザクションの文書には `meta.addresses` がない）。答えの `meta` には、catapult と同じく、入ったブロックの `timestamp` と `feeMultiplier` を足す（中のものにも）。アグリゲートは中のトランザクションも付けて返す（catapult の検索は付けない）。並びは高さとブロックの中の順（`order=desc` で逆）。catapult は MongoDB の ID の順で、同じブロックの中では並びがばらつくので、そこだけ catapult と違うことがある。ページ送りはメタデータの検索と同じで、1件ごとの `id` は高さ（12 桁）、ブロックの中の番号（8 桁）、アグリゲートの中の番号（4 桁。外側は 0、中のものは 1 から）をつないだ 24 桁の16進 |
-| `/transactions/confirmed/{hash}` | 直近のブロック（同じく、`transactions` があれば全部）に入ったトランザクションと、入った高さ。アグリゲートの中のものには、catapult と同じく、入った高さ、`aggregateHash`、`aggregateId`、`index`、ブロックの時刻と倍率の `meta` を付ける |
+| `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロック（`storage.search` に `Transactions` があれば、しまってある全部のブロック）に入っていれば `confirmed` と高さ |
+| `/transactions/confirmed` | 承認されたトランザクションの検索。catapult の REST と同じく、`address`（関わったアドレス。catapult の `meta.addresses` と同じく、署名者、宛先などのトランザクションの種類ごとに決まった相手、アグリゲートの中の署名者と相手、エイリアスを解決した先。連署者は入らない）、`signerPublicKey`、`recipientAddress`（送金、シークレットロック、シークレットの証明の宛先）、`type`（何回でも書ける）、`transferMosaicId` と `fromTransferAmount`、`toTransferAmount`（送金のモザイクと額。額はモザイクとは別に、どれかが範囲に入ればよい。catapult と同じ）、`height`、`fromHeight`、`toHeight` で絞る。`address`、`signerPublicKey`、`recipientAddress` で絞るには `storage.search` の `Transactions` が要り、なければ 501。それらがなければ、しまってあるブロックを順に読むので、索引がなくても答える（めったにない種類だけで絞ると、全部のブロックを読むので時間がかかる。mainnet で 20 秒ほど）。`embedded=true` なら、catapult と同じく、アグリゲートの中のトランザクションも 1 件ずつ、外側のすぐ後に返す（中のものの `meta` は、入った高さ、`aggregateHash`、`aggregateId`（外側の `id`）、アグリゲートの中の番号の `index`）。中のものは署名者、宛先、種類、送金のモザイクと額では合うが、catapult と同じく `address` では合わない（catapult の中のトランザクションの文書には `meta.addresses` がない）。答えの `meta` には、catapult と同じく、入ったブロックの `timestamp` と `feeMultiplier` を足す（中のものにも）。アグリゲートは中のトランザクションも付けて返す（catapult の検索は付けない）。並びは高さとブロックの中の順（`order=desc` で逆）。catapult は MongoDB の ID の順で、同じブロックの中では並びがばらつくので、そこだけ catapult と違うことがある。ページ送りはメタデータの検索と同じで、1件ごとの `id` は高さ（12 桁）、ブロックの中の番号（8 桁）、アグリゲートの中の番号（4 桁。外側は 0、中のものは 1 から）をつないだ 24 桁の16進 |
+| `/transactions/confirmed/{hash}` | 直近のブロック（同じく、`Transactions` があれば全部）に入ったトランザクションと、入った高さ。アグリゲートの中のものには、catapult と同じく、入った高さ、`aggregateHash`、`aggregateId`、`index`、ブロックの時刻と倍率の `meta` を付ける |
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |
 | `PUT /transactions/partial`、`PUT /transactions/cosignature` | 連署を待つアグリゲートボンデッドと、その連署（catapult の `CosignatureDTO`）を受け付ける。受け付けたら 202。ハッシュロックや連署できる人かは、そのあとノードで確かめる。連署を待っているものは、行方（`/transactionStatus`）で `partial` になる |
 | `/transactions/partial/{hash}`、`/transactions/partial` | 連署を待っているもの（集まった連署付き、高さは "0"）と、その一覧。一覧は `address`（外側の署名者、中のトランザクションの署名者、連署者、送金の宛先のどれか）と `signerPublicKey`（外側の署名者）で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る |

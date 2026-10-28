@@ -25,7 +25,7 @@ metadata:
   name: heika-1
 spec:
   network:
-    type: mainnet
+    type: Mainnet
   dataDirectory: /srv/heika/data
   certificates:
     directory: /home/heika/heika-mainnet/certs
@@ -35,7 +35,7 @@ spec:
     publicHost: heika-1.203-0-113-7.sslip.io
     friendlyName: heika-1
   storage:
-    mode: light
+    mode: Light
   beneficiary: N...              # ハーベストの報酬を受け取るアドレス
   delegations:
     max: 5

@@ -101,11 +101,21 @@ impl Mode {
         }
     }
 
+    /// DB と、v0.12.0 までの設定ファイルに書いた名前
     fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
             Self::Full => "full",
             Self::Archive => "archive",
+        }
+    }
+
+    /// 設定ファイルに書く名前
+    fn name(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Full => "Full",
+            Self::Archive => "Archive",
         }
     }
 }
@@ -305,8 +315,7 @@ fn saved_modes(root: &Path) -> Vec<(String, Mode)> {
             let entry = entry.ok()?;
             let path = entry.path().join("node.yaml");
             let modified = path.metadata().ok()?.modified().ok()?;
-            let manifest = heika_node::config::Manifest::load(&path).ok()?;
-            let mode = Mode::parse(manifest.spec.storage.mode.as_str())?;
+            let mode = saved_mode(&std::fs::read_to_string(&path).ok()?)?;
             Some((
                 modified,
                 entry.file_name().to_string_lossy().into_owned(),
@@ -319,6 +328,19 @@ fn saved_modes(root: &Path) -> Vec<(String, Mode)> {
         .into_iter()
         .map(|(_, network, mode)| (network, mode))
         .collect()
+}
+
+/// 書いた設定ファイルの残し方。v0.12.0 までに書いたもの（`mode: light` のような小文字）は今のノードには
+/// 読めないので、自分で書いた形として `mode:` の行から読む（次に起動するときに今の形で書き直す）
+fn saved_mode(text: &str) -> Option<Mode> {
+    if let Ok(manifest) = heika_node::config::Manifest::parse(text) {
+        return Mode::parse(manifest.spec.storage.mode.as_str());
+    }
+    let value = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("mode:"))?
+        .trim();
+    Mode::parse(value)
 }
 
 /// 最後に動かした残し方
@@ -475,7 +497,13 @@ fn manifest(
         seed = quote(&format!("{host}:{}", seed.1)),
         listen = quote(LISTEN),
         rest = quote(rest::OWN_REST),
-        mode = mode.as_str(),
+        mode = mode.name(),
+        // network はフォルダーの名前にも使う小文字（`mainnet` か `testnet`）
+        network = if network == "mainnet" {
+            "Mainnet"
+        } else {
+            "Testnet"
+        },
     )
 }
 
@@ -727,5 +755,26 @@ mod tests {
         // この PC の中だけの REST があっても、Peer だけを名乗る
         assert_eq!(manifest.spec.roles().0, ROLE_PEER);
         assert_eq!(manifest.spec.listen.unwrap().address, LISTEN);
+        assert_eq!(manifest.spec.storage.mode, heika_node::config::Mode::Light);
+        assert_eq!(
+            manifest.spec.network.network_type,
+            heika_node::config::NetworkType::Testnet
+        );
+        assert_eq!(saved_mode(&text), Some(Mode::Light));
+    }
+
+    #[test]
+    fn reads_the_mode_of_a_manifest_written_before_capitalized_values() {
+        let old = manifest(
+            "mainnet",
+            Mode::Archive,
+            Path::new("/data/mainnet"),
+            Path::new("/data/identity"),
+            &("node.example".to_owned(), 7900),
+        )
+        .replace("type: Mainnet", "type: mainnet")
+        .replace("mode: Archive", "mode: archive");
+        assert!(heika_node::config::Manifest::parse(&old).is_err());
+        assert_eq!(saved_mode(&old), Some(Mode::Archive));
     }
 }

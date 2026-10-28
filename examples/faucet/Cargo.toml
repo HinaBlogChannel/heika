@@ -1,0 +1,24 @@
+[package]
+name = "faucet"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "蛇口。プライベートネットで、試すための XYM をページ 1 枚から配る"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+getrandom = "0.4.3"
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_norway = "0.9.42"
+sha2 = "0.11.0"
+tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+ureq = { version = "3.4.2", default-features = false }

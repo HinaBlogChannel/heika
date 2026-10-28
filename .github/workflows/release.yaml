@@ -1,4 +1,5 @@
-# v1.2.3 の形のタグで、そのコミットの master の CI（ci.yaml）が作ったものを Release と Pages に出す。ビルドはし直さない。
+# v1.2.3 の形のタグで、そのコミットの master の CI（ci.yaml）が作ったものを Release と Pages と ghcr.io のコンテナイメージに出す。
+# ビルドはし直さない。
 #
 # - CI がまだ走っていれば、終わるまで待つ。CI が落ちていたら、何も出さずに落ちる
 # - タグと Cargo.toml の版が同じか、Release に載せるファイルがそろっているか、
@@ -22,13 +23,15 @@ env:
   APK_CERT_SHA256: 79b38fb9557cf0249f75aadf806805f3e5b4f6b196a69b6f986c075cdb64c5ad
 
 jobs:
-  release:
+  # 版を確かめ、このコミットの CI が通るのを待つ。release と container は、このあと並んで走る
+  ci:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
-      contents: write
+      contents: read
       actions: read
-      attestations: read
+    outputs:
+      run-id: ${{ steps.ci.outputs.run-id }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -62,16 +65,31 @@ jobs:
             fi
             sleep 60
           done
+
+  release:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          run-id: ${{ steps.ci.outputs.run-id }}
+          run-id: ${{ needs.ci.outputs.run-id }}
           github-token: ${{ github.token }}
           pattern: heika-*
           path: dist
           merge-multiple: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          run-id: ${{ steps.ci.outputs.run-id }}
+          run-id: ${{ needs.ci.outputs.run-id }}
           github-token: ${{ github.token }}
           name: site
           path: site
@@ -124,6 +142,42 @@ jobs:
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
+
+  # CI が作ったコンテナイメージ（OCI のアーカイブ）を、ビルドし直さずに ghcr.io に写す。版のタグと latest を付ける。
+  # 同じものを写し直すだけなので、落ちたらこのジョブだけ Re-run すればよい
+  container:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          run-id: ${{ needs.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+          name: container-image
+          path: dist
+      - name: イメージに、このリポジトリの CI の来歴の証明が付いているか確かめる
+        run: |
+          gh attestation verify "dist/heika-image-$GITHUB_REF_NAME.tar" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yaml" > /dev/null
+      - name: ghcr.io に写す
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "$GITHUB_REF_NAME" latest; do
+            # digest が変わるなら写さずに落とす（CI で付けた証明は、その digest に付いている）
+            skopeo copy --all --preserve-digests "oci-archive:dist/heika-image-$GITHUB_REF_NAME.tar" "docker://$image:$tag"
+          done
+          gh attestation verify "oci://$image:$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yaml" > /dev/null
+          echo "ok: $image:$GITHUB_REF_NAME"
 
   # examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ に、
   # examples/sunboru-kusa は https://hinablogchannel.github.io/heika/examples/sunboru-kusa/ に、

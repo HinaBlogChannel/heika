@@ -368,6 +368,23 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/heika-image-${{ env.VERSION }}.tar
+      - name: イメージ（両方のアーキテクチャーをまとめた索引）の digest を読む
+        id: image
+        run: |
+          index=$(tar -xOf "dist/heika-image-$VERSION.tar" index.json)
+          if [ "$(jq '.manifests | length' <<< "$index")" != 1 ] \
+            || [ "$(jq -r '.manifests[0].mediaType' <<< "$index")" != application/vnd.oci.image.index.v1+json ]; then
+            echo "::error::OCI のアーカイブが、索引1つの形になっていません"
+            exit 1
+          fi
+          echo "digest=$(jq -r '.manifests[0].digest' <<< "$index")" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      # 公開したイメージを gh attestation verify oci://… で確かめられるように、イメージの digest にも付ける
+      - if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Release に載せるもの（heika-*）とは別の名前にする

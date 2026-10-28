@@ -2,6 +2,8 @@
 # ビルドはし直さない。
 #
 # - CI がまだ走っていれば、終わるまで待つ。CI が落ちていたら、何も出さずに落ちる
+# - Release の本文は、その版のノート（.github/releases/v1.2.3.md）に、どの版でも同じ文（.github/release-notes.md）と
+#   GitHub が作る変更の一覧をつなげたもの。版のノートがなければ、CI を待たずに落ちる
 # - タグと Cargo.toml の版が同じか、Release に載せるファイルがそろっているか、
 #   それぞれに CI の来歴の証明が付いているか、APK が決めた鍵で署名されているかを確かめてから出す
 # - 落ちたら、CI を直して master に push し直すか、CI が通ったあとでこのワークフローを Re-run する
@@ -44,6 +46,12 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "heika-cli") | .version')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::タグ $GITHUB_REF_NAME と Cargo.toml の版 $version が違います"
+            exit 1
+          fi
+      - name: この版のノートがあるか確かめる
+        run: |
+          if [ ! -s ".github/releases/$GITHUB_REF_NAME.md" ]; then
+            echo "::error::.github/releases/$GITHUB_REF_NAME.md がありません。この版で変わったことを書いて、タグを打ち直してください"
             exit 1
           fi
       - name: このコミットの master の CI が終わるのを待つ
@@ -136,9 +144,10 @@ jobs:
         run: (cd dist && sha256sum heika-* > SHA256SUMS)
       - name: Release を作る
         run: |
+          cat ".github/releases/$GITHUB_REF_NAME.md" <(echo) .github/release-notes.md > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag --title "heika $GITHUB_REF_NAME" \
-            --notes-file .github/release-notes.md --generate-notes
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site

@@ -1,0 +1,23 @@
+[package]
+name = "roast"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "閾値署名。何人かで分けて持つ鍵で、ふつうのアカウントのトランザクションに署名する"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+frost-core = "3.0.0"
+frost-ed25519 = "3.0.0"
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+# frost が使う rand_core 0.6 の、OS の乱数
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+rayon = "1.12.0"
+serde_json = "1.0.154"
+ureq = { version = "3.4.2", default-features = false }

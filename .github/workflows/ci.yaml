@@ -141,6 +141,7 @@ jobs:
             examples/intent-dex
             examples/adaptor-swap
             examples/faucet
+            examples/roast
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -179,6 +180,12 @@ jobs:
           cargo test --locked
       - name: 蛇口を確かめる
         working-directory: examples/faucet
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: 400 人で持つアカウントを確かめる
+        working-directory: examples/roast
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

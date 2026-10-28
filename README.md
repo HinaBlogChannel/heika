@@ -81,6 +81,13 @@ Windows でも、標準入力から読んだ秘密鍵を std のバッファに�
 - Android の aarch64: `.apk`。署名の証明書の SHA-256 は `79b38fb9557cf0249f75aadf806805f3e5b4f6b196a69b6f986c075cdb64c5ad` で、`apksigner verify --print-certs` で確かめられる。どの版もこの鍵で署名するので、上書きして更新できる
 - iOS: `-unsigned.ipa`。署名していないので、自分で署名し直して入れる
 
+コンテナイメージは `ghcr.io/hinablogchannel/heika` に、版のタグ（`v…`）と `latest` で置いている（linux/amd64 と linux/arm64）。中身は Releases の Linux のバイナリと同じもので、ほかには CA 証明書だけが入っている。非 root（UID 65532）で動き、データの置き場は `/data`。作り方と動かし方は [containers/heika/Dockerfile](containers/heika/Dockerfile) の頭に書いた。イメージも同じように確かめられる。
+
+```sh
+docker run --rm ghcr.io/hinablogchannel/heika:<バージョン> --version
+gh attestation verify oci://ghcr.io/hinablogchannel/heika:<バージョン> --repo <リポジトリ>
+```
+
 ソースからなら、Rust 1.99 以上で次のようにする。
 
 ```sh

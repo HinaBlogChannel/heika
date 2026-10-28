@@ -1,6 +1,9 @@
 //! ネームスペース。catbuffer の `namespace/`。
 
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::address::Address;
 use sha3::{Digest, Sha3_256};
@@ -83,7 +86,7 @@ impl fmt::Display for InvalidNamespaceName {
     }
 }
 
-impl std::error::Error for InvalidNamespaceName {}
+impl core::error::Error for InvalidNamespaceName {}
 
 /// ルートか、どの親の下のサブネームスペースか。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

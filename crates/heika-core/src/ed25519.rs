@@ -3,7 +3,7 @@
 //! 署名は RFC 8032 そのまま。検証は catapult と同じものだけを受け付けるので、
 //! ed25519-dalek の `verify` とも `verify_strict` とも少し違う。
 
-use std::iter;
+use core::iter;
 
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;

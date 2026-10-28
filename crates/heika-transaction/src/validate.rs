@@ -7,8 +7,9 @@
 //! 署名はノードでも別の段階で確かめるので、ここでは確かめない。[`Transaction::verify`] と
 //! [`Transaction::verify_cosignatures`] を使う。残高や期限のように、状態や時刻で決まることも確かめない。
 
-use std::collections::BTreeSet;
-use std::fmt;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::address::Address;
 use heika_core::key::PublicKey;
@@ -569,7 +570,7 @@ impl Checker<'_> {
     fn aggregate(&mut self, aggregate: &Aggregate, signer_public_key: &PublicKey) {
         let parameters = self.parameters;
         let count = aggregate.transactions().len();
-        let signers: Vec<_> = std::iter::once(signer_public_key)
+        let signers: Vec<_> = core::iter::once(signer_public_key)
             .chain(
                 aggregate
                     .cosignatures()
@@ -606,7 +607,7 @@ impl Checker<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
 
     use heika_core::hash::Hash256;
     use heika_core::signature::Signature;

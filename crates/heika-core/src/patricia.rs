@@ -6,7 +6,10 @@
 //! キーを16進の1桁（ニブル）ずつたどる木で、たどった先のノードを根から順に並べたものが、
 //! そのキーが木に「ある」こと（とその値）か、「ない」ことの証明になる。
 
-use std::fmt;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 use sha3::{Digest, Sha3_256};
 
@@ -230,7 +233,7 @@ fn encode_path(path: &[u8], is_leaf: bool) -> Vec<u8> {
 
 /// キーを16進の1桁ずつに分ける。上位のニブルが先。
 fn nibbles(key: &Hash256) -> [u8; KEY_NIBBLES] {
-    std::array::from_fn(|index| {
+    core::array::from_fn(|index| {
         let byte = key.0[index / 2];
         if index % 2 == 0 {
             byte >> 4
@@ -372,7 +375,7 @@ impl fmt::Display for TreeNodeDecodeError {
     }
 }
 
-impl std::error::Error for TreeNodeDecodeError {}
+impl core::error::Error for TreeNodeDecodeError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatriciaProofError {
@@ -406,7 +409,7 @@ impl fmt::Display for PatriciaProofError {
     }
 }
 
-impl std::error::Error for PatriciaProofError {}
+impl core::error::Error for PatriciaProofError {}
 
 #[cfg(test)]
 mod tests {
@@ -548,12 +551,12 @@ mod tests {
         let root_hash = root.hash();
         // 枝の経路で食い違う
         assert_eq!(
-            prove(&key(&[1, 5]), std::slice::from_ref(&root), &root_hash),
+            prove(&key(&[1, 5]), core::slice::from_ref(&root), &root_hash),
             Ok(None)
         );
         // 枝の次のニブルに子がない
         assert_eq!(
-            prove(&key(&[1, 2, 4]), std::slice::from_ref(&root), &root_hash),
+            prove(&key(&[1, 2, 4]), core::slice::from_ref(&root), &root_hash),
             Ok(None)
         );
         // 葉の経路で食い違う
@@ -579,7 +582,7 @@ mod tests {
             Err(PatriciaProofError::Unlinked { index: 1 })
         );
         assert_eq!(
-            prove(&key(&[1, 2, 3]), std::slice::from_ref(&root), &root_hash),
+            prove(&key(&[1, 2, 3]), core::slice::from_ref(&root), &root_hash),
             Err(PatriciaProofError::Incomplete)
         );
         assert_eq!(
@@ -594,7 +597,7 @@ mod tests {
 
     #[test]
     fn hashes_the_roots_in_cache_order() {
-        let roots: [Hash256; 9] = std::array::from_fn(|index| hash(index as u8));
+        let roots: [Hash256; 9] = core::array::from_fn(|index| hash(index as u8));
         let concatenated: Vec<u8> = roots.iter().flat_map(|root| root.0).collect();
         assert_eq!(state_hash(&roots), sha3(&[&concatenated]));
         assert_eq!(SubCache::AccountState.index(), 0);

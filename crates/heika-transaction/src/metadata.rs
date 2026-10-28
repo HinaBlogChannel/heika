@@ -3,6 +3,8 @@
 //! アカウント、モザイク、ネームスペースに、キーと値の組を付ける。値は差分で書く。
 //! 3種類とも、対象の ID が途中に入るかどうかだけが違う。
 
+use alloc::vec::Vec;
+
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use sha3::{Digest, Sha3_256};

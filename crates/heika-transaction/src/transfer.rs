@@ -1,7 +1,8 @@
 //! Transfer。catbuffer の `transfer/transfer.cats`。
 
-use std::collections::BTreeMap;
-use std::fmt;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::address::Address;
 use heika_core::network::NetworkIdentifier;
@@ -196,7 +197,7 @@ impl fmt::Display for TransferError {
     }
 }
 
-impl std::error::Error for TransferError {}
+impl core::error::Error for TransferError {}
 
 #[cfg(test)]
 mod tests {

@@ -7,8 +7,8 @@
 //! 検証は、catapult が計算を途中でやめずに続けるところも含めて同じにしている。
 //! 結果が変わるのはハッシュの衝突を見つけたときだけだが、ノードと違うものを受け付けないようにするため。
 
-use std::fmt;
-use std::str::FromStr;
+use core::fmt;
+use core::str::FromStr;
 
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;
@@ -279,10 +279,10 @@ mod tests {
 
     #[test]
     fn generation_hash_is_the_first_half() {
-        let hash = ProofHash(std::array::from_fn(|index| index as u8));
+        let hash = ProofHash(core::array::from_fn(|index| index as u8));
         assert_eq!(
             hash.generation_hash(),
-            GenerationHash(std::array::from_fn(|index| index as u8))
+            GenerationHash(core::array::from_fn(|index| index as u8))
         );
     }
 

@@ -1,5 +1,7 @@
 //! マルチシグ。catbuffer の `multisig/`。
 
+use alloc::vec::Vec;
+
 use crate::bounded::BoundedVec;
 use crate::transfer::UnresolvedAddress;
 use crate::{DecodeError, Reader};

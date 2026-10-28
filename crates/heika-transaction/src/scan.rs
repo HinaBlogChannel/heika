@@ -7,7 +7,9 @@
 //! - アグリゲート以外の23種類（どれもバージョン 1）は、中身を読む
 //! - アグリゲート（バージョン 1 から 3。署名の範囲とハッシュの決まりが違うだけで、形は同じ）は、中のトランザクションを1件ずつ読む
 
-use std::fmt;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
@@ -155,11 +157,11 @@ impl fmt::Display for ScanError {
     }
 }
 
-impl std::error::Error for ScanError {}
+impl core::error::Error for ScanError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
 
     use heika_core::key::PrivateKey;
 

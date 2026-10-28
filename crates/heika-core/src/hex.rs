@@ -1,7 +1,9 @@
 //! 16進の文字列との変換。catapult の `utils/HexParser.cpp` に合わせて、
 //! 読むときは大文字も小文字も受け付け、書くときは大文字にする。
 
-use std::fmt;
+use alloc::format;
+use alloc::string::String;
+use core::fmt;
 
 pub fn encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
@@ -83,7 +85,7 @@ impl fmt::Display for ParseHexError {
     }
 }
 
-impl std::error::Error for ParseHexError {}
+impl core::error::Error for ParseHexError {}
 
 #[cfg(test)]
 mod tests {

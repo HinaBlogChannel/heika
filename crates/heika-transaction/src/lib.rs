@@ -1,7 +1,14 @@
 //! Symbol のトランザクション。catbuffer の `schemas/symbol` のレイアウトで読み書きし、
 //! catapult と同じ範囲に署名して、同じ方法でハッシュを取る。
+//!
+//! std がなくても、alloc があれば使える（`#![no_std]`）。heika-core は `default-features = false` で使う。
 
-use std::fmt;
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
@@ -683,7 +690,7 @@ impl<'a> Reader<'a> {
     /// 残りがちょうど `size` なら、残りを全部返す
     fn rest(&mut self, size: usize) -> Result<&'a [u8], DecodeError> {
         self.expect_remaining(size)?;
-        Ok(std::mem::take(&mut self.0))
+        Ok(core::mem::take(&mut self.0))
     }
 
     fn array<const N: usize>(&mut self) -> [u8; N] {
@@ -780,7 +787,7 @@ impl fmt::Display for DecodeError {
     }
 }
 
-impl std::error::Error for DecodeError {}
+impl core::error::Error for DecodeError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignError {
@@ -799,7 +806,7 @@ impl fmt::Display for SignError {
     }
 }
 
-impl std::error::Error for SignError {}
+impl core::error::Error for SignError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CosignError {
@@ -829,7 +836,7 @@ impl fmt::Display for CosignError {
     }
 }
 
-impl std::error::Error for CosignError {}
+impl core::error::Error for CosignError {}
 
 /// 種類ごとのモジュールのテストで使う。
 #[cfg(test)]

@@ -3,6 +3,8 @@
 //! いくつかのトランザクションを、全部成功するか全部失敗するかのひとまとまりにする。
 //! 中のトランザクション（embedded）は署名を持たず、署名者は外側の署名か連署で示す。
 
+use alloc::vec::Vec;
+
 use heika_core::hash::Hash256;
 use heika_core::key::{PrivateKey, PublicKey};
 use heika_core::merkle;
@@ -297,7 +299,7 @@ impl Aggregate {
 
     /// 連署を外して返す。ハッシュと外側の署名は連署を含まないので、外しても変わらない
     pub fn take_cosignatures(&mut self) -> Vec<Cosignature> {
-        std::mem::take(&mut self.cosignatures)
+        core::mem::take(&mut self.cosignatures)
     }
 
     /// 中のトランザクションのハッシュ。署名はこれに掛かる。
@@ -437,13 +439,13 @@ impl Aggregate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedAggregate;
 
-impl std::fmt::Display for NestedAggregate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for NestedAggregate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("アグリゲートの中にアグリゲートは入れられません")
     }
 }
 
-impl std::error::Error for NestedAggregate {}
+impl core::error::Error for NestedAggregate {}
 
 #[cfg(test)]
 mod tests {

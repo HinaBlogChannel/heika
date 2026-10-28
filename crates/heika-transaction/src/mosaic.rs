@@ -1,5 +1,7 @@
 //! モザイク。catbuffer の `mosaic/` と、`types.cats` のモザイクの型。
 
+use alloc::vec::Vec;
+
 use heika_core::address::Address;
 use sha3::{Digest, Sha3_256};
 
@@ -75,7 +77,7 @@ impl MosaicFlags {
     }
 }
 
-impl std::ops::BitOr for MosaicFlags {
+impl core::ops::BitOr for MosaicFlags {
     type Output = Self;
 
     fn bitor(self, other: Self) -> Self {

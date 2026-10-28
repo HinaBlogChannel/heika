@@ -1,5 +1,7 @@
 //! 制限。catbuffer の `restriction_account/` と `restriction_mosaic/`。
 
+use alloc::vec::Vec;
+
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use sha3::{Digest, Sha3_256};
@@ -41,7 +43,7 @@ impl AccountRestrictionFlags {
     }
 }
 
-impl std::ops::BitOr for AccountRestrictionFlags {
+impl core::ops::BitOr for AccountRestrictionFlags {
     type Output = Self;
 
     fn bitor(self, other: Self) -> Self {

@@ -1,5 +1,7 @@
 //! ロック。catbuffer の `lock_hash/` と `lock_secret/`。
 
+use alloc::vec::Vec;
+
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
 use ripemd::Ripemd160;

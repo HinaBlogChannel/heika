@@ -1,7 +1,8 @@
 //! 長さを決まった幅の整数で書く配列。
 
-use std::fmt;
-use std::ops::Deref;
+use alloc::vec::Vec;
+use core::fmt;
+use core::ops::Deref;
 
 /// 長さが `MAX` までの配列。catbuffer で長さを `uint8` や `uint16` で書く配列に使い、書けない長さのものを作らせない。
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
@@ -56,7 +57,7 @@ impl fmt::Display for TooLong {
     }
 }
 
-impl std::error::Error for TooLong {}
+impl core::error::Error for TooLong {}
 
 #[cfg(test)]
 mod tests {

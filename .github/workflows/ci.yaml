@@ -462,10 +462,25 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - uses: ./.github/actions/rust
       - uses: ./.github/actions/tauri-cli
+      # macOS では、Spotlight などが作りかけのイメージをつかんで、hdiutil が DMG を作るときに "Resource busy" で落ちることがある
+      - name: macOS で Spotlight の索引を止める
+        if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
       - name: ビルド
         run: |
           cargo tauri icon icon.png
-          cargo tauri build 2>&1 | tee build.log
+          # "Resource busy" で落ちたときだけ、3 回まで作り直す。コンパイルは済んでいるので、2 回目からは束ねるだけ
+          for attempt in 1 2 3; do
+            if cargo tauri build 2>&1 | tee build.log; then
+              exit 0
+            fi
+            if [ "$RUNNER_OS" != macOS ] || ! grep -q 'Resource busy' build.log || [ "$attempt" = 3 ]; then
+              exit 1
+            fi
+            echo "::warning::DMG を作るときに Resource busy が出たので作り直す（${attempt} 回目）"
+            rm -f target/release/bundle/macos/rw.*.dmg
+            sleep 10
+          done
       - name: 失敗したら、エラーの行を annotation に出す
         if: failure()
         run: bash ../../.github/scripts/annotate-errors.sh build.log

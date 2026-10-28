@@ -1,0 +1,28 @@
+[package]
+name = "vanitygen-nvptx"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# heika のワークスペースには入れず、依存と Cargo.lock と最適化の設定を分ける
+[workspace]
+members = ["kernel"]
+resolver = "3"
+
+[features]
+default = ["gpu"]
+# 先に nightly でカーネルの PTX を作って、それを埋め込む（README の「動かす」）。--cpu だけなら要らない
+gpu = []
+
+[dependencies]
+# GPU の Driver API。libcuda は動かすときに読むので、ビルドに CUDA は要らない
+cudarc = { version = "0.19.10", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"] }
+heika-core = { path = "../../crates/heika-core" }
+vanitygen-kernel = { path = "kernel" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3

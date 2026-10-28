@@ -142,6 +142,7 @@ jobs:
             examples/adaptor-swap
             examples/faucet
             examples/roast
+            examples/vanitygen-nvptx
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -190,6 +191,15 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked
+      # GPU のカーネルの PTX は nightly で作るので、ここでは作らない。GPU の側も型を確かめられるように、空の PTX を置く
+      - name: GPU で探す vanitygen を確かめる
+        working-directory: examples/vanitygen-nvptx
+        run: |
+          cargo fmt --check
+          mkdir -p target/nvptx64-nvidia-cuda/release
+          touch target/nvptx64-nvidia-cuda/release/vanitygen_kernel.ptx
+          cargo clippy --all-targets --workspace --locked -- -D warnings
+          cargo test --workspace --locked
       # 公開ノードの一覧は、リポジトリに入れずにここで作る。Secrets を読めない実行では一覧なしで作り、遊ぶ人が REST を入れる
       - name: すんぼる草不可避に埋め込む公開ノードを探す
         working-directory: examples/sunboru-kusa/discover

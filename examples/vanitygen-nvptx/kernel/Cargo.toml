@@ -1,0 +1,13 @@
+[package]
+name = "vanitygen-kernel"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# cdylib は GPU（nvptx64-nvidia-cuda）の PTX、rlib は手元で動かす側から模様を読むのと、試すのに使う
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+heika-core = { path = "../../../crates/heika-core", default-features = false }

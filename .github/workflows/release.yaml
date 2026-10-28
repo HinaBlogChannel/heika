@@ -143,7 +143,8 @@ jobs:
         with:
           path: site
 
-  # CI が作ったコンテナイメージ（OCI のアーカイブ）を、ビルドし直さずに ghcr.io に写す。版のタグと latest を付ける。
+  # CI が作ったコンテナイメージ（OCI のアーカイブ）を、ビルドし直さずに ghcr.io に写す。版のタグを付け、
+  # いちばん新しい版のときだけ latest も付ける（古い系統の修正版を出しても、latest は戻らない）。
   # 同じものを写し直すだけなので、落ちたらこのジョブだけ Re-run すればよい
   container:
     needs: ci
@@ -170,8 +171,16 @@ jobs:
       - name: ghcr.io に写す
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          newest=$(gh api "repos/$GH_REPO/tags" --paginate --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          tags=("$GITHUB_REF_NAME")
+          if [ "$newest" = "$GITHUB_REF_NAME" ]; then
+            tags+=(latest)
+          else
+            echo "いちばん新しい版は $newest なので、latest は動かしません"
+          fi
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for tag in "$GITHUB_REF_NAME" latest; do
+          for tag in "${tags[@]}"; do
             # digest が変わるなら写さずに落とす（CI で付けた証明は、その digest に付いている）
             skopeo copy --all --preserve-digests "oci-archive:dist/heika-image-$GITHUB_REF_NAME.tar" "docker://$image:$tag"
           done

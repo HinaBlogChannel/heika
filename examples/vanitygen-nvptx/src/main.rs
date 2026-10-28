@@ -47,22 +47,15 @@ fn run() -> Result<(), String> {
         .map_err(|_| "使い方: vanitygen-nvptx [--cpu] 模様 秘密鍵を書くファイル".to_owned())?;
     let pattern = Pattern::parse(&pattern).map_err(|error| error.to_string())?;
     let out = PathBuf::from(out);
-    // 何時間も探してから書けないとわかるのを避けるため、先に作っておく
-    let mut file = create_secret_file(&out)?;
-    let result = search_and_write(&pattern, cpu, &mut file, &out);
-    if result.is_err() {
-        // 見つけられなかったときは、作った空のファイルを残さない
-        let _ = std::fs::remove_file(&out);
-    }
-    result
+    // 何時間も探してから書けないとわかるのを避けるため、作れるかを先に確かめる。
+    // 作ったままにすると、Ctrl-C で止めたときに空のファイルが残るので、すぐ消して、見つかってから作り直す
+    drop(create_secret_file(&out)?);
+    std::fs::remove_file(&out)
+        .map_err(|error| format!("{} を消せませんでした: {error}", out.display()))?;
+    search_and_write(&pattern, cpu, &out)
 }
 
-fn search_and_write(
-    pattern: &Pattern,
-    cpu: bool,
-    file: &mut File,
-    out: &Path,
-) -> Result<(), String> {
+fn search_and_write(pattern: &Pattern, cpu: bool, out: &Path) -> Result<(), String> {
     let seed =
         PrivateKey::generate().map_err(|error| format!("OS の乱数を取れませんでした: {error}"))?;
     println!(
@@ -123,7 +116,16 @@ fn search_and_write(
             "{counter} 番が当たったと返ってきましたが、手元で作り直すと模様に合いません"
         ));
     }
-    write_secret(file, out, &private_key)?;
+    // 探しているあいだに同じ名前のファイルができていたら、見つけた鍵をなくさないように、名前に番号を足して書く
+    let (mut file, out) = match create_secret_file(out) {
+        Ok(file) => (file, out.to_path_buf()),
+        Err(error) => {
+            eprintln!("{error}");
+            let other = PathBuf::from(format!("{}.{counter}", out.display()));
+            (create_secret_file(&other)?, other)
+        }
+    };
+    write_secret(&mut file, &out, &private_key)?;
     println!("{:.1} 秒で見つかりました", started.elapsed().as_secs_f64());
     println!("アドレス: {address}");
     println!("公開鍵: {public_key}");
@@ -174,7 +176,9 @@ fn cpu_worker(seed: &[u8; 32], pattern: &Pattern, search: &Search) -> Result<(),
 
 #[cfg(feature = "gpu")]
 mod gpu {
+    use std::ffi::c_int;
     use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     use cudarc::driver::sys::CUdevice_attribute;
     use cudarc::driver::{CudaContext, DriverError, LaunchConfig, PushKernelArg};
@@ -188,12 +192,11 @@ mod gpu {
         env!("CARGO_MANIFEST_DIR"),
         "/target/nvptx64-nvidia-cuda/release/vanitygen_kernel.ptx"
     ));
-    /// 1 ブロックのスレッドの数
-    const THREADS: u32 = 256;
-    /// SM 1 つあたりのブロックの数
-    const BLOCKS_PER_SM: u32 = 8;
-    /// 1 スレッドが 1 回の起動で試す数
-    const PER_THREAD: u32 = 16;
+    /// 1 回の起動にかける時間の目安。短いほど見つけてから止まるまでが速く、長いほど起動の手間が減る。
+    /// 画面を出している GPU では、長いと画面が固まったり、ウォッチドッグに止められたりする
+    const LAUNCH_TARGET: Duration = Duration::from_millis(100);
+    /// 1 スレッドが 1 回の起動で試す数の上限
+    const MAX_PER_THREAD: u32 = 1 << 16;
 
     pub fn device_count() -> Result<usize, String> {
         // libcuda がないと、cudarc は最初の呼び出しで panic するので、先に確かめる
@@ -240,23 +243,34 @@ mod gpu {
         let pattern_bytes: [u8; size_of::<Pattern>()] = unsafe { core::mem::transmute(*pattern) };
         let pattern_on_device = stream.clone_htod(&pattern_bytes)?;
         let mut found = stream.alloc_zeros::<u64>(1)?;
+        // ブロックの大きさと数は、カーネルのレジスターの使い方とカードから、いちばん埋まるものをドライバーに決めてもらう
+        let (blocks, threads) =
+            function.occupancy_max_potential_block_size(no_shared_memory, 0, 0, None)?;
+        println!(
+            "GPU {ordinal}: {threads} スレッドのブロックを {blocks} 個ずつ起動します（1 スレッドのレジスター {} 個）",
+            function.num_regs()?
+        );
         let config = LaunchConfig {
-            grid_dim: (sms * BLOCKS_PER_SM, 1, 1),
-            block_dim: (THREADS, 1, 1),
+            grid_dim: (blocks, 1, 1),
+            block_dim: (threads, 1, 1),
             shared_mem_bytes: 0,
         };
-        let batch = (sms * BLOCKS_PER_SM * THREADS) as u64 * PER_THREAD as u64;
+        // 1 スレッドが試す数は、1 回の起動が LAUNCH_TARGET くらいになるように、走らせながら合わせる
+        let mut per_thread: u32 = 1;
+        let mut settled = false;
         let result = loop {
             if search.found().is_some() {
                 break Ok(());
             }
+            let batch = blocks as u64 * threads as u64 * per_thread as u64;
             let start = search.take(batch);
+            let launched = Instant::now();
             let mut launch = stream.launch_builder(&function);
             launch
                 .arg(&seed_on_device)
                 .arg(&pattern_on_device)
                 .arg(&start)
-                .arg(&PER_THREAD)
+                .arg(&per_thread)
                 .arg(&mut found);
             if let Err(error) = unsafe { launch.launch(config) } {
                 break Err(error);
@@ -269,6 +283,19 @@ mod gpu {
                 }
                 Ok(_) => {
                     search.tried.fetch_add(batch, Ordering::Relaxed);
+                    let took = launched.elapsed();
+                    if !settled && took >= LAUNCH_TARGET / 2 {
+                        settled = true;
+                        println!(
+                            "GPU {ordinal}: 1 スレッドが {per_thread} 個ずつ試します（1 回 {} ミリ秒）",
+                            took.as_millis()
+                        );
+                    }
+                    if took < LAUNCH_TARGET / 2 {
+                        per_thread = (per_thread * 2).min(MAX_PER_THREAD);
+                    } else if took > LAUNCH_TARGET * 2 {
+                        per_thread = (per_thread / 2).max(1);
+                    }
                 }
                 Err(error) => break Err(error),
             }
@@ -277,6 +304,11 @@ mod gpu {
         stream.memset_zeros(&mut seed_on_device)?;
         stream.synchronize()?;
         result
+    }
+
+    /// ブロックの大きさによらず、動的な共有メモリは使わない
+    extern "C" fn no_shared_memory(_: c_int) -> usize {
+        0
     }
 }
 

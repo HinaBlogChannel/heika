@@ -224,9 +224,9 @@ fn check_storage_mode(db: &Db, mode: Mode) -> Result<(), NodeError> {
             return Err(format!(
                 "このデータは storage.mode: {} で動かしてきたので、{} にはできません（消したものは戻りません）。\
                  {} にするなら、dataDirectory を空にして最初から追いつき直してください",
-                stored.as_str(),
-                mode.as_str(),
-                mode.as_str()
+                stored.name(),
+                mode.name(),
+                mode.name()
             )
             .into());
         }
@@ -1117,7 +1117,7 @@ pub(crate) fn chain_config(spec: &NodeConfig) -> Result<ChainConfig, NodeError> 
     })
 }
 
-/// 残し方（`storage.mode`）を、中核の刈り込みの設定にする。`archive` なら刈り込まない
+/// 残し方（`storage.mode`）を、中核の刈り込みの設定にする。`Archive` なら刈り込まない
 pub(crate) fn keep(spec: &NodeConfig) -> Result<Option<Keep>, NodeError> {
     let retention = spec.storage.retention();
     let (Some(state), Some(trie)) = (retention.state, retention.state_proofs) else {

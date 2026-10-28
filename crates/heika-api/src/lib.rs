@@ -25,7 +25,7 @@
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
 //! - `/transactions/confirmed`: 承認されたトランザクションを、関わったアドレスと高さで検索する。ノードが索引を
-//!   作っているときだけ（`storage.search` の `transactions`）
+//!   作っているときだけ（`storage.search` の `Transactions`）
 //! - `/transactionStatus/{hash}`、`/transactions/confirmed/{hash}`、`/blocks/{height}/transactions/{hash}/merkle`:
 //!   送ったトランザクションの行方と、入ったブロックへの Merkle の経路
 //!
@@ -210,7 +210,7 @@ pub trait Reader: Send + Sync {
     fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String>;
     /// 承認されたトランザクションを `filter` で絞り、`page` の分を返す。`after` があれば、並び（高さとブロックの中の
     /// 番号の順）でその位置より後から。アドレス、署名者、宛先で絞るのに要る索引（`storage.search` の
-    /// `transactions`）を作っていなければ `None`。それらで絞らなければ、索引がなくてもしまってあるブロックを順に読む
+    /// `Transactions`）を作っていなければ `None`。それらで絞らなければ、索引がなくてもしまってあるブロックを順に読む
     fn search_transactions(
         &self,
         filter: &TransactionFilter,

@@ -7,7 +7,7 @@
 //!   name: symbol-testnet-1
 //! spec:
 //!   network:
-//!     type: testnet
+//!     type: Testnet
 //!   dataDirectory: /path/to/data
 //!   certificates:
 //!     directory: /path/to/certificates
@@ -15,7 +15,7 @@
 //!     address: 0.0.0.0:7900
 //!     publicHost: symbol-testnet-1.example
 //!   storage:
-//!     mode: light        # archive / full / light
+//!     mode: Light        # Archive / Full / Light
 //!   harvesters:
 //!     - signer: /path/to/signer.key
 //!       vrf: /path/to/vrf.key
@@ -56,7 +56,6 @@ pub struct Metadata {
 
 /// ネットワークの種類
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub enum NetworkType {
     Mainnet,
     Testnet,
@@ -71,15 +70,15 @@ pub enum NetworkType {
 pub struct Network {
     #[serde(rename = "type")]
     pub network_type: NetworkType,
-    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）。`type: custom` では要る。
+    /// ノードの `resources` フォルダー（`config-network.properties` などのあるところ）。`type: Custom` では要る。
     /// メインネットとテストネットでは書かなくてよく、書けば決め打ちの設定の代わりにそこから読む
     /// （ネットワークの設定が変わって、heika がまだ追いついていないときなど）
     #[serde(default)]
     pub resources: Option<PathBuf>,
-    /// `type: custom` のときだけ。Nemesis のブロックのハッシュ（16進）。`nemesisSeed` を書けば省ける
+    /// `type: Custom` のときだけ。Nemesis のブロックのハッシュ（16進）。`nemesisSeed` を書けば省ける
     #[serde(default)]
     pub nemesis_hash: Option<String>,
-    /// `type: custom` のときだけ。Nemesis の seed フォルダー（`heika experimental nemgen` か catapult の nemgen で
+    /// `type: Custom` のときだけ。Nemesis の seed フォルダー（`heika experimental nemgen` か catapult の nemgen で
     /// 作ったもの）。DB が空なら、ピアから取らずにここの Nemesis から始め、ピアにつながらなくても先端の段階に
     /// 進む（新しいネットワークの最初のノード）。`nemesisHash` も書けば、合うかを確かめる
     #[serde(default)]
@@ -214,7 +213,6 @@ pub struct Certificates {
 
 /// 何を残すか。種類ごとの残し方は [`Storage::retention`]。重い（たくさん残す）順に並べる
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
 pub enum Mode {
     /// 全部の高さの状態、木のノード、ブロック、ステートメント、確定の証明を残す。昔の高さの状態とその証明を
     /// 問い合わせられる
@@ -222,12 +220,21 @@ pub enum Mode {
     /// 状態と木のノードの差分は確定より 2 エポック下まで。ブロック、ステートメント、確定の証明は全部残す
     #[default]
     Full,
-    /// `full` から、古いブロックとステートメントも消す（再開に要る分は残す）。要るものだけを読む
+    /// `Full` から、古いブロックとステートメントも消す（再開に要る分は残す）。要るものだけを読む
     Light,
 }
 
 impl Mode {
     /// 設定ファイルに書く名前
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::Full => "Full",
+            Self::Light => "Light",
+        }
+    }
+
+    /// DB に覚える名前。設定ファイルの名前を大文字で始めるようにする前からの、小文字のまま
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Archive => "archive",
@@ -236,6 +243,7 @@ impl Mode {
         }
     }
 
+    /// [`Mode::as_str`] の名前から
     pub fn parse(name: &str) -> Option<Self> {
         [Self::Archive, Self::Full, Self::Light]
             .into_iter()
@@ -258,7 +266,7 @@ pub struct Retention {
 pub struct Storage {
     #[serde(default)]
     pub mode: Mode,
-    /// アカウントの表を全部はメモリに持たず、要るものだけを読む。`light` では必ず真。書かなければ真
+    /// アカウントの表を全部はメモリに持たず、要るものだけを読む。`Light` では必ず真。書かなければ真
     #[serde(default)]
     pub partial_state: Option<bool>,
     #[serde(default)]
@@ -270,7 +278,6 @@ pub struct Storage {
 
 /// `storage.search` に書ける検索
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub enum Search {
     /// `/metadata` の検索（送り主、宛先、対象から）
     Metadata,
@@ -280,7 +287,7 @@ pub enum Search {
     Transactions,
 }
 
-/// `full` と `light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
+/// `Full` と `Light` で、状態と木のノードの差分を残すエポックの数。枝を取り替えるときの巻き戻しに要る分
 const PRUNED_EPOCHS: u32 = 2;
 
 impl Storage {
@@ -524,7 +531,7 @@ impl Manifest {
         let storage = &manifest.spec.storage;
         if storage.mode == Mode::Light && storage.partial_state == Some(false) {
             return Err(ConfigError(
-                "storage.mode: light では、storage.partialState を false にできません".to_owned(),
+                "storage.mode: Light では、storage.partialState を false にできません".to_owned(),
             ));
         }
         if !manifest.spec.roles().contains(NodeRoles::PEER) {
@@ -535,20 +542,20 @@ impl Manifest {
         let network = &manifest.spec.network;
         if network.network_type == NetworkType::Custom && network.resources.is_none() {
             return Err(ConfigError(
-                "network.type: custom には network.resources が要ります".to_owned(),
+                "network.type: Custom には network.resources が要ります".to_owned(),
             ));
         }
         let pinned = network.nemesis_hash.is_some() || network.nemesis_seed.is_some();
         match (network.network_type, pinned) {
             (NetworkType::Custom, false) => {
                 return Err(ConfigError(
-                    "network.type: custom には network.nemesisHash か network.nemesisSeed が要ります"
+                    "network.type: Custom には network.nemesisHash か network.nemesisSeed が要ります"
                         .to_owned(),
                 ));
             }
             (NetworkType::Mainnet | NetworkType::Testnet, true) => {
                 return Err(ConfigError(
-                    "network.nemesisHash と network.nemesisSeed は network.type: custom のときだけ書きます"
+                    "network.nemesisHash と network.nemesisSeed は network.type: Custom のときだけ書きます"
                         .to_owned(),
                 ));
             }
@@ -572,7 +579,7 @@ mod tests {
 kind: Peer
 spec:
   network:
-    type: testnet
+    type: Testnet
     resources: /resources
   dataDirectory: /data
   certificates:
@@ -606,7 +613,7 @@ spec:
     - signer: /remote
       vrf: /vrf2
   storage:
-    mode: light
+    mode: Light
   peers: 4
 "
         );
@@ -689,14 +696,14 @@ spec:
         assert!(Manifest::parse(&MINIMAL.replace("v1alpha1", "v1alpha2")).is_err());
         assert!(Manifest::parse(&MINIMAL.replace("kind: Peer", "kind: Node")).is_err());
         // custom には Nemesis のハッシュが要り、ほかのネットワークには書かない
-        let custom = MINIMAL.replace("type: testnet", "type: custom");
+        let custom = MINIMAL.replace("type: Testnet", "type: Custom");
         assert!(Manifest::parse(&custom).is_err());
         let with_hash = custom.replace(
             "resources: /resources",
             "resources: /resources\n    nemesisHash: AB",
         );
         assert!(Manifest::parse(&with_hash).is_ok());
-        let testnet_with_hash = with_hash.replace("type: custom", "type: testnet");
+        let testnet_with_hash = with_hash.replace("type: Custom", "type: Testnet");
         assert!(Manifest::parse(&testnet_with_hash).is_err());
         // seed を書けばハッシュは省ける。seed もほかのネットワークには書かない
         let with_seed = custom.replace(
@@ -711,7 +718,7 @@ spec:
                 .nemesis_seed,
             Some(PathBuf::from("/seed"))
         );
-        assert!(Manifest::parse(&with_seed.replace("type: custom", "type: mainnet")).is_err());
+        assert!(Manifest::parse(&with_seed.replace("type: Custom", "type: Mainnet")).is_err());
         // resources は custom にだけ要る。メインネットとテストネットは決め打ちの設定を使う
         let without_resources = MINIMAL.replace("    resources: /resources\n", "");
         assert_eq!(
@@ -725,9 +732,9 @@ spec:
         let custom_without_resources = with_hash.replace("    resources: /resources\n", "");
         assert!(Manifest::parse(&custom_without_resources).is_err());
         // light は要るものだけを読む形でしか動かない
-        let light = format!("{MINIMAL}  storage:\n    mode: light\n    partialState: false\n");
+        let light = format!("{MINIMAL}  storage:\n    mode: Light\n    partialState: false\n");
         assert!(Manifest::parse(&light).is_err());
-        let archive = format!("{MINIMAL}  storage:\n    mode: archive\n    partialState: false\n");
+        let archive = format!("{MINIMAL}  storage:\n    mode: Archive\n    partialState: false\n");
         let storage = Manifest::parse(&archive).unwrap().spec.storage;
         assert_eq!(storage.retention().state, None);
         assert!(!storage.partial_state());
@@ -748,20 +755,21 @@ spec:
         for invalid in ["10GB", "1.5Gi", "Gi", "-1", "99999999999Ti"] {
             assert!(min_free(invalid).is_err(), "{invalid}");
         }
-        // 前の名前は読まない
+        // 前の名前と、小文字の値は読まない
+        assert!(Manifest::parse(&MINIMAL.replace("type: Testnet", "type: testnet")).is_err());
         assert!(Manifest::parse(&format!("{MINIMAL}  minFreeGigabytes: 10\n")).is_err());
         // 検索表は名前で選ぶ。知らない名前は読めない
-        let search = format!("{MINIMAL}  storage:\n    search: [metadata]\n");
+        let search = format!("{MINIMAL}  storage:\n    search: [Metadata]\n");
         let storage = Manifest::parse(&search).unwrap().spec.storage;
         assert_eq!(storage.searches(), Searches::METADATA);
-        assert!(Manifest::parse(&search.replace("metadata", "accounts")).is_err());
-        let both = search.replace("[metadata]", "[metadata, namespaces]");
+        assert!(Manifest::parse(&search.replace("Metadata", "Accounts")).is_err());
+        let both = search.replace("[Metadata]", "[Metadata, Namespaces]");
         let storage = Manifest::parse(&both).unwrap().spec.storage;
         assert_eq!(
             storage.searches(),
             Searches::METADATA.union(Searches::NAMESPACES)
         );
-        let archive = search.replace("storage:\n", "storage:\n    mode: archive\n");
+        let archive = search.replace("storage:\n", "storage:\n    mode: Archive\n");
         let storage = Manifest::parse(&archive).unwrap().spec.storage;
         assert_eq!(storage.searches(), Searches::METADATA.union(Searches::PAST));
     }

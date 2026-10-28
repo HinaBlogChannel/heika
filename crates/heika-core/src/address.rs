@@ -1,7 +1,9 @@
 //! アドレス。catapult の `model/Address.cpp`。
 
-use std::fmt;
-use std::str::FromStr;
+use alloc::format;
+use alloc::string::String;
+use core::fmt;
+use core::str::FromStr;
 
 use ripemd::Ripemd160;
 use sha3::{Digest, Sha3_256};
@@ -143,7 +145,7 @@ impl fmt::Display for ParseAddressError {
     }
 }
 
-impl std::error::Error for ParseAddressError {}
+impl core::error::Error for ParseAddressError {}
 
 #[cfg(test)]
 mod tests {

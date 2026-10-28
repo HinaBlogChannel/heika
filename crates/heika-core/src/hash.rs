@@ -1,7 +1,7 @@
 //! ハッシュ。
 
-use std::fmt;
-use std::str::FromStr;
+use core::fmt;
+use core::str::FromStr;
 
 use crate::hex::{self, ParseHexError};
 

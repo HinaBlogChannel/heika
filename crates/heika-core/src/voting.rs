@@ -13,7 +13,8 @@
 //!      署名の対象は、子の公開鍵とエポック（u64）。消した鍵は、秘密鍵だけが0になる
 //! ```
 
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
 
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
@@ -316,7 +317,7 @@ impl fmt::Display for VotingKeyError {
     }
 }
 
-impl std::error::Error for VotingKeyError {}
+impl core::error::Error for VotingKeyError {}
 
 #[cfg(test)]
 mod tests {
@@ -412,7 +413,7 @@ mod tests {
         assert_eq!(bytes[16..32], [0xFF; 16]);
 
         // 根の鍵は乱数の最初の32バイトで、ファイルには公開鍵だけが入る
-        let root: [u8; 32] = std::array::from_fn(|i| i as u8 + 1);
+        let root: [u8; 32] = core::array::from_fn(|i| i as u8 + 1);
         let root = PrivateKey::from_bytes(&root);
         assert_eq!(tree.public_key(), PublicKey::from_private_key(&root));
         assert_eq!(bytes[32..64], tree.public_key().0);
@@ -421,7 +422,7 @@ mod tests {
         assert_eq!(bytes[72..80], 7u64.to_le_bytes());
 
         // 子の鍵は終わりのエポックから作って並べる。1つめは乱数の次の32バイト
-        let first: [u8; 32] = std::array::from_fn(|i| i as u8 + 33);
+        let first: [u8; 32] = core::array::from_fn(|i| i as u8 + 33);
         assert_eq!(bytes[80..112], first);
         let signature = root.sign(&[
             &PublicKey::from_private_key(&PrivateKey::from_bytes(&first)).0,

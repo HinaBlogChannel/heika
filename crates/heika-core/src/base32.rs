@@ -1,6 +1,9 @@
 //! Base32（RFC 4648、パディングなし）。catapult の `utils/Base32.cpp` に合わせて、
 //! 5バイト単位のデータと8文字単位の文字列だけを扱い、大文字だけを受け付ける。
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 pub fn encode(bytes: &[u8]) -> String {

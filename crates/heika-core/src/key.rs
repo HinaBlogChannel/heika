@@ -1,7 +1,9 @@
 //! 鍵。
 
-use std::fmt;
-use std::str::FromStr;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use core::fmt;
+use core::str::FromStr;
 
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
@@ -136,7 +138,7 @@ impl fmt::Display for ParsePrivateKeyError {
     }
 }
 
-impl std::error::Error for ParsePrivateKeyError {}
+impl core::error::Error for ParsePrivateKeyError {}
 
 #[cfg(test)]
 mod tests {

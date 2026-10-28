@@ -1,9 +1,11 @@
 //! ネットワークの識別子と、ネットワークごとに決まっている値。
 //! catapult の `model/NetworkIdentifier.h` と、ノードの `config-network.properties`。
 
-use std::fmt;
-use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use core::fmt;
+use core::str::FromStr;
+use core::time::Duration;
+#[cfg(feature = "std")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hash::Hash256;
 use crate::hex::{self, ParseHexError};
@@ -228,6 +230,7 @@ impl NetworkParameters {
     }
 
     /// Nemesis の時刻。
+    #[cfg(feature = "std")]
     pub fn epoch(&self) -> SystemTime {
         UNIX_EPOCH + self.epoch_adjustment
     }
@@ -240,6 +243,7 @@ impl NetworkParameters {
 
     /// ふつうの時刻をネットワーク時刻にする。ミリ秒より細かいところは切り捨てる。
     /// エポックより前か、u64 のミリ秒に収まらなければ `None`。
+    #[cfg(feature = "std")]
     pub fn timestamp_at(&self, time: SystemTime) -> Option<NetworkTimestamp> {
         let elapsed = time.duration_since(self.epoch()).ok()?;
         u64::try_from(elapsed.as_millis())
@@ -248,6 +252,7 @@ impl NetworkParameters {
     }
 
     /// ネットワーク時刻をふつうの時刻にする。OS の時刻で表せなければ `None`。
+    #[cfg(feature = "std")]
     pub fn time_of(&self, timestamp: NetworkTimestamp) -> Option<SystemTime> {
         self.epoch().checked_add(Duration::from_millis(timestamp.0))
     }
@@ -454,6 +459,7 @@ const MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES: [(Hash256, Hash256); 20] = [
 mod tests {
     use super::*;
 
+    #[cfg(feature = "std")]
     #[test]
     fn converts_between_system_time_and_network_time() {
         let network = NetworkParameters::MAINNET;

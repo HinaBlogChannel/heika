@@ -21,9 +21,11 @@ RUN apt-get update \
 FROM scratch
 ARG TARGETARCH
 LABEL org.opencontainers.image.source=https://github.com/hinablogchannel/heika \
-      org.opencontainers.image.licenses=AGPL-3.0-only \
+      org.opencontainers.image.licenses="AGPL-3.0-only AND MPL-2.0" \
       org.opencontainers.image.description="Symbol のノード運営のための、鍵と証明書のコマンドラインツール"
 COPY --from=base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# 証明書の束（Mozilla の一覧から作ったもの、MPL-2.0）のライセンスと出どころ
+COPY --from=base /usr/share/doc/ca-certificates/copyright /usr/share/doc/ca-certificates/copyright
 # 名前付きのボリュームは、最初にここの持ち主を写すので、そのまま書ける
 COPY --from=base --chown=65532:65532 /data /data
 COPY --chmod=0755 heika-${TARGETARCH} /heika

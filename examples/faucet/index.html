@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>蛇口</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafaf7; --fg: #1d1d1b; --muted: #6b6b66; --line: #d8d8d0; --accent: #2a6f97; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #e8e8e3; --muted: #9a9a93; --line: #3a3a36; --accent: #7fb7d9; --bad: #f2b8b5; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.7 system-ui, sans-serif; }
+  main { max-width: 34rem; margin: 0 auto; padding: 3rem 16px; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  p { margin: .5rem 0; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  form { display: flex; flex-direction: column; gap: .75rem; margin: 1.5rem 0; }
+  input { font: 1rem ui-monospace, monospace; padding: .6rem .7rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { font: inherit; padding: .6rem; border: 0; border-radius: 6px; background: var(--accent); color: var(--bg); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  progress { width: 100%; }
+  #status { min-height: 3rem; overflow-wrap: anywhere; }
+  .bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>蛇口</h1>
+  <p id="about" class="muted">読み込んでいます…</p>
+  <form id="form">
+    <input id="address" placeholder="受け取るアドレス" autocomplete="off" spellcheck="false" required>
+    <button id="claim">もらう</button>
+  </form>
+  <progress id="progress" hidden></progress>
+  <div id="status"></div>
+</main>
+
+<!-- パズルを解く Worker。SHA-256 は自分で書く（Web Crypto は https か localhost でしか使えないので） -->
+<script id="solver" type="text/plain">
+const K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+const w = new Uint32Array(64);
+
+// ASCII の text（55 バイトまで）の SHA-256 の、頭の 8 バイトを [上位 32 ビット, 下位 32 ビット] で返す
+function head(text) {
+  w.fill(0);
+  for (let i = 0; i < text.length; i++) w[i >> 2] |= text.charCodeAt(i) << (24 - 8 * (i & 3));
+  w[text.length >> 2] |= 0x80 << (24 - 8 * (text.length & 3));
+  w[15] = text.length * 8;
+  for (let i = 16; i < 64; i++) {
+    const a = w[i - 15], b = w[i - 2];
+    const s0 = ((a >>> 7) | (a << 25)) ^ ((a >>> 18) | (a << 14)) ^ (a >>> 3);
+    const s1 = ((b >>> 17) | (b << 15)) ^ ((b >>> 19) | (b << 13)) ^ (b >>> 10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+  let [a, b, c, d, e, f, g, h] = H;
+  for (let i = 0; i < 64; i++) {
+    const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+    const t1 = (h + S1 + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;
+    const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+    const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+    h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+  }
+  return [(a + H[0]) >>> 0, (b + H[1]) >>> 0];
+}
+
+// 頭の bits ビットが 0 か
+function enough([high, low], bits) {
+  if (bits <= 32) return bits === 0 || Math.clz32(high) >= bits;
+  return high === 0 && Math.clz32(low) >= bits - 32;
+}
+
+// サーバーと同じく `{id}:{index}:{counter}` を数える。途中で、計算した数を知らせる
+function solve(id, bits, count) {
+  const solutions = [];
+  let hashes = 0;
+  for (let index = 0; index < count; index++) {
+    const prefix = `${id}:${index}:`;
+    for (let counter = 0; ; counter++) {
+      hashes++;
+      if ((hashes & 0xffff) === 0) postMessage({ hashes });
+      if (enough(head(prefix + counter), bits)) {
+        solutions.push(counter);
+        postMessage({ hashes, solved: index + 1 });
+        break;
+      }
+    }
+  }
+  return { hashes, solutions };
+}
+
+onmessage = ({ data: { id, bits, count } }) => postMessage({ done: solve(id, bits, count) });
+</script>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const xym = (amount) => (amount / 1e6).toLocaleString("ja-JP", { maximumFractionDigits: 6 });
+const hours = (seconds) => seconds >= 3600 ? `${Math.round(seconds / 3600)} 時間` : `${Math.round(seconds / 60)} 分`;
+
+function show(text, bad = false) {
+  $("status").textContent = text;
+  $("status").className = bad ? "bad" : "";
+}
+
+async function api(path, init) {
+  const response = await fetch(path, init);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message ?? `${response.status}`);
+  return body;
+}
+
+function solve(challenge) {
+  if (challenge.bits === 0) return Promise.resolve({ solutions: Array(challenge.count).fill(0) });
+  const url = URL.createObjectURL(new Blob([$("solver").textContent], { type: "text/javascript" }));
+  const worker = new Worker(url);
+  URL.revokeObjectURL(url);
+  const progress = $("progress");
+  progress.hidden = false;
+  progress.max = challenge.count;
+  progress.value = 0;
+  const started = performance.now();
+  return new Promise((resolve, reject) => {
+    worker.onerror = (event) => { worker.terminate(); reject(new Error(event.message)); };
+    worker.onmessage = ({ data }) => {
+      if (data.solved) progress.value = data.solved;
+      if (data.done) {
+        worker.terminate();
+        const seconds = (performance.now() - started) / 1000;
+        resolve({ ...data.done, seconds });
+      } else {
+        show(`計算しています（${progress.value} / ${challenge.count}、めやす ${Math.ceil(challenge.expectedSeconds)} 秒）`);
+      }
+    };
+    worker.postMessage(challenge);
+  });
+}
+
+async function watch(id) {
+  for (;;) {
+    const claim = await api(`api/claims/${id}`);
+    switch (claim.state) {
+      case "Queued": show("受け付けました。まとめて送るのを待っています"); break;
+      case "Announced": show(`送りました。承認を待っています\n${claim.hash}`); break;
+      case "Confirmed": show(`高さ ${claim.height} で届きました\n${claim.hash}`); return;
+      case "Failed": show(claim.reason, true); return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+}
+
+$("form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("claim").disabled = true;
+  try {
+    const address = $("address").value.trim();
+    show("確かめています");
+    const challenge = await api(`api/challenge?address=${encodeURIComponent(address)}`);
+    const { solutions, hashes, seconds } = await solve(challenge);
+    $("progress").hidden = true;
+    if (hashes) console.log(`この端末は 1 秒に ${Math.round(hashes / seconds)} 回（referenceHashRate のめやす）`);
+    const { id } = await api("api/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge: challenge.id, solutions }),
+    });
+    await watch(id);
+  } catch (error) {
+    $("progress").hidden = true;
+    show(error.message, true);
+  } finally {
+    $("claim").disabled = false;
+  }
+};
+
+api("api/info").then(
+  (info) => { $("about").textContent = `1 回に ${xym(info.amount)} XYM。もらったら ${hours(info.cooldownSeconds)} あけてください。`; },
+  (error) => show(error.message, true),
+);
+</script>
+</body>
+</html>

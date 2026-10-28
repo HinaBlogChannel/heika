@@ -1,4 +1,7 @@
 //! Symbol の合意形成に関わる計算。ノードも同じ計算をしていて、間違えると合意から外れるもの。
+//!
+//! std がなくても、alloc があれば使える（`#![no_std]`）。OS の時刻とネットワーク時刻の行き来
+//! （[`network::NetworkParameters::timestamp_at`] など）は、feature の `std`（既定）で入る。
 
 #![cfg_attr(not(test), no_std)]
 

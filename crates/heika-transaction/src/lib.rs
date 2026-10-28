@@ -1,5 +1,7 @@
 //! Symbol のトランザクション。catbuffer の `schemas/symbol` のレイアウトで読み書きし、
 //! catapult と同じ範囲に署名して、同じ方法でハッシュを取る。
+//!
+//! std がなくても、alloc があれば使える（`#![no_std]`）。heika-core は `default-features = false` で使う。
 
 #![cfg_attr(not(test), no_std)]
 

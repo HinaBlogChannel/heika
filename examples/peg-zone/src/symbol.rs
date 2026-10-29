@@ -268,6 +268,14 @@ impl Chain {
         Address::from_public_key(key, self.parameters.identifier)
     }
 
+    /// ネットワークの時刻（エポックからのミリ秒）
+    pub fn now(&self) -> Result<u64, String> {
+        self.parameters
+            .timestamp_at(SystemTime::now())
+            .map(|timestamp| timestamp.0)
+            .ok_or_else(|| "時計がネットワークのエポックより前になっています".to_owned())
+    }
+
     /// 今から [`LIFETIME`] 後の期限
     pub fn deadline(&self) -> Result<u64, String> {
         self.parameters
@@ -438,6 +446,9 @@ impl Chain {
                 .map(Some)
                 .map_err(|error| format!("{path}: {error}")),
             404 => Ok(None),
+            501 => Err(format!(
+                "{path}: 501（heika のノードなら、設定の storage.search に Transactions を入れてください）"
+            )),
             status => Err(format!("{path}: {status}")),
         }
     }

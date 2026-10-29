@@ -1,0 +1,29 @@
+[package]
+name = "evm-bridge"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "XYM を EVM に持っていく橋。預かりも発行も、見張り役で分けて持つ鍵の署名 1 つで認める"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+frost-core = "3.0.0"
+frost-ed25519 = "3.0.0"
+frost-secp256k1 = "3.0.0"
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha3 = "0.12.0"
+ureq = { version = "3.4.2", default-features = false }
+zeroize = "1.9.1"
+
+[dev-dependencies]
+rand_chacha = "0.3.1"

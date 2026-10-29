@@ -13,6 +13,7 @@ use heika_block::Block;
 use heika_block::finalization::proof::{closes_epoch, proof_header};
 use heika_block::scoring::{self, BlockStatistic, difficulty};
 use heika_chain::chain::Keep;
+use heika_chain::nemesis::nemesis_proof;
 use heika_chain::store::EXECUTOR_META;
 use heika_chain::verify::Tip;
 use heika_core::hash::Hash256;
@@ -817,6 +818,9 @@ fn sync_proofs(
         }
         let proof = match prefetched.remove(&epoch) {
             Some(proof) => proof,
+            // エポック 1 は、Nemesis を確定した投票のない証明で、Nemesis のハッシュだけで決まる。ピアに頼まずに作る
+            // （heika のノードは seed から始めても持っていないことがあり、heika だけのネットでは頼んでも返ってこない）
+            None if epoch == 1 => nemesis_proof(&context.nemesis),
             None => {
                 asked += 1;
                 node.finalization_proof_at_epoch(epoch)?

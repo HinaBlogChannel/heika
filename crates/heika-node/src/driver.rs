@@ -15,7 +15,7 @@ use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
 use heika_chain::event::{ChainEvent, PeerId};
-use heika_chain::nemesis::{SEED_BLOCK_FILE, read_seed_block};
+use heika_chain::nemesis::{SEED_BLOCK_FILE, nemesis_proof, read_seed_block};
 use heika_chain::produce::{Assemble, Pending};
 use heika_chain::store::{EXECUTOR_META, now_or_never};
 use heika_chain::verify::{nemesis_hash, verify_alone};
@@ -326,6 +326,12 @@ fn catch_up_if_behind(
         )?;
         if stopping() {
             return Ok(());
+        }
+        // Nemesis を確定した証明もしまう。ほかのノードが追いつくときに頼まれたら渡せるように
+        if db.proof(1)?.is_none() {
+            let mut batch = db.batch()?;
+            batch.put_proof(1, &nemesis_proof(&block.hash()))?;
+            batch.commit()?;
         }
         println!("network.nemesisSeed の Nemesis から始めました");
     }

@@ -685,6 +685,19 @@ pub fn read_seed_block(element: &[u8]) -> Result<Block, NemesisError> {
     Ok(block)
 }
 
+/// Nemesis を確定した、エポック 1 の証明。投票はなく、Nemesis のハッシュだけで決まる（大きさ、版、エポック 1、
+/// ポイント 1、高さ 1、ハッシュ）。catapult の nemgen が seed に書くものと同じ
+pub fn nemesis_proof(hash: &Hash256) -> Vec<u8> {
+    let mut proof = Vec::with_capacity(56);
+    proof.extend_from_slice(&56u32.to_le_bytes());
+    proof.extend_from_slice(&1u32.to_le_bytes());
+    proof.extend_from_slice(&1u32.to_le_bytes());
+    proof.extend_from_slice(&1u32.to_le_bytes());
+    proof.extend_from_slice(&1u64.to_le_bytes());
+    proof.extend_from_slice(&hash.0);
+    proof
+}
+
 impl Nemesis {
     /// catapult のノードの `seed` フォルダーに置くファイル（パスと中身）。`seedDirectory` に置けば、catapult の
     /// ノードはここから始める。ブロック、ステートメント、高さ 1 のハッシュ、Nemesis を確定した証明
@@ -712,17 +725,9 @@ impl Nemesis {
         let mut hashes = vec![0u8; 32];
         hashes.extend_from_slice(&hash.0);
 
-        // 確定した最後のラウンド（エポック 1、ポイント 1、高さ 1、ハッシュ）
-        let mut round = Vec::new();
-        round.extend_from_slice(&1u32.to_le_bytes());
-        round.extend_from_slice(&1u32.to_le_bytes());
-        round.extend_from_slice(&1u64.to_le_bytes());
-        round.extend_from_slice(&hash.0);
-        // 投票のない証明（大きさ、版、ラウンド、高さ、ハッシュ）
-        let mut proof = Vec::new();
-        proof.extend_from_slice(&56u32.to_le_bytes());
-        proof.extend_from_slice(&1u32.to_le_bytes());
-        proof.extend_from_slice(&round);
+        // 確定した最後のラウンド（エポック 1、ポイント 1、高さ 1、ハッシュ）は、証明の版のあと
+        let proof = nemesis_proof(&hash);
+        let round = proof[8..].to_vec();
 
         vec![
             ("index.dat", 1u64.to_le_bytes().to_vec()),
@@ -887,6 +892,15 @@ mod tests {
             nemesis.statement
         );
         assert_eq!(&file("00000/00001.proof")[24..], &hash.0);
+        assert_eq!(file("proof.index.dat"), &file("00000/00001.proof")[8..]);
+        // ノードが手元で作るエポック 1 の証明も、seed のものと同じで、エポック 1 を閉じる
+        assert_eq!(file("00000/00001.proof"), &nemesis_proof(&hash));
+        let header = heika_block::finalization::proof::proof_header(&nemesis_proof(&hash)).unwrap();
+        assert_eq!(
+            (header.round.epoch, header.height, header.hash),
+            (1, 1, hash)
+        );
+        assert!(heika_block::finalization::proof::closes_epoch(&header, 60));
         // 書いたものから、同じブロックが読める
         assert_eq!(read_seed_block(element).unwrap(), nemesis.block);
         assert!(read_seed_block(&element[..100]).is_err());

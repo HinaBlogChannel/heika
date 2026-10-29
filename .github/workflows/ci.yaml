@@ -201,13 +201,28 @@ jobs:
           touch target/nvptx64-nvidia-cuda/release/vanitygen_kernel.ptx
           cargo clippy --all-targets --workspace --locked -- -D warnings
           cargo test --workspace --locked
-      # コントラクトの forge のテストと、anvil で通しで動かすテスト（--ignored）は、Foundry が要るのでここではしない
       - name: XYM を EVM に持っていく橋を確かめる
         working-directory: examples/evm-bridge
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings
           cargo test --locked
+      # Foundry は、外の Action を使わずに、版と sha256 を決め打ちしてリリースから取る。出てから 2 週間以上たった安定版
+      # （v1.8.5、2026-10-05）。sha256 は、リリースの .sha256 と sigstore の署名が指すものと同じ
+      - name: Foundry を入れる
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -sSLf -o foundry.tar.gz https://github.com/foundry-rs/foundry/releases/download/v1.8.5/foundry_v1.8.5_linux_amd64.tar.gz
+          echo "6c66ffcc55fa4249197721baa3098bc208014ea1d8aa04b2ed50ac6bccffb226  foundry.tar.gz" | sha256sum -c -
+          mkdir foundry
+          tar xzf foundry.tar.gz -C foundry forge anvil
+          echo "$RUNNER_TEMP/foundry" >> "$GITHUB_PATH"
+      # forge build は、foundry.toml の版の solc を取ってくる（forge がハッシュを確かめる）
+      - name: 橋のコントラクトを確かめて、anvil で通しで動かす
+        working-directory: examples/evm-bridge
+        run: |
+          (cd contracts && forge fmt --check && forge build && forge test)
+          cargo test --locked --test anvil -- --ignored
       # 公開ノードの一覧は、リポジトリに入れずにここで作る。Secrets を読めない実行では一覧なしで作り、遊ぶ人が REST を入れる
       - name: すんぼる草不可避に埋め込む公開ノードを探す
         working-directory: examples/sunboru-kusa/discover

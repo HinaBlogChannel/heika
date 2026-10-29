@@ -143,6 +143,7 @@ jobs:
             examples/faucet
             examples/roast
             examples/vanitygen-nvptx
+            examples/peg-zone
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -200,6 +201,13 @@ jobs:
           touch target/nvptx64-nvidia-cuda/release/vanitygen_kernel.ptx
           cargo clippy --all-targets --workspace --locked -- -D warnings
           cargo test --workspace --locked
+      # コントラクトの forge のテストと、anvil で通しで動かすテスト（--ignored）は、Foundry が要るのでここではしない
+      - name: XYM を EVM に持っていく橋を確かめる
+        working-directory: examples/peg-zone
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
       # 公開ノードの一覧は、リポジトリに入れずにここで作る。Secrets を読めない実行では一覧なしで作り、遊ぶ人が REST を入れる
       - name: すんぼる草不可避に埋め込む公開ノードを探す
         working-directory: examples/sunboru-kusa/discover

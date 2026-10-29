@@ -289,6 +289,7 @@ impl Executor {
         self.schedule_expiries();
         self.recent_hashes.clear();
         self.hash_deadlines.clear();
+        self.attempt_hashes.clear();
         self.touched.clear();
         self.unsaved_accounts.clear();
         self.unsaved_rows.clear();

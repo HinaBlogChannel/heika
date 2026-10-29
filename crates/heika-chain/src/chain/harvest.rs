@@ -325,7 +325,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                     .into());
                 }
                 retries += 1;
-                self.undo_and_load(&draft, missed).await?;
+                self.undo_and_load(missed).await?;
             };
             let error = match produced {
                 Ok((block, statement)) => {
@@ -367,7 +367,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 None => return Err(error.into()),
             }
             if self.executor.is_partial() {
-                self.undo_and_load(&draft, Wanted::default()).await?;
+                self.undo_and_load(Wanted::default()).await?;
             } else {
                 self.reload_executor().await?;
             }

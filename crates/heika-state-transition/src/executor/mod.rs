@@ -354,6 +354,9 @@ pub struct Executor {
     recent_hashes: HashSet<[u8; 32]>,
     /// 期限 → その期限のハッシュ。ブロックの時刻より前の期限のものは、もう入りえないので捨てる
     hash_deadlines: BTreeMap<u64, Vec<[u8; 32]>>,
+    /// 最後の [`Executor::apply`] で新しく覚えたハッシュと、その期限。当てた実行を [`Executor::undo_attempt`] で
+    /// 戻すときは、これだけを忘れる。前から覚えていたもの（二度入れで弾いたトランザクションのものなど）は忘れない
+    attempt_hashes: Vec<(u64, [u8; 32])>,
     /// 実行しているブロックのステートメント
     statement: StatementBuilder,
     /// 最後に実行したブロックのステートメント
@@ -421,6 +424,7 @@ impl Executor {
             )),
             recent_hashes: HashSet::new(),
             hash_deadlines: BTreeMap::new(),
+            attempt_hashes: Vec::new(),
             statement: StatementBuilder::default(),
             last_statement: BlockStatement::default(),
             producing: false,
@@ -448,6 +452,7 @@ impl Executor {
     pub fn apply(&mut self, block: &Block) -> Result<(), ExecError> {
         // 前に弾いたときの何件目かを、トランザクションを当てる前に弾いたときに残さない
         self.current_transaction = None;
+        self.attempt_hashes.clear();
         let height = self.height + 1;
         if block.height != height {
             return Err(invalid(format!("高さ {height} のはずが {}", block.height)));
@@ -880,7 +885,9 @@ impl Executor {
     ) -> Result<(), ExecError> {
         let hash = transaction.hash(&self.generation_hash_seed);
         self.check_transaction(height, timestamp, transaction, &hash, size, fee)?;
-        self.remember_hash(transaction.deadline, hash.0);
+        if self.remember_hash(transaction.deadline, hash.0) {
+            self.attempt_hashes.push((transaction.deadline, hash.0));
+        }
         let signer = self.add_public_key(&transaction.signer_public_key, height);
         self.check_transaction_rules(signer, transaction.body.transaction_type())?;
         // TransactionFeeActivity

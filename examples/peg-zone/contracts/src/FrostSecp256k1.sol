@@ -33,11 +33,17 @@ library FrostSecp256k1 {
         if (s == N) {
             return false;
         }
+        // 署名の s は自分で作った値なので、ecrecover の署名の使い回し（malleability）は関係ない
+        // forge-lint: disable-next-line(ecrecover)
         address recovered = ecrecover(bytes32(h % N), 27 + pyParity, bytes32(px), bytes32(s));
+        // 公開鍵の keccak256 の下 20 バイトがアドレス
+        // forge-lint: disable-next-line(unsafe-typecast)
         return recovered != address(0) && recovered == address(uint160(uint256(keccak256(abi.encodePacked(rx, ry)))));
     }
 
     function compress(uint256 x, uint256 parity) private pure returns (bytes memory) {
+        // parity は 0 か 1
+        // forge-lint: disable-next-line(unsafe-typecast)
         return abi.encodePacked(uint8(2 + parity), x);
     }
 
@@ -45,6 +51,8 @@ library FrostSecp256k1 {
     function challenge(bytes memory r, bytes memory p, bytes memory message) private pure returns (uint256) {
         bytes memory dst = DST_PRIME;
         // expand_message_xmd で 48 バイト（b1 の 32 バイトと、b2 の頭の 16 バイト）を作る
+        // R と P は 33 バイトに決まっているので、つなぎ目がずれることはない
+        // forge-lint: disable-next-line(encode-packed-collision)
         bytes32 b0 = sha256(abi.encodePacked(bytes32(0), bytes32(0), r, p, message, uint16(48), uint8(0), dst));
         bytes32 b1 = sha256(abi.encodePacked(b0, uint8(1), dst));
         bytes32 b2 = sha256(abi.encodePacked(b0 ^ b1, uint8(2), dst));

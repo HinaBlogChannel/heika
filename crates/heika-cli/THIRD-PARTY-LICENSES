@@ -8,7 +8,7 @@ BIP 39 の単語リストは MIT で、そのライセンスは NOTICE-BIP39 と
 Apache License 2.0
 
 - cmov 0.5.4
-- ctutils 0.4.3
+- ctutils 0.4.7
 - flagset 0.4.7
 - ureq-proto 0.6.4
 - zeroize 1.9.1
@@ -2206,7 +2206,7 @@ Apache License 2.0
 - rayon 1.12.0
 - ring 0.17.14
 - rustls-native-certs 0.8.5
-- rustls 0.23.45
+- rustls 0.23.46
 - security-framework-sys 2.17.0
 - security-framework 3.7.0
 - smallvec 1.16.3
@@ -4210,7 +4210,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ================================================================================
 ISC License
 
-- rustls-webpki 0.103.15
+- rustls-webpki 0.103.16
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:

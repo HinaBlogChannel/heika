@@ -8,7 +8,7 @@ description = "Symbol のチェーンを追う中核（sans-IO）。ブロック
 
 [dependencies]
 heika-block = { path = "../heika-block" }
-heika-core = { path = "../heika-core", default-features = false }
+heika-core = { path = "../heika-core", default-features = false, features = ["std"] }
 heika-packet = { path = "../heika-packet" }
 heika-state-transition = { path = "../heika-state-transition" }
 heika-transaction = { path = "../heika-transaction" }

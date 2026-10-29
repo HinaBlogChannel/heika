@@ -143,7 +143,7 @@ jobs:
             examples/faucet
             examples/roast
             examples/vanitygen-nvptx
-            examples/peg-zone
+            examples/evm-bridge
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -203,7 +203,7 @@ jobs:
           cargo test --workspace --locked
       # コントラクトの forge のテストと、anvil で通しで動かすテスト（--ignored）は、Foundry が要るのでここではしない
       - name: XYM を EVM に持っていく橋を確かめる
-        working-directory: examples/peg-zone
+        working-directory: examples/evm-bridge
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

@@ -22,7 +22,7 @@ Symbol の XYM を預かって、EVM のチェーンに同じ量の wXYM を発�
 (cd contracts && forge build)
 cargo build --release
 anvil --port 18545 &
-./target/release/peg-zone run peer.yaml http://127.0.0.1:18545
+./target/release/evm-bridge run peer.yaml http://127.0.0.1:18545
 ```
 
 - `peer.yaml` は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
@@ -45,7 +45,7 @@ wXYM: 0x…
 預かり口座に、メッセージに EVM のアドレスを書いて XYM を送ります。どのウォレットからでもかまいません。この例の `send` でも送れます（秘密鍵は標準入力から読みます）。
 
 ```sh
-./target/release/peg-zone send peer.yaml <預かり口座> 5000000 0x<EVM のアドレス> < 秘密鍵のファイル
+./target/release/evm-bridge send peer.yaml <預かり口座> 5000000 0x<EVM のアドレス> < 秘密鍵のファイル
 ```
 
 入金がファイナライズされると、見張り役がその EVM のアドレスに wXYM を発行します。
@@ -132,6 +132,8 @@ Symbol のトランザクションには期限があります（この例では 
 
 - **見張り役の多数が正直であること**。署名に要る数（この例では 5 人のうち 3 人）の見張り役が組めば、預かった XYM を好きなところに送れます。Liquid のフェデレーションなどと同じ立ち位置です
 - **見張り役が見ているノード**。見張り役は、自分のノードの REST と EVM の RPC を信じます。どのノードを見るかは、見張り役それぞれの責任です。同じノードにみんなで頼らないことが大事です
+  - Symbol の側は、自分の heika のノードを立てれば、ファイナライズまで自分で確かめられます
+  - EVM の側の RPC が本当のことを言っているかは、heika では確かめません。heika は Symbol のツールキットで、EVM のチェーンを確かめるのは heika の責務の外です。EVM のノードを自分で立てるか、軽量クライアントを使うかは、見張り役が選びます
 
 不正をした見張り役を罰する仕組み（スラッシング）はありません。
 

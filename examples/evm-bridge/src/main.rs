@@ -1,8 +1,8 @@
 //! XYM を EVM に持っていく橋の見張り役。見張り役はみなこのプロセスの中にいて、1 人はずっと黙っている。
 //!
 //! ```sh
-//! peg-zone run <ノードの設定> <EVM の JSON-RPC>
-//! peg-zone send <ノードの設定> <宛先のアドレス> <XYM の最小単位の量> [メッセージ] < 秘密鍵
+//! evm-bridge run <ノードの設定> <EVM の JSON-RPC>
+//! evm-bridge send <ノードの設定> <宛先のアドレス> <XYM の最小単位の量> [メッセージ] < 秘密鍵
 //! ```
 //!
 //! `run` は、見張り役の鍵を配り、預かり口座を作り、EVM に wXYM を置いて、あとは見張り続ける。
@@ -22,6 +22,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use evm_bridge::evm::{self, Burn, Evm, EvmKey, EvmSignature, key_digest, mint_digest};
+use evm_bridge::roast::{Holder, deal, receive, sign_together};
+use evm_bridge::symbol::{self, Chain, Withdrawal};
 use frost_core::keys::PublicKeyPackage;
 use frost_core::{Ciphersuite, Signature};
 use frost_ed25519::Ed25519Sha512;
@@ -31,9 +34,6 @@ use heika_core::key::{PrivateKey, PublicKey};
 use heika_transaction::{
     Body, Cosignature, Transaction, Transfer, UnresolvedAddress, UnresolvedMosaicId,
 };
-use peg_zone::evm::{self, Burn, Evm, EvmKey, EvmSignature, key_digest, mint_digest};
-use peg_zone::roast::{Holder, deal, receive, sign_together};
-use peg_zone::symbol::{self, Chain, Withdrawal};
 use rand_core::OsRng;
 use zeroize::Zeroizing;
 
@@ -58,9 +58,9 @@ fn main() -> ExitCode {
             send(Path::new(config), recipient, amount, message)
         }
         _ => {
-            eprintln!("使い方: peg-zone run <ノードの設定> <EVM の JSON-RPC>");
+            eprintln!("使い方: evm-bridge run <ノードの設定> <EVM の JSON-RPC>");
             eprintln!(
-                "        peg-zone send <ノードの設定> <宛先のアドレス> <XYM の最小単位の量> [メッセージ] < 秘密鍵"
+                "        evm-bridge send <ノードの設定> <宛先のアドレス> <XYM の最小単位の量> [メッセージ] < 秘密鍵"
             );
             return ExitCode::from(2);
         }

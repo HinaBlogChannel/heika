@@ -6,9 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use evm_bridge::evm::{Evm, EvmKey, EvmSignature, key_digest, mint_digest};
+use evm_bridge::roast::{Holder, deal, receive, sign_together};
 use frost_secp256k1::Secp256K1Sha256;
-use peg_zone::evm::{Evm, EvmKey, EvmSignature, key_digest, mint_digest};
-use peg_zone::roast::{Holder, deal, receive, sign_together};
 use rand_core::OsRng;
 
 struct Anvil(Child);

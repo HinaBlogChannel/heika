@@ -1,0 +1,17 @@
+[package]
+name = "peg-zone"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "XYM を EVM に持っていく橋。預かりも発行も、見張り役で分けて持つ鍵の署名 1 つで認める"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+frost-secp256k1 = "3.0.0"
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic"] }
+
+[dev-dependencies]
+rand_chacha = "0.3.1"

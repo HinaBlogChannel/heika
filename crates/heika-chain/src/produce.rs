@@ -84,6 +84,13 @@ impl Slot {
 /// 並べ替えてもいい。ハーベストの鍵は渡さない。返したものが状態に依る確かめで弾かれたら、このブロックでは
 /// 口を使わずに、選んだものだけで組み直す
 pub trait Assemble: Send + Sync {
+    /// ブロックの手数料の倍率を返す。[`Assemble::assemble`] の前に呼び、返した倍率を `slot` に入れて渡す。
+    /// 既定では中核が選んだ倍率（`slot.fee_multiplier`）のまま。下げれば、手数料の低いものを入れられる代わりに、
+    /// ハーベスターの手数料は減る。上げれば、選んだもののうち手数料の足りないものは弾かれる
+    fn fee_multiplier(&self, slot: &Slot) -> u32 {
+        slot.fee_multiplier
+    }
+
     /// `chosen`（入れる順）の代わりに、入れるもの（入れる順）を返す
     fn assemble(&self, slot: &Slot, chosen: Vec<Vec<u8>>) -> Vec<Vec<u8>>;
 }

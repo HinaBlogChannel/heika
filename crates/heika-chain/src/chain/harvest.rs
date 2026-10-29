@@ -246,7 +246,8 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let mut drops = 0;
         loop {
             // 手数料の下限は、置き場が受け付けるときに絞っている
-            let (chosen, fee_multiplier) = produce::choose(&candidates, 0);
+            let (chosen, chosen_multiplier) = produce::choose(&candidates, 0);
+            let mut fee_multiplier = chosen_multiplier;
             let chosen_bytes: Vec<Vec<u8>> = chosen
                 .iter()
                 .map(|candidate| candidate.bytes.clone())
@@ -255,7 +256,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 (Some(assemble), Some(harvester)) => {
                     let shares = Address::from_public_key(&signer, self.parameters.identifier)
                         != beneficiary;
-                    let slot = produce::Slot {
+                    let mut slot = produce::Slot {
                         height: self.tip.height + 1,
                         timestamp,
                         signer,
@@ -269,6 +270,8 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                             0
                         },
                     };
+                    fee_multiplier = assemble.fee_multiplier(&slot);
+                    slot.fee_multiplier = fee_multiplier;
                     assemble.assemble(&slot, chosen_bytes)
                 }
                 _ => chosen_bytes,
@@ -334,11 +337,12 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 }
                 Err(error) => error,
             };
-            // 弾かれたのが手数料で選んだものなら外して選び直す。直す口が足したものか、どれか分からなければ、
-            // 口を使わずに組み直す
+            // 弾かれたのが手数料で選んだものなら外して選び直す。直す口が足したものか、どれか分からないか、口が
+            // 倍率を変えていたら（選んだものの手数料が足りないだけかもしれない）、口を使わずに組み直す
             let failed = self
                 .executor
                 .failed_transaction()
+                .filter(|_| fee_multiplier == chosen_multiplier)
                 .and_then(|index| decisions.transactions.get(index))
                 .and_then(|bytes| chosen.iter().find(|candidate| &candidate.bytes == bytes));
             match failed {

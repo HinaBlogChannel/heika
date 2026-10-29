@@ -66,11 +66,13 @@ impl Executor {
         Ok(())
     }
 
-    /// `deadline` が期限のトランザクションのハッシュを覚える
-    pub(super) fn remember_hash(&mut self, deadline: u64, hash: [u8; 32]) {
-        if self.recent_hashes.insert(hash) {
+    /// `deadline` が期限のトランザクションのハッシュを覚える。新しく覚えたら true
+    pub(super) fn remember_hash(&mut self, deadline: u64, hash: [u8; 32]) -> bool {
+        let inserted = self.recent_hashes.insert(hash);
+        if inserted {
             self.hash_deadlines.entry(deadline).or_default().push(hash);
         }
+        inserted
     }
 
     /// 期限が `timestamp` より前のハッシュを捨てる。そういうトランザクションは期限の確かめで弾かれるので、

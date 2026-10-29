@@ -423,12 +423,12 @@ impl Executor {
 
     /// まだ読んでいないキーを引いて捨てる実行を、当てる前に戻す。`source` はまだ当てる前の状態
     /// （コミットしていない）、`checkpoint` は当てる前の高さの木に入らない実行の状態。直近のトランザクションの
-    /// ハッシュは、`block` で足した分だけ外す（同じブロックをすぐ当て直すので、それで足りる）
+    /// ハッシュは、その実行で新しく覚えた分だけを忘れる。ブロックのトランザクションの全部を忘れると、二度入れで
+    /// 弾いたトランザクションの、前のブロックで覚えたハッシュまで消えて、次のブロックに入り直してしまう
     pub fn undo_attempt(
         &mut self,
         source: &dyn StateSource,
         checkpoint: &[u8],
-        block: &Block,
     ) -> Result<(), ExecError> {
         // 木は、変える前のノードに戻す
         for cache in PARTIAL {
@@ -457,13 +457,9 @@ impl Executor {
             let value = source.row(&key)?;
             self.set_row(&key, value.as_deref())?;
         }
-        for bytes in block.transactions() {
-            let Ok(transaction) = Transaction::from_bytes(bytes) else {
-                continue;
-            };
-            let hash = transaction.hash(&self.generation_hash_seed).0;
+        for (deadline, hash) in std::mem::take(&mut self.attempt_hashes) {
             self.recent_hashes.remove(&hash);
-            if let Some(hashes) = self.hash_deadlines.get_mut(&transaction.deadline) {
+            if let Some(hashes) = self.hash_deadlines.get_mut(&deadline) {
                 hashes.retain(|kept| *kept != hash);
             }
         }
@@ -523,5 +519,85 @@ impl Executor {
             }
         }
         released
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use heika_core::key::PrivateKey;
+    use heika_core::network::NetworkParameters;
+    use heika_transaction::{Transfer, UnresolvedAddress, UnresolvedMosaicId};
+
+    use super::*;
+
+    struct Empty;
+
+    impl StateSource for Empty {
+        fn row(&self, _: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+            Ok(None)
+        }
+
+        fn node(&self, _: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+            Ok(None)
+        }
+
+        fn for_each_row(&self, _: &[u8], _: &mut dyn FnMut(&[u8], &[u8])) -> Result<(), ExecError> {
+            Ok(())
+        }
+    }
+
+    /// `transactions` を入れた、高さ 1 のふつうのブロック（署名や実行して求めるものは空のまま。実行は確かめない）
+    fn block(parameters: &NetworkParameters, transactions: &[Vec<u8>]) -> Block {
+        let mut bytes = vec![0u8; 376];
+        bytes[108] = 1;
+        bytes[109] = parameters.identifier.0;
+        bytes[110..112].copy_from_slice(&0x8143u16.to_le_bytes());
+        bytes[112..120].copy_from_slice(&1u64.to_le_bytes());
+        for transaction in transactions {
+            bytes.extend_from_slice(transaction);
+            bytes.resize(bytes.len().next_multiple_of(8), 0);
+        }
+        let size = bytes.len() as u32;
+        bytes[..4].copy_from_slice(&size.to_le_bytes());
+        Block::from_bytes(&bytes).unwrap()
+    }
+
+    /// 前のブロックで入ったトランザクションをもう一度入れようとして弾き、その実行を戻しても、前に覚えたハッシュは
+    /// 忘れない。忘れると、次に作るブロックに同じトランザクションが入り直す
+    #[test]
+    fn undoing_an_attempt_keeps_hashes_remembered_before_it() {
+        let parameters = NetworkParameters::TESTNET;
+        let key = PrivateKey::from_bytes(&[1; 32]);
+        let mut transaction = Transaction::new(
+            PublicKey::from_private_key(&key),
+            parameters.identifier,
+            0,
+            1,
+            Body::Transfer(
+                Transfer::new(
+                    UnresolvedAddress::from(Address([0x98; 24])),
+                    [(UnresolvedMosaicId(parameters.currency_mosaic_id), 1)].into(),
+                    Vec::new(),
+                )
+                .unwrap(),
+            ),
+        );
+        transaction
+            .sign(&key, &parameters.generation_hash_seed)
+            .unwrap();
+        let block = block(&parameters, &[transaction.to_bytes()]);
+        let mut executor = Executor::new(
+            ChainConfig::testnet(),
+            parameters.identifier,
+            parameters.generation_hash_seed,
+        );
+        // 前のブロックで入ったものとして覚える
+        executor.remember_transactions(&block).unwrap();
+        let meta = executor.encode_meta();
+        for _ in 0..2 {
+            let error = executor.apply(&block).unwrap_err().to_string();
+            assert!(error.contains("もう入っています"), "{error}");
+            executor.undo_attempt(&Empty, &meta).unwrap();
+        }
     }
 }

@@ -3,18 +3,14 @@
 use super::*;
 
 impl<S: ChainStore + StateSource> Chain<'_, S> {
-    /// 当てかけた `block` を、先端のチェックポイントまで戻し、読んでいなかった `missed` を読み足す（アカウントを
+    /// 当てかけたブロックを、先端のチェックポイントまで戻し、読んでいなかった `missed` を読み足す（アカウントを
     /// 全部はメモリに持たないとき）
-    pub(super) async fn undo_and_load(
-        &mut self,
-        block: &Block,
-        missed: Wanted,
-    ) -> Result<(), ChainError> {
+    pub(super) async fn undo_and_load(&mut self, missed: Wanted) -> Result<(), ChainError> {
         let meta = match self.store.checkpoint_at_or_below(self.tip.height).await? {
             Some((height, meta)) if height == self.tip.height => meta,
             _ => return Err("当て直すのに、先端のチェックポイントがありません".into()),
         };
-        self.executor.undo_attempt(self.store, &meta, block)?;
+        self.executor.undo_attempt(self.store, &meta)?;
         self.executor.load_wanted(self.store, &missed)?;
         Ok(())
     }
@@ -79,7 +75,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             match error.downcast::<Missed>() {
                 Ok(missed) if retries < MAX_RETRIES => {
                     retries += 1;
-                    self.undo_and_load(block, missed.0).await?;
+                    self.undo_and_load(missed.0).await?;
                 }
                 result => {
                     let error: ChainError = match result {

@@ -272,9 +272,7 @@ fn replays_mainnet_blocks_reading_only_what_it_needs() {
                 retries <= MAX_RETRIES,
                 "高さ {height} で読み足しが終わりません"
             );
-            executor
-                .undo_attempt(&source, &meta, &block)
-                .expect("戻せません");
+            executor.undo_attempt(&source, &meta).expect("戻せません");
             executor.load_wanted(&source, &missed).expect("読めません");
         }
         retried += usize::from(retries > 0);

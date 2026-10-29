@@ -178,7 +178,7 @@ fn replays_mainnet_blocks_through_redb() {
                 retries <= MAX_RETRIES,
                 "高さ {height} で読み足しが終わりません"
             );
-            executor.undo_attempt(&source, &meta, &block).unwrap();
+            executor.undo_attempt(&source, &meta).unwrap();
             executor.load_wanted(&source, &missed).unwrap();
         }
         check(&mut executor, &block);

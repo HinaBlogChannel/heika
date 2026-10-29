@@ -13,8 +13,15 @@ description = "XYM を EVM に持っていく橋。預かりも発行も、見�
 frost-core = "3.0.0"
 frost-ed25519 = "3.0.0"
 frost-secp256k1 = "3.0.0"
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
 k256 = { version = "0.13.4", default-features = false, features = ["arithmetic"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.4.2", default-features = false }
 
 [dev-dependencies]
 rand_chacha = "0.3.1"

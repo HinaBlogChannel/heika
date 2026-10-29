@@ -7,3 +7,4 @@
 
 pub mod evm;
 pub mod roast;
+pub mod symbol;

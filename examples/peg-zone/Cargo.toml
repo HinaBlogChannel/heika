@@ -10,8 +10,11 @@ description = "XYM を EVM に持っていく橋。預かりも発行も、見�
 [workspace]
 
 [dependencies]
+frost-core = "3.0.0"
+frost-ed25519 = "3.0.0"
 frost-secp256k1 = "3.0.0"
 k256 = { version = "0.13.4", default-features = false, features = ["arithmetic"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [dev-dependencies]
 rand_chacha = "0.3.1"

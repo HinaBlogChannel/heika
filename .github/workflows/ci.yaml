@@ -1,7 +1,7 @@
 # master への push と PR で、確かめることと、リリースに載せるもののビルドを全部する。
 #
-# - 確かめること: 整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧、examples、
-#   crate の API の文書
+# - 確かめること: 整形、clippy（Linux と Windows）、テスト、ベクターとの照合、依存のライセンスの一覧、依存の勧告、
+#   examples、crate の API の文書
 # - リリースに載せるもの: CLI の4つのターゲット、GUI のデスクトップの3つと Android と iOS、Pages のサイト（examples と
 #   crate の API の文書）
 #
@@ -114,6 +114,34 @@ jobs:
         run: |
           cargo about generate --workspace --locked about.hbs -o THIRD-PARTY-LICENSES
           git diff --exit-code
+
+  # 全部の Cargo.lock（本体、GUI、examples）に、RustSec の勧告の出た依存がないかを確かめる。勧告は実行のたびに
+  # 取ってくるので、コードを変えていなくても、新しい勧告が出れば赤くなる。cargo-audit は、外の Action を使わずに、
+  # 版と sha256 を決め打ちしてリリースから取る（v0.22.2、2026-06-05。リリースに sha256 がないので、取ったものから求めた）
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-audit を入れる
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -sSLf -o cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+          echo "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  cargo-audit.tgz" | sha256sum -c -
+          tar xzf cargo-audit.tgz --strip-components 1 cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # 橋の例の crypto-bigint（RUSTSEC-2026-0387）は、frost-secp256k1 が新しい k256 に移るまで直せないので、そこだけ見逃す
+      - name: 勧告の出た依存がないか確かめる
+        run: |
+          status=0
+          for lock in $(git ls-files '*Cargo.lock'); do
+            echo "== $lock"
+            ignore=()
+            if [ "$lock" = examples/evm-bridge/Cargo.lock ]; then ignore=(--ignore RUSTSEC-2026-0387); fi
+            cargo-audit audit --file "$lock" "${ignore[@]}" || status=1
+          done
+          exit $status
 
   # examples はワークスペースの外なので、heika を変えたときに壊れていないかを別に確かめる。
   # 通ったら、crate の API の文書と合わせて、Pages に出すサイトの形に並べて Artifact に上げる

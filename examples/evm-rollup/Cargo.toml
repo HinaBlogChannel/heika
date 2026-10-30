@@ -1,0 +1,26 @@
+[package]
+name = "evm-rollup"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Symbol を掲示板にして EVM を動かすソブリンロールアップ"
+
+# heika のワークスペースには入れず、依存と Cargo.lock を分ける
+[workspace]
+
+[dependencies]
+alloy-consensus = { version = "2.5.0", default-features = false, features = ["std", "k256", "serde"] }
+alloy-eips = { version = "2.5.0", default-features = false, features = ["std"] }
+alloy-primitives = { version = "1.7.3", features = ["serde"] }
+alloy-trie = { version = "0.9.9", features = ["ethereum"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+heika-core = { path = "../../crates/heika-core" }
+heika-node = { path = "../../crates/heika-node" }
+heika-rest = { path = "../../crates/heika-rest" }
+heika-transaction = { path = "../../crates/heika-transaction" }
+revm = { version = "43.0.3", default-features = false, features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+ureq = { version = "3.4.2", default-features = false }

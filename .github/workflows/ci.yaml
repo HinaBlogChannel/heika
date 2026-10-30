@@ -132,14 +132,17 @@ jobs:
           echo "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  cargo-audit.tgz" | sha256sum -c -
           tar xzf cargo-audit.tgz --strip-components 1 cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      # 橋の例の crypto-bigint（RUSTSEC-2026-0387）は、frost-secp256k1 が新しい k256 に移るまで直せないので、そこだけ見逃す
+      # 橋の例の crypto-bigint（RUSTSEC-2026-0387）は、frost-secp256k1 が新しい k256 に移るまで直せないので、そこだけ見逃す。
+      # EVM のロールアップの例も、revm と alloy が古い k256 を使うので見逃す（公開されたデータの計算にしか使わない）
       - name: 勧告の出た依存がないか確かめる
         run: |
           status=0
           for lock in $(git ls-files '*Cargo.lock'); do
             echo "== $lock"
             ignore=()
-            if [ "$lock" = examples/evm-bridge/Cargo.lock ]; then ignore=(--ignore RUSTSEC-2026-0387); fi
+            case "$lock" in
+              examples/evm-bridge/Cargo.lock | examples/evm-rollup/Cargo.lock) ignore=(--ignore RUSTSEC-2026-0387) ;;
+            esac
             cargo-audit audit --file "$lock" "${ignore[@]}" || status=1
           done
           exit $status
@@ -173,6 +176,7 @@ jobs:
             examples/roast
             examples/vanitygen-nvptx
             examples/evm-bridge
+            examples/evm-rollup
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -232,6 +236,12 @@ jobs:
           cargo test --workspace --locked
       - name: XYM を EVM に持っていく橋を確かめる
         working-directory: examples/evm-bridge
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: Symbol の上の EVM のロールアップを確かめる
+        working-directory: examples/evm-rollup
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

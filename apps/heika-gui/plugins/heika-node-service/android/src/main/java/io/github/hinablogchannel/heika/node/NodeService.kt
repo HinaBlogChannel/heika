@@ -25,6 +25,14 @@ class NodeService : Service() {
         /** 始めてから止めるまで。止めたあとに来た通知の更新で、また始めてしまわないように */
         @Volatile
         var running = false
+
+        /**
+         * このプロセスの本体が、ノードを始めたか。プロセスごと捨てられると、届いていなかった通知の更新で、
+         * サービスだけが新しいプロセスに作り直されることがある。そのプロセスではノードは動いていないので、
+         * 通知を出しっぱなしにせずに止める
+         */
+        @Volatile
+        var wanted = false
     }
 
     /** フォアグラウンドサービスだけではプロセスが生きているだけで、画面を消すと CPU が眠って同期がほぼ止まる */
@@ -55,6 +63,11 @@ class NodeService : Service() {
             startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION, notification)
+        }
+        // startForegroundService で起こされたら、止めるときも先に startForeground しないと落とされる
+        if (!wanted) {
+            stopSelf()
+            return START_NOT_STICKY
         }
         // 通知を更新するたびにここに来るので、取るのは最初の1回だけ
         if (wakeLock == null) {

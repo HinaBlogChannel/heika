@@ -470,6 +470,10 @@ async fn prepare(
     .map_err(|error| error.to_string())?
 }
 
+/// 追いつく段階の DB のキャッシュ。ノードの既定（16 GiB）は、サーバーで速く追いつくためのもので、ウォレットの横で
+/// 動かすには大きすぎる。Android では、メモリが足りなくなってプロセスごと捨てられていた。小さいと追いつくのは遅くなる
+const CACHE: &str = "    cache:\n      catchUp: 512Mi\n";
+
 /// 設定ファイルの中身。文字列は JSON の形で書く（YAML としても読める）
 fn manifest(
     network: &str,
@@ -490,7 +494,7 @@ fn manifest(
     format!(
         "apiVersion: {api}\nkind: Peer\nmetadata:\n  name: heika-gui\nspec:\n  network:\n    type: {network}\n  \
          dataDirectory: {data}\n  certificates:\n    directory: {certificates}\n  seed: {seed}\n  \
-         listen:\n    address: {listen}\n    roles: [Peer]\n  storage:\n    mode: {mode}\n  rest:\n    - address: {rest}\n",
+         listen:\n    address: {listen}\n    roles: [Peer]\n  storage:\n    mode: {mode}\n{CACHE}  rest:\n    - address: {rest}\n",
         api = heika_node::config::API_VERSION,
         data = path(&directory.join("data")),
         certificates = path(certificates),
@@ -756,6 +760,10 @@ mod tests {
         assert_eq!(manifest.spec.roles().0, ROLE_PEER);
         assert_eq!(manifest.spec.listen.unwrap().address, LISTEN);
         assert_eq!(manifest.spec.storage.mode, heika_node::config::Mode::Light);
+        assert_eq!(
+            manifest.spec.storage.cache.catch_up,
+            heika_node::config::ByteSize(512 << 20)
+        );
         assert_eq!(
             manifest.spec.network.network_type,
             heika_node::config::NetworkType::Testnet

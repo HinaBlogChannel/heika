@@ -29,6 +29,7 @@ class NodeServicePlugin(private val activity: Activity) : Plugin(activity) {
         ) {
             activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
         }
+        NodeService.wanted = true
         ContextCompat.startForegroundService(activity, intent(invoke))
         invoke.resolve()
     }
@@ -45,6 +46,7 @@ class NodeServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun stop(invoke: Invoke) {
         // 止まり終える（onDestroy）より先に来た通知の更新で、また始めないように、ここで印を下ろす
         NodeService.running = false
+        NodeService.wanted = false
         activity.stopService(Intent(activity, NodeService::class.java))
         invoke.resolve()
     }

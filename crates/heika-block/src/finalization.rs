@@ -9,7 +9,7 @@ pub mod message;
 pub mod proof;
 pub mod round;
 
-use std::fmt;
+use core::fmt;
 
 use heika_core::hash::Hash256;
 
@@ -71,7 +71,7 @@ impl fmt::Display for InvalidFinalizedBlockHeaderSize {
     }
 }
 
-impl std::error::Error for InvalidFinalizedBlockHeaderSize {}
+impl core::error::Error for InvalidFinalizedBlockHeaderSize {}
 
 #[cfg(test)]
 mod tests {

@@ -18,7 +18,8 @@
 //!
 //! レシートはどれも8の倍数の大きさなので、並べるときにパディングは入らない。
 
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
@@ -614,7 +615,7 @@ impl fmt::Display for StatementDecodeError {
     }
 }
 
-impl std::error::Error for StatementDecodeError {}
+impl core::error::Error for StatementDecodeError {}
 
 #[cfg(test)]
 mod tests {

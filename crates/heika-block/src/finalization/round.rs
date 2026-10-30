@@ -12,7 +12,7 @@
 //! - estimate: best prevote とその祖先のうち、まだ precommit が閾値に届きうる、いちばん高いブロック
 //! - completable: このラウンドの結果がもう変わらない。次のラウンドに進んでよい
 
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
 
 use heika_core::hash::Hash256;
 
@@ -36,9 +36,9 @@ pub struct RoundContext {
     /// （高さ、ハッシュ）の順。いちばん高いものから探す
     candidates: BTreeMap<(u64, [u8; 32]), Weights>,
     /// 子 → 親。最初に足した枝のつながりを使う
-    parents: HashMap<Candidate, Option<Candidate>>,
+    parents: BTreeMap<Candidate, Option<Candidate>>,
     /// 先に届いた precommit で、まだその prevote がないもの
-    pending_precommits: HashMap<Candidate, u64>,
+    pending_precommits: BTreeMap<Candidate, u64>,
 }
 
 impl RoundContext {
@@ -49,8 +49,8 @@ impl RoundContext {
             threshold,
             cumulative_precommit_weight: 0,
             candidates: BTreeMap::new(),
-            parents: HashMap::new(),
-            pending_precommits: HashMap::new(),
+            parents: BTreeMap::new(),
+            pending_precommits: BTreeMap::new(),
         }
     }
 

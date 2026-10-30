@@ -9,7 +9,7 @@
 //! 進める。エポックは、中核の確定がエポックの最後のブロックに届き、手元も同じブロックを持っていたら進める
 //! （catapult の投票ノードと同じ）。
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -134,7 +134,7 @@ impl Observer {
         &self,
         min: FinalizationRound,
         max: FinalizationRound,
-        known: &HashSet<u32>,
+        known: &BTreeSet<u32>,
     ) -> Vec<u8> {
         self.aggregator
             .unknown_messages(min, max, known)

@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use heika_core::address::Address;
 
-use crate::rollup::Rollup;
+use crate::rollup::{Outcome, Rollup};
 use crate::symbol::{Chain, Posted};
 
 #[derive(Clone)]
@@ -57,12 +57,20 @@ fn apply(rollup: &mut Rollup, posted: Vec<Posted>, report: bool) {
             transactions.push(next.bytes);
         }
         for outcome in rollup.apply(first.height, first.timestamp, &transactions) {
+            if !report {
+                continue;
+            }
             match outcome {
-                Ok(hash) if report => println!("高さ {}: {hash} を入れました", first.height),
-                Err(reason) if report => {
+                Outcome::Executed(hash) => println!("高さ {}: {hash} を入れました", first.height),
+                Outcome::Failed(hash, reason) => {
+                    println!(
+                        "高さ {}: {hash} は実行できませんでした: {reason}",
+                        first.height
+                    )
+                }
+                Outcome::Skipped(reason) => {
                     println!("高さ {}: 入れなかったもの: {reason}", first.height)
                 }
-                _ => {}
             }
         }
     }

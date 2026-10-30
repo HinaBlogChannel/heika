@@ -1,9 +1,12 @@
 //! ロールアップの状態。Symbol のブロックの中の順に、EVM のトランザクションを 1 件ずつ revm で実行する。
 //!
 //! - ロールアップのブロックは、Symbol のブロックと 1 対 1 で、高さも同じ。EVM のトランザクションがなければ空のブロック
-//! - 読めない、署名が合わない、nonce が合わない、などのトランザクションは、入らなかったことにする（誰が実行しても同じ）
-//! - ガスの値段は 0 でいい。スパムは、Symbol に載せるときの XYM の手数料で防ぐ。計算の重さは、ブロックのガスの合計の
-//!   上限（[`GAS_LIMIT`]）で抑える
+//! - 読めない、署名が合わない、チェーン ID が違う、nonce が合わない、などのトランザクションは、入らなかったことにする
+//!   （誰が実行しても同じ）
+//! - 署名と nonce が合っていれば、必ずレシートを出す。払えない（max fee が basefee に届かない、残高が足りない）などで
+//!   実行できなければ、失敗（status 0、ガス 0）にして、nonce は使ったことにする
+//! - basefee は、1 件ごとに決める。時間あたりに使われたガスが目標より多いほど、指数で上がり、時間がたつと下がる
+//!   （[`base_fee`]）。払った basefee は燃える。同じ Symbol のブロックに入った人どうしで、ガスの枠を取り合わない
 //! - blob 付きのトランザクション（type 3）は入れない。blob を置く層がないので
 
 use std::collections::{BTreeMap, HashMap};
@@ -22,8 +25,61 @@ use revm::state::{AccountInfo, Bytecode};
 use revm::{Context, ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext};
 use serde::Deserialize;
 
-/// Symbol のブロック 1 つで使えるガスの合計。1 件ごとの上限は、revm の既定（EIP-7825 の 2^24）
+/// ブロックの `gasLimit` として見せる値。資源は basefee で抑えるので、ブロックの合計の上限ではない。
+/// 1 件ごとの上限は、revm の既定（EIP-7825 の 2^24）
 pub const GAS_LIMIT: u64 = 30_000_000;
+
+/// 1 秒あたりに使われてよいガスの目標
+pub const TARGET_GAS_PER_SECOND: u64 = 1_000_000;
+
+/// basefee の下限（1 gwei）
+pub const MIN_BASE_FEE: u64 = 1_000_000_000;
+
+/// 目標を超えたガスがこれだけたまると、basefee が e 倍になる。目標の 2 倍で使われ続けると、12 秒で約 12.5% 上がる
+/// （Ethereum の EIP-1559 と同じくらい）
+pub const BASE_FEE_UPDATE_FRACTION: u64 = 100_000_000;
+
+/// たまったガスの上限。ここで basefee は約 1 gwei × e^23（1 ガスあたり約 10 ETH）になり、もう誰も払えない
+const MAX_EXCESS: u64 = 23 * BASE_FEE_UPDATE_FRACTION;
+
+/// 目標を超えて使われたガスが `excess` だけたまっているときの basefee。EIP-4844 の `fake_exponential` と同じ計算
+pub fn base_fee(excess: u64) -> u64 {
+    let (factor, numerator, denominator) = (
+        u128::from(MIN_BASE_FEE),
+        u128::from(excess.min(MAX_EXCESS)),
+        u128::from(BASE_FEE_UPDATE_FRACTION),
+    );
+    let mut output = 0;
+    let mut accumulator = factor * denominator;
+    let mut i = 1;
+    while accumulator > 0 {
+        output += accumulator;
+        accumulator = accumulator * numerator / (denominator * i);
+        i += 1;
+    }
+    u64::try_from(output / denominator).unwrap_or(u64::MAX)
+}
+
+/// 目標を超えて使われたガスと、最後に見た時刻
+#[derive(Clone, Copy, Debug, Default)]
+struct Excess {
+    gas: u64,
+    /// Unix 時刻（秒）
+    time: u64,
+}
+
+impl Excess {
+    /// `time` までの時間ぶん、目標のガスを差し引く
+    fn at(self, time: u64) -> Self {
+        let elapsed = time.saturating_sub(self.time);
+        Self {
+            gas: self
+                .gas
+                .saturating_sub(TARGET_GAS_PER_SECOND.saturating_mul(elapsed)),
+            time: time.max(self.time),
+        }
+    }
+}
 
 /// ロールアップの始まり
 #[derive(Clone, Debug, Deserialize)]
@@ -53,8 +109,21 @@ pub struct GenesisAccount {
 pub struct Block {
     /// Unix 時刻（秒）
     pub timestamp: u64,
+    /// ブロックの最初のトランザクションの basefee
+    pub base_fee: u64,
     pub transactions: Vec<B256>,
     pub state_root: B256,
+}
+
+/// トランザクション 1 件の行き先
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// 実行した（revert も含む）
+    Executed(B256),
+    /// 署名と nonce は合っていたが、実行できなかった。レシートは失敗で、nonce は使ったことにする
+    Failed(B256, String),
+    /// 入らなかった。レシートはない
+    Skipped(String),
 }
 
 /// 入ったトランザクションと、その結果
@@ -66,6 +135,8 @@ pub struct Receipt {
     pub index: u64,
     pub success: bool,
     pub gas_used: u64,
+    /// 1 ガスあたりに払った値段（basefee と優先料の和）。実行できなかったものは 0
+    pub effective_gas_price: u128,
     pub cumulative_gas_used: u64,
     pub logs: Vec<Log>,
     pub contract_address: Option<Address>,
@@ -90,6 +161,7 @@ pub struct Rollup {
     pub height: u64,
     /// `height` のブロックの Unix 時刻（秒）
     pub timestamp: u64,
+    excess: Excess,
     blocks: BTreeMap<u64, Block>,
     receipts: HashMap<B256, Receipt>,
 }
@@ -120,6 +192,7 @@ impl Rollup {
             genesis_root: B256::ZERO,
             height: genesis.start,
             timestamp: 0,
+            excess: Excess::default(),
             blocks: BTreeMap::new(),
             receipts: HashMap::new(),
         };
@@ -127,59 +200,95 @@ impl Rollup {
         rollup
     }
 
-    /// Symbol の高さ `height` のブロックを実行する。`transactions` は、ブロックの中の順の EVM のトランザクション。
-    /// 入れたトランザクションのハッシュと、入れなかったものの理由を返す
-    pub fn apply(
-        &mut self,
-        height: u64,
-        timestamp: u64,
-        transactions: &[Vec<u8>],
-    ) -> Vec<Result<B256, String>> {
+    /// Symbol の高さ `height` のブロックを実行する。`transactions` は、ブロックの中の順の EVM のトランザクション
+    pub fn apply(&mut self, height: u64, timestamp: u64, transactions: &[Vec<u8>]) -> Vec<Outcome> {
         assert!(height > self.height, "高さは増えていく");
         self.height = height;
         self.timestamp = timestamp;
         if transactions.is_empty() {
             return Vec::new();
         }
+        self.excess = self.excess.at(timestamp);
+        let first_base_fee = base_fee(self.excess.gas);
         let mut evm = Context::mainnet()
             .with_db(std::mem::take(&mut self.db))
-            .with_block(block_env(height, timestamp))
             .modify_cfg_chained(|cfg| cfg.chain_id = self.chain_id)
             .build_mainnet();
         let mut outcomes = Vec::new();
         let mut included = Vec::new();
         let mut cumulative_gas_used = 0;
         for bytes in transactions {
-            let outcome = (|| {
-                let (envelope, from) = decode(bytes, self.chain_id)?;
-                // Symbol の手数料は大きさで決まり、計算の重さでは決まらない。重いものを並べられないように、
-                // Ethereum と同じく、ブロックの残りのガスを超えるものは入れない
-                if cumulative_gas_used + envelope.gas_limit() > GAS_LIMIT {
-                    return Err("ブロックのガスの上限を超えます".to_owned());
+            let (envelope, from) = match decode(bytes, self.chain_id) {
+                Ok(decoded) => decoded,
+                Err(reason) => {
+                    outcomes.push(Outcome::Skipped(reason));
+                    continue;
                 }
-                let result = evm
-                    .transact_commit(tx_env(&envelope, from))
-                    .map_err(|error| error.to_string())?;
-                let hash = *envelope.tx_hash();
-                cumulative_gas_used += result.tx_gas_used();
-                self.receipts.insert(
-                    hash,
+            };
+            let database = &mut evm.ctx.journaled_state.database;
+            let nonce = database
+                .cache
+                .accounts
+                .get(&from)
+                .map_or(0, |account| account.info.nonce);
+            if envelope.nonce() != nonce || nonce == u64::MAX {
+                outcomes.push(Outcome::Skipped(format!(
+                    "nonce が合いません（{} を待っています）",
+                    nonce
+                )));
+                continue;
+            }
+            let hash = *envelope.tx_hash();
+            let base_fee = base_fee(self.excess.gas);
+            evm.set_block(block_env(height, timestamp, base_fee));
+            let receipt = match evm.transact_commit(tx_env(&envelope, from)) {
+                Ok(result) => {
+                    let gas_used = result.tx_gas_used();
+                    self.excess.gas = self.excess.gas.saturating_add(gas_used).min(MAX_EXCESS);
+                    cumulative_gas_used += gas_used;
+                    outcomes.push(Outcome::Executed(hash));
                     Receipt {
                         from,
                         height,
                         index: included.len() as u64,
                         success: result.is_success(),
-                        gas_used: result.tx_gas_used(),
+                        gas_used,
+                        effective_gas_price: effective_gas_price(&envelope, base_fee),
                         cumulative_gas_used,
                         contract_address: result.created_address(),
                         logs: result.into_logs(),
                         envelope,
-                    },
-                );
-                included.push(hash);
-                Ok(hash)
-            })();
-            outcomes.push(outcome);
+                    }
+                }
+                Err(error) => {
+                    // 実行できなくても nonce は進める。同じものを載せ直されても、もう通らない
+                    let account = evm
+                        .ctx
+                        .journaled_state
+                        .database
+                        .load_account(from)
+                        .expect("in memory");
+                    account.info.nonce += 1;
+                    if account.account_state == AccountState::NotExisting {
+                        account.account_state = AccountState::Touched;
+                    }
+                    outcomes.push(Outcome::Failed(hash, error.to_string()));
+                    Receipt {
+                        from,
+                        height,
+                        index: included.len() as u64,
+                        success: false,
+                        gas_used: 0,
+                        effective_gas_price: 0,
+                        cumulative_gas_used,
+                        contract_address: None,
+                        logs: Vec::new(),
+                        envelope,
+                    }
+                }
+            };
+            self.receipts.insert(hash, receipt);
+            included.push(hash);
         }
         self.db = evm.ctx.journaled_state.database;
         if !included.is_empty() {
@@ -188,12 +297,18 @@ impl Rollup {
                 height,
                 Block {
                     timestamp,
+                    base_fee: first_base_fee,
                     transactions: included,
                     state_root,
                 },
             );
         }
         outcomes
+    }
+
+    /// 今の basefee（最後に見た Symbol のブロックの時刻で）
+    pub fn base_fee(&self) -> u64 {
+        base_fee(self.excess.at(self.timestamp).gas)
     }
 
     /// Symbol の高さを進める。EVM のトランザクションのない空のブロック
@@ -252,6 +367,7 @@ impl Rollup {
             } else {
                 0
             },
+            base_fee: self.base_fee(),
             transactions: Vec::new(),
             state_root,
         })
@@ -306,7 +422,7 @@ impl Rollup {
     pub fn call(&self, call: Call) -> Result<ExecutionResult, String> {
         let mut evm = Context::mainnet()
             .with_db(self.db.clone())
-            .with_block(block_env(self.height + 1, self.timestamp))
+            .with_block(block_env(self.height + 1, self.timestamp, 0))
             .modify_cfg_chained(|cfg| {
                 cfg.chain_id = self.chain_id;
                 cfg.disable_nonce_check = true;
@@ -337,12 +453,23 @@ pub struct Call {
     pub input: Option<Bytes>,
 }
 
-fn block_env(height: u64, timestamp: u64) -> BlockEnv {
+/// 1 ガスあたりに払う値段。EIP-1559 なら basefee に優先料を足し、max fee で抑える
+fn effective_gas_price(envelope: &TxEnvelope, base_fee: u64) -> u128 {
+    let base_fee = u128::from(base_fee);
+    match envelope.max_priority_fee_per_gas() {
+        Some(priority) => envelope
+            .max_fee_per_gas()
+            .min(base_fee.saturating_add(priority)),
+        None => envelope.max_fee_per_gas(),
+    }
+}
+
+fn block_env(height: u64, timestamp: u64, base_fee: u64) -> BlockEnv {
     BlockEnv {
         number: U256::from(height),
         timestamp: U256::from(timestamp),
         gas_limit: GAS_LIMIT,
-        basefee: 0,
+        basefee: base_fee,
         difficulty: U256::ZERO,
         prevrandao: Some(B256::ZERO),
         ..Default::default()
@@ -398,8 +525,18 @@ mod tests {
     /// anvil の 1 つ目の開発用の鍵のアドレス（誰でも知っている鍵）
     const FROM: Address = alloy_primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
-    /// チェーン ID 1337 で、`FROM` から 0x…dEaD に 1 ETH 送る（ガスの値段 0、nonce 0）。`cast mktx` で作った
-    const TRANSFER: &str = "02f86c82053980808082520894000000000000000000000000000000000000dead880de0b6b3a764000080c001a00742819e5bfe80791bdc27f82245159becec102cb91e533e82da1192739f5db6a0331d6e44b26ffdec73edb6f8d8cb984b253d0675660ed040d934780a64682dc9";
+    /// チェーン ID 1337 で、`FROM` から 0x…dEaD に 1 ETH 送る（max fee 2 gwei、優先料 0、nonce 0）。`cast mktx` で作った
+    const TRANSFER: &str = "02f8708205398080847735940082520894000000000000000000000000000000000000dead880de0b6b3a764000080c080a090f96471f9e5820dd26a764d3bbf4a53dbb830757da1a5f120f9c57b23aa432da046fc6f07e390a4816a32cbc85c469492f05c84a001dac243a78c3a3781c28fcb";
+
+    /// 同じ送金で、max fee が 0 のもの（nonce 0）
+    const FREE_TRANSFER: &str = "02f86c82053980808082520894000000000000000000000000000000000000dead880de0b6b3a764000080c001a00742819e5bfe80791bdc27f82245159becec102cb91e533e82da1192739f5db6a0331d6e44b26ffdec73edb6f8d8cb984b253d0675660ed040d934780a64682dc9";
+
+    fn executed(outcome: &Outcome) -> B256 {
+        match outcome {
+            Outcome::Executed(hash) => *hash,
+            other => panic!("実行されていません: {other:?}"),
+        }
+    }
 
     fn genesis() -> Genesis {
         serde_json::from_str(GENESIS).unwrap()
@@ -430,38 +567,81 @@ mod tests {
 
     /// 同じ最初の状態から同じトランザクションを実行すると、anvil のブロック 1 と同じルートになる。
     ///
-    /// anvil の coinbase は、`anvil_setCoinbase` で開発用の口座（0x7099…）にしておく。anvil は、手数料 0 で触った空の
-    /// coinbase をルートに残すが、EIP-161 では触った空の口座は消える（こちらはルートに入れない）。中身のある口座を coinbase に
-    /// すれば、どちらの決まりでも同じになる
+    /// anvil は basefee 1 gwei（`--base-fee 1000000000`）で動かし、coinbase は `anvil_setCoinbase` で開発用の口座
+    /// （0x7099…）にしておく。anvil は、手数料 0 で触った空の coinbase をルートに残すが、EIP-161 では触った空の口座は
+    /// 消える（こちらはルートに入れない）。中身のある口座を coinbase にすれば、どちらの決まりでも同じになる
     #[test]
     fn state_root_matches_anvil() {
         let mut rollup = Rollup::new(&genesis());
+        assert_eq!(rollup.base_fee(), MIN_BASE_FEE);
         let transfer = alloy_primitives::hex::decode(TRANSFER).unwrap();
         let outcomes = rollup.apply(11, 1_700_000_000, &[transfer]);
+        let hash = executed(&outcomes[0]);
         assert_eq!(
-            outcomes[0].as_ref().unwrap().to_string(),
-            "0xfd08b576f7811eca175983748c192339e732b1e20a8fd3f96ec2d8a2ec588d10"
+            hash.to_string(),
+            "0x48c836b61a4a8a6582bdf5a932fd5ae8db07aea1f61649055fb47a82bcb9be0c"
         );
         assert_eq!(
             rollup.state_root().to_string(),
-            "0x697241eaa3c20af6653ebfbd2654d6d33982cf32e6c39a4cfe01af5a591c52da"
+            "0x5cfd7e097d87c395876598cf671936738b8af7d257a6c2455fe13fa864a8dfc3"
         );
-        let receipt = rollup.receipt(outcomes[0].as_ref().unwrap()).unwrap();
+        let receipt = rollup.receipt(&hash).unwrap();
         assert!(receipt.success);
         assert_eq!(receipt.gas_used, 21_000);
+        assert_eq!(receipt.effective_gas_price, 1_000_000_000);
+        // 1 ETH と、燃えた basefee（21000 ガス × 1 gwei）
+        assert_eq!(
+            rollup.account(&FROM).balance,
+            U256::from(998_999_979_000_000_000_000u128)
+        );
         assert_eq!(rollup.account(&FROM).nonce, 1);
     }
 
-    /// 同じものをもう一度載せても、nonce が合わないので入らない。読めないものも入らない
+    /// 払えないもの（max fee が basefee に届かない）は失敗になり、nonce は進む。同じものをもう一度載せても入らない。
+    /// 読めないものも入らない
     #[test]
-    fn skips_replays_and_garbage() {
+    fn fails_unpaid_and_skips_replays_and_garbage() {
         let mut rollup = Rollup::new(&genesis());
-        let transfer = alloy_primitives::hex::decode(TRANSFER).unwrap();
-        let outcomes = rollup.apply(11, 0, &[transfer.clone(), transfer, vec![1, 2, 3]]);
-        assert!(outcomes[0].is_ok());
-        assert!(outcomes[1].is_err());
-        assert!(outcomes[2].is_err());
-        assert_eq!(rollup.block(11).unwrap().transactions.len(), 1);
+        let free = alloy_primitives::hex::decode(FREE_TRANSFER).unwrap();
+        let before = rollup.account(&FROM).balance;
+        let outcomes = rollup.apply(11, 0, &[free.clone(), free, vec![1, 2, 3]]);
+        let Outcome::Failed(hash, _) = &outcomes[0] else {
+            panic!("失敗になっていません: {:?}", outcomes[0]);
+        };
+        assert!(matches!(outcomes[1], Outcome::Skipped(_)));
+        assert!(matches!(outcomes[2], Outcome::Skipped(_)));
+        let receipt = rollup.receipt(hash).unwrap();
+        assert!(!receipt.success);
+        assert_eq!(receipt.gas_used, 0);
+        assert_eq!(rollup.account(&FROM).nonce, 1);
+        assert_eq!(rollup.account(&FROM).balance, before);
+        assert_eq!(rollup.block(11).unwrap().transactions, vec![*hash]);
+        // nonce 0 のものは、もう通らない
+        let paid = alloy_primitives::hex::decode(TRANSFER).unwrap();
+        assert!(matches!(
+            rollup.apply(12, 0, &[paid])[0],
+            Outcome::Skipped(_)
+        ));
+    }
+
+    /// basefee は、使われたガスがたまると上がり、時間がたつと下がる
+    #[test]
+    fn base_fee_rises_and_decays() {
+        assert_eq!(base_fee(0), MIN_BASE_FEE);
+        // e 倍のあたり
+        let e = base_fee(BASE_FEE_UPDATE_FRACTION);
+        assert!((2_718_000_000..2_719_000_000).contains(&e), "{e}");
+        assert!(base_fee(2 * BASE_FEE_UPDATE_FRACTION) > e);
+        // 上限で止まる
+        assert_eq!(base_fee(u64::MAX), base_fee(MAX_EXCESS));
+        let excess = Excess {
+            gas: 5 * TARGET_GAS_PER_SECOND,
+            time: 100,
+        };
+        assert_eq!(excess.at(102).gas, 3 * TARGET_GAS_PER_SECOND);
+        assert_eq!(excess.at(200).gas, 0);
+        // 時計が戻っても増えない
+        assert_eq!(excess.at(50).gas, excess.gas);
     }
 
     /// チェーン ID が違うものは入らない
@@ -471,7 +651,10 @@ mod tests {
         genesis.chain_id = 1;
         let mut rollup = Rollup::new(&genesis);
         let transfer = alloy_primitives::hex::decode(TRANSFER).unwrap();
-        assert!(rollup.apply(11, 0, &[transfer])[0].is_err());
+        assert!(matches!(
+            rollup.apply(11, 0, &[transfer])[0],
+            Outcome::Skipped(_)
+        ));
     }
 
     /// 空のブロックは、直前のルートを引き継ぐ

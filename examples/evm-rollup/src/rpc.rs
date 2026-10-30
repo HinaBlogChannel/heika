@@ -104,12 +104,13 @@ fn call(api: &Api, method: &str, params: &[Value]) -> Result<Value, Failure> {
         "eth_syncing" => Ok(json!(false)),
         "eth_accounts" => Ok(json!([])),
         "eth_blockNumber" => Ok(quantity(views.latest.height)),
-        "eth_gasPrice" | "eth_maxPriorityFeePerGas" | "eth_blobBaseFee" => Ok(quantity(0)),
+        "eth_gasPrice" => Ok(quantity(views.latest.base_fee())),
+        "eth_maxPriorityFeePerGas" | "eth_blobBaseFee" => Ok(quantity(0)),
         "eth_feeHistory" => {
             let count = number(params.first()).unwrap_or(1).clamp(1, 1024);
             Ok(json!({
                 "oldestBlock": quantity(views.latest.height.saturating_sub(count - 1)),
-                "baseFeePerGas": vec![quantity(0); count as usize + 1],
+                "baseFeePerGas": vec![quantity(views.latest.base_fee()); count as usize + 1],
                 "gasUsedRatio": vec![0.0; count as usize],
                 "reward": vec![vec![quantity(0); reward_count(params)]; count as usize],
             }))
@@ -276,7 +277,7 @@ fn block_json(rollup: &Rollup, height: u64, full: bool) -> Option<Value> {
         "nonce": "0x0000000000000000",
         "gasLimit": quantity(GAS_LIMIT),
         "gasUsed": quantity(gas_used),
-        "baseFeePerGas": quantity(0),
+        "baseFeePerGas": quantity(block.base_fee),
         "extraData": "0x",
         "size": quantity(0),
         "uncles": [],
@@ -291,7 +292,7 @@ fn transaction_json(rollup: &Rollup, receipt: &Receipt) -> Value {
     value["blockNumber"] = quantity(receipt.height);
     value["blockHash"] = json!(rollup.block_hash(receipt.height));
     value["transactionIndex"] = quantity(receipt.index);
-    value["gasPrice"] = quantity(0);
+    value["gasPrice"] = json!(format!("{:#x}", receipt.effective_gas_price));
     value
 }
 
@@ -337,7 +338,7 @@ fn receipt_json(rollup: &Rollup, hash: &B256, receipt: &Receipt) -> Value {
         "to": receipt.envelope.to(),
         "cumulativeGasUsed": quantity(receipt.cumulative_gas_used),
         "gasUsed": quantity(receipt.gas_used),
-        "effectiveGasPrice": quantity(0),
+        "effectiveGasPrice": format!("{:#x}", receipt.effective_gas_price),
         "contractAddress": receipt.contract_address,
         "logs": logs,
         "logsBloom": receipt.bloom(),

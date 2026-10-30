@@ -48,7 +48,7 @@ jobs:
       - name: heika-core を hazmat つきで
         run: cargo test -p heika-core --features hazmat --locked
 
-  # heika-core と heika-transaction が std なしで使えることを、std のない組み込み向けのターゲットで確かめる
+  # heika-core、heika-transaction、heika-block が std なしで使えることを、std のない組み込み向けのターゲットで確かめる
   no-std:
     runs-on: ubuntu-24.04
     steps:
@@ -62,6 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy -p heika-core --no-default-features --features hazmat --target thumbv7em-none-eabihf --locked -- -D warnings
       - run: cargo clippy -p heika-transaction --target thumbv7em-none-eabihf --locked -- -D warnings
+      - run: cargo clippy -p heika-block --target thumbv7em-none-eabihf --locked -- -D warnings
 
   # Windows でだけ使うコードと、Unix でだけ読み込むものの取り違えを見つける
   windows:

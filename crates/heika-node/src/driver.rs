@@ -2,7 +2,7 @@
 //! 指示を、スレッドとソケットで実際にする。受信箱は1本で、ピアのスレッド、つなぎに行くスレッド、時刻のスレッド、
 //! 待ち受けが、そこに出来事を入れる。
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -765,7 +765,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                                 greeted_voters = voting.iter().copied().collect();
                                 if !fresh.is_empty() {
                                     let (min, max, _) = observer.request();
-                                    let body = observer.unknown_to(min, max, &HashSet::new());
+                                    let body = observer.unknown_to(min, max, &BTreeSet::new());
                                     if !body.is_empty() {
                                         let body = Arc::new(body);
                                         for id in fresh {

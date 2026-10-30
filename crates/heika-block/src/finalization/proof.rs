@@ -11,9 +11,12 @@
 //!
 //! 投票者とその重みは、証明の外から渡す。エポック E の投票者は、E − 1 の最後の高さの状態で決まる。
 
-use std::collections::BTreeMap;
-use std::fmt;
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt;
 
 use heika_core::hash::Hash256;
 
@@ -149,7 +152,7 @@ impl fmt::Display for ProofError {
     }
 }
 
-impl std::error::Error for ProofError {}
+impl core::error::Error for ProofError {}
 
 const PROOF_HEADER_SIZE: usize = 8 + FinalizedBlockHeader::SIZE;
 /// `FinalizationMessageGroup` の見出し。大きさ、ハッシュの数、署名の数、段階、高さ

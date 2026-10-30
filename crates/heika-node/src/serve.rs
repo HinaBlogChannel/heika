@@ -9,7 +9,7 @@
 //! 全体）に上限を置き、決まりを破った相手（知らない種類、大きすぎるパケット、確かめを通らないブロック）は、
 //! 鍵でしばらく受けない。先端につながるのに中核が弾いたブロックを押し付けた鍵も、[`Gate::ban`] で受けない。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -252,7 +252,7 @@ impl Responder<'_> {
                     epoch: u32_at(offset),
                     point: u32_at(offset + 4),
                 };
-                let known: HashSet<u32> = (16..body.len()).step_by(4).map(u32_at).collect();
+                let known: BTreeSet<u32> = (16..body.len()).step_by(4).map(u32_at).collect();
                 let votes = votes.lock().expect("not poisoned");
                 reply(votes.unknown_to(round(0), round(8), &known))
             }

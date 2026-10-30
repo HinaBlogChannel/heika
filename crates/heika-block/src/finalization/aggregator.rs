@@ -4,8 +4,9 @@
 //! [`MultiRoundAggregator`] は、最小から最大のラウンドまでの [`RoundAggregator`] を並べて持つ。最大のラウンドは
 //! 投票の段取り役が進め、最小のラウンドは、ファイナライズしたら前のエポックを捨てて進める。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use super::FinalizationRound;
 use super::message::FinalizationMessage;
@@ -76,7 +77,7 @@ impl RoundAggregator {
     /// 短いハッシュが `known` にないメッセージ。合わせて `max_size` バイトまで
     pub fn unknown_messages(
         &self,
-        known: &HashSet<u32>,
+        known: &BTreeSet<u32>,
         max_size: usize,
     ) -> Vec<&FinalizationMessage> {
         let mut size = 0;
@@ -177,7 +178,7 @@ pub struct MultiRoundAggregator {
     max_round: FinalizationRound,
     /// 始めたときに最後にファイナライズしていたブロック。estimate がどのラウンドにもなければこれ
     previous_finalized: Candidate,
-    voting_sets: HashMap<u32, Arc<VotingSet>>,
+    voting_sets: BTreeMap<u32, Arc<VotingSet>>,
     rounds: BTreeMap<FinalizationRound, RoundAggregator>,
 }
 
@@ -195,7 +196,7 @@ impl MultiRoundAggregator {
             min_round: round,
             max_round: round,
             previous_finalized,
-            voting_sets: HashMap::new(),
+            voting_sets: BTreeMap::new(),
             rounds: BTreeMap::new(),
         }
     }
@@ -247,8 +248,8 @@ impl MultiRoundAggregator {
             return Err(MultiRoundError::Round);
         }
         let aggregator = match self.rounds.entry(round) {
-            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::btree_map::Entry::Vacant(entry) => {
+            alloc::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            alloc::collections::btree_map::Entry::Vacant(entry) => {
                 let voters = self
                     .voting_sets
                     .get(&round.epoch)
@@ -287,7 +288,7 @@ impl MultiRoundAggregator {
                 .map(|target| BestPrecommit {
                     round: *round,
                     target,
-                    messages: aggregator.unknown_messages(&HashSet::new(), self.max_response_size),
+                    messages: aggregator.unknown_messages(&BTreeSet::new(), self.max_response_size),
                 })
         })
     }
@@ -306,7 +307,7 @@ impl MultiRoundAggregator {
         &self,
         min: FinalizationRound,
         max: FinalizationRound,
-        known: &HashSet<u32>,
+        known: &BTreeSet<u32>,
     ) -> Vec<&FinalizationMessage> {
         let mut size = 0;
         let mut out = Vec::new();
@@ -459,16 +460,16 @@ mod tests {
         for message in &messages {
             aggregator.add(message.clone()).unwrap();
         }
-        let all = aggregator.unknown_messages(&HashSet::new(), usize::MAX);
+        let all = aggregator.unknown_messages(&BTreeSet::new(), usize::MAX);
         assert_eq!(all.len(), 3);
-        let known: HashSet<u32> = [messages[0].short_hash()].into();
+        let known: BTreeSet<u32> = [messages[0].short_hash()].into();
         let unknown = aggregator.unknown_messages(&known, usize::MAX);
         assert_eq!(unknown.len(), 2);
         assert!(!unknown.contains(&&messages[0]));
         // 1つ分と少しの大きさなら、1つだけ
-        let one = aggregator.unknown_messages(&HashSet::new(), messages[0].size() + 1);
+        let one = aggregator.unknown_messages(&BTreeSet::new(), messages[0].size() + 1);
         assert_eq!(one.len(), 1);
-        let short: HashSet<u32> = aggregator.short_hashes().collect();
+        let short: BTreeSet<u32> = aggregator.short_hashes().collect();
         assert_eq!(
             short,
             messages
@@ -586,7 +587,7 @@ mod tests {
             }
         }
         assert_eq!(aggregator.short_hashes().len(), 9);
-        let all = HashSet::new();
+        let all = BTreeSet::new();
         assert_eq!(
             aggregator
                 .unknown_messages(round(3, 0), round(9, 0), &all)
@@ -599,7 +600,7 @@ mod tests {
                 .len(),
             6
         );
-        let known: HashSet<u32> = messages[..4]
+        let known: BTreeSet<u32> = messages[..4]
             .iter()
             .map(FinalizationMessage::short_hash)
             .collect();

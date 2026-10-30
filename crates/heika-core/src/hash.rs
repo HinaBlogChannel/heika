@@ -7,7 +7,7 @@ use crate::hex::{self, ParseHexError};
 
 /// 32バイトのハッシュ。catapult の `Hash256`。トランザクションやブロックのハッシュに使う。
 /// 文字列にするときは、Symbol の慣習に合わせて大文字の16進にする。
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash256(pub [u8; 32]);
 
 impl fmt::Display for Hash256 {

@@ -10,6 +10,9 @@
 //! 署名するのは 200 バイト目から後ろ。根の鍵は（下の公開鍵、u64 のエポック）に、下の鍵はメッセージに署名する。
 //! メッセージのハッシュ（重複を見分けるもの）は、全体の SHA3-256。
 
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+
 use heika_core::hash::Hash256;
 use heika_core::key::PublicKey;
 use heika_core::signature::Signature;

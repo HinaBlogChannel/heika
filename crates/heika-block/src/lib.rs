@@ -14,13 +14,20 @@
 //! ```
 //!
 //! ブロックは作らずに読むだけなので、catapult が確かめない予約の部分は確かめない。
+//!
+//! std がなくても、alloc があれば使える（`#![no_std]`）。heika-core は `default-features = false` で使う。
+
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
 
 pub mod finalization;
 pub mod scoring;
 pub mod statement;
 
-use std::fmt;
-use std::ops::Range;
+use alloc::vec::Vec;
+use core::fmt;
+use core::ops::Range;
 
 use heika_core::address::Address;
 use heika_core::hash::Hash256;
@@ -383,7 +390,7 @@ impl fmt::Display for BlockDecodeError {
     }
 }
 
-impl std::error::Error for BlockDecodeError {}
+impl core::error::Error for BlockDecodeError {}
 
 #[cfg(test)]
 mod tests {

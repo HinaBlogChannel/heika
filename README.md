@@ -59,7 +59,7 @@ Symbol（XYM。NEM の後継のブロックチェーン）の、鍵と証明書�
 Releases に、次のバイナリを置いている。
 
 - Linux の x86_64 と aarch64（musl で静的にリンクしたもの）
-- macOS の Apple Silicon
+- macOS の Apple Silicon と Intel
 - Windows の x86_64
 
 ダウンロードしたものは、`SHA256SUMS` と、GitHub Actions で作ったことを示す来歴の証明で確かめられる。
@@ -76,7 +76,7 @@ Windows でも、標準入力から読んだ秘密鍵を std のバッファに�
 ウォレットの GUI（`heika-gui-v…`）も、同じ Release に置いている。どれも上と同じように確かめられる。iOS のほかでは、試験的なノードも「ノード」のタブから動かせる。
 
 - Linux の x86_64: `.deb`、`.rpm`、`.AppImage`
-- macOS の Apple Silicon: `.dmg`。公証を受けていないので、上の `xattr` で印を外してから開く
+- macOS: `.dmg`。`-macos-universal` は Apple Silicon と Intel のどちらでも動く。迷ったらこれを使う。`-macos-aarch64`（Apple Silicon）と `-macos-x86_64`（Intel）は、そのチップの分だけが入った小さいもの。公証を受けていないので、上の `xattr` で印を外してから開く
 - Windows の x86_64: `.msi` と `-setup.exe`。署名していないので、SmartScreen に止められたら「詳細情報」から実行する
 - Android の aarch64: `.apk`。署名の証明書の SHA-256 は `79b38fb9557cf0249f75aadf806805f3e5b4f6b196a69b6f986c075cdb64c5ad` で、`apksigner verify --print-certs` で確かめられる。どの版もこの鍵で署名するので、上書きして更新できる
 - iOS: `-unsigned.ipa`。署名していないので、自分で署名し直して入れる

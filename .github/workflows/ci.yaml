@@ -342,6 +342,9 @@ jobs:
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-15
+          # Intel の Mac。Apple Silicon のランナーからクロスビルドして、Rosetta 2 で動かして確かめる
+          - target: x86_64-apple-darwin
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2025
     runs-on: ${{ matrix.os }}
@@ -370,6 +373,17 @@ jobs:
           sudo apt-get install -y musl-tools
           echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p heika-cli --target "$TARGET"
+      - name: Intel の Mac のものを動かすための Rosetta 2 を入れる
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2> /dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+      - name: できたバイナリが動くか確かめる
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then heika="target/$TARGET/release/heika.exe"; else heika="target/$TARGET/release/heika"; fi
+          if [ "$RUNNER_OS" = macOS ]; then file "$heika"; fi
+          "$heika" --version
       - name: 埋め込んだソースを、README の手順で実行せずに取り出せるか確かめる
         run: |
           case "$RUNNER_OS" in
@@ -514,8 +528,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x86_64
+          # macOS は、Apple Silicon と Intel の両方が入ったもの（universal）と、それぞれだけのものの3つを作る
           - os: macos-15
-            platform: macos-aarch64
+            platform: macos
+            targets: aarch64-apple-darwin x86_64-apple-darwin
           - os: windows-2025
             platform: windows-x86_64
     runs-on: ${{ matrix.os }}
@@ -525,6 +541,7 @@ jobs:
       attestations: write
     env:
       PREFIX: heika-gui-v${{ needs.version.outputs.version }}-${{ matrix.platform }}
+      MACOS_TARGETS: universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin
     defaults:
       run:
         shell: bash
@@ -540,6 +557,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - uses: ./.github/actions/rust
+        with:
+          targets: ${{ matrix.targets }}
       - uses: ./.github/actions/tauri-cli
       # macOS では、Spotlight などが作りかけのイメージをつかんで、hdiutil が DMG を作るときに "Resource busy" で落ちることがある
       - name: macOS で Spotlight の索引を止める
@@ -549,17 +568,27 @@ jobs:
         run: |
           cargo tauri icon icon.png
           # "Resource busy" で落ちたときだけ、3 回まで作り直す。コンパイルは済んでいるので、2 回目からは束ねるだけ
-          for attempt in 1 2 3; do
-            if cargo tauri build 2>&1 | tee build.log; then
-              exit 0
-            fi
-            if [ "$RUNNER_OS" != macOS ] || ! grep -q 'Resource busy' build.log || [ "$attempt" = 3 ]; then
-              exit 1
-            fi
-            echo "::warning::DMG を作るときに Resource busy が出たので作り直す（${attempt} 回目）"
-            rm -f target/release/bundle/macos/rw.*.dmg
-            sleep 10
-          done
+          build() {
+            for attempt in 1 2 3; do
+              if cargo tauri build "$@" 2>&1 | tee build.log; then
+                return 0
+              fi
+              if [ "$RUNNER_OS" != macOS ] || ! grep -q 'Resource busy' build.log || [ "$attempt" = 3 ]; then
+                return 1
+              fi
+              echo "::warning::DMG を作るときに Resource busy が出たので作り直す（${attempt} 回目）"
+              rm -f target/*/release/bundle/macos/rw.*.dmg
+              sleep 10
+            done
+          }
+          if [ "$RUNNER_OS" = macOS ]; then
+            # universal を作るときに両方のアーキテクチャーをコンパイルするので、それぞれだけのものは束ねるだけで済む
+            for target in $MACOS_TARGETS; do
+              build --target "$target"
+            done
+          else
+            build
+          fi
       - name: 失敗したら、エラーの行を annotation に出す
         if: failure()
         run: bash ../../.github/scripts/annotate-errors.sh build.log
@@ -573,7 +602,23 @@ jobs:
               cp "$bundle"/rpm/*.rpm "out/$PREFIX.rpm"
               cp "$bundle"/appimage/*.AppImage "out/$PREFIX.AppImage" ;;
             macOS)
-              cp "$bundle"/dmg/*.dmg "out/$PREFIX.dmg" ;;
+              for target in $MACOS_TARGETS; do
+                bundle="target/$target/release/bundle"
+                # 入っているアーキテクチャーが、名前のとおりか確かめる
+                case "$target" in
+                  universal-*) architectures="arm64 x86_64" ;;
+                  aarch64-*) architectures=arm64 ;;
+                  x86_64-*) architectures=x86_64 ;;
+                esac
+                for executable in "$bundle"/macos/*.app/Contents/MacOS/*; do
+                  lipo "$executable" -verify_arch $architectures
+                  if [ "$(lipo -archs "$executable" | wc -w)" != "$(wc -w <<< "$architectures")" ]; then
+                    echo "::error::$executable に、$architectures のほかのアーキテクチャーも入っています"
+                    exit 1
+                  fi
+                done
+                cp "$bundle"/dmg/*.dmg "out/$PREFIX-${target%-apple-darwin}.dmg"
+              done ;;
             Windows)
               cp "$bundle"/msi/*.msi "out/$PREFIX.msi"
               cp "$bundle"/nsis/*.exe "out/$PREFIX-setup.exe" ;;

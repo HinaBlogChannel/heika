@@ -104,7 +104,7 @@ Ethereum と同じ Merkle Patricia Trie で求めます。空の口座は入れ�
 
 - **状態を保存しません。** 起動のたびに、`start` から読み直します
 - **過去の高さの状態を持っていません。** 状態を引けるのは `latest` と `finalized` だけです
-- **JSON-RPC は一部だけです。** `cast` で送金、デプロイ、呼び出しをするのに要るものだけです。`eth_getLogs` や `eth_getBlockByHash` などはありません
+- **JSON-RPC は一部だけです。** `cast` で送金、デプロイ、呼び出しをするのに要るものだけです。`eth_getLogs` や `eth_getBlockByHash` などはありません。MetaMask などの wallet では試していません
 - **ブロックのハッシュは、Symbol のブロックのハッシュではありません。** チェーン ID と高さと状態のルートから作ります。`PREVRANDAO` は 0 です
 - **未承認のトランザクションを持ちません。** `pending` の nonce は、ブロックに入ったものまでです。続けて送るときは、前のものが入るのを待ってください
 - **橋はありません。** Symbol の XYM をロールアップに持ち込むことも、出すこともできません

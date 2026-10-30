@@ -177,6 +177,7 @@ jobs:
             examples/vanitygen-nvptx
             examples/evm-bridge
             examples/evm-rollup
+            examples/dkg
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check
@@ -242,6 +243,12 @@ jobs:
           cargo test --locked
       - name: Symbol の上の EVM のロールアップを確かめる
         working-directory: examples/evm-rollup
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: 掲示板で鍵を分けて作る DKG を確かめる
+        working-directory: examples/dkg
         run: |
           cargo fmt --check
           cargo clippy --all-targets --locked -- -D warnings

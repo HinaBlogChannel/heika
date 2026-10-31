@@ -1916,6 +1916,28 @@ mod tests {
     }
 
     #[test]
+    fn zero_voting_keys_do_not_vote() {
+        let mut executor = executor();
+        // a はふつうの投票の鍵、b はすべて 0 の投票の鍵を、エポック 1 から 10 まで持つ
+        for (n, key, balance) in [(1, [1; 32], 300), (2, [0; 32], 200)] {
+            let mut account = AccountState::new(address(n), 1);
+            account.credit(CURRENCY, balance);
+            account.voting.push(VotingKey {
+                key,
+                start_epoch: 1,
+                end_epoch: 10,
+            });
+            executor.accounts.insert(address(n), account);
+            executor.high_value.insert(address(n));
+        }
+        let set = executor.voting_set(5);
+        assert_eq!(set.voters.into_iter().collect::<Vec<_>>(), [([1; 32], 300)]);
+        // 足は、エポックで絞るとき（totalVotingBalanceCalculationFix より後）だけ b を数えない
+        assert_eq!(executor.voting_footer(Some(5)), (1, 2, 300));
+        assert_eq!(executor.voting_footer(None), (2, 2, 500));
+    }
+
+    #[test]
     fn locks_are_alive_until_used_or_ended() {
         let executor = executor();
         assert!(executor.lock_alive(Some((LockStatus::Unused, HEIGHT + 1)), HEIGHT));

@@ -44,6 +44,20 @@ heika expert public-key inspect <公開鍵>
 - 単位元 `0100…00` の鍵は、今でも誰でも署名できる
 - 公開鍵どうしの和は、Symbol の秘密鍵としては取り出せない。他人の公開鍵との和を、共同の鍵として使ってはいけない（rogue key）
 
+秘密鍵（シード）の代わりに、スカラーをじかに扱うこともできる。スカラーは秘密鍵と同じ重みを持ち、標準入力からのみ読む。
+
+```sh
+heika expert scalar expand --out alice.scalar < alice.key
+heika expert scalar public-key < alice.scalar
+heika expert scalar sign <メッセージの16進>... < alice.scalar
+{ cat alice.scalar; cat nonce; } | heika expert scalar sign <メッセージの16進>... [--public-key <公開鍵>]
+```
+
+`expand` は、秘密鍵を SHA-512 で広げてクランプしたスカラーを、素数位数で割った余りにして書く。`sign` は、標準入力の1行目をスカラー a、2行目をノンス r として、R = r·B、s = r + H(R ‖ A ‖ M)·a の署名を出す。2行目を省くと、OS の乱数でノンスを決める。
+
+- 同じスカラーで、違うメッセージに同じノンスを使うと、2つの署名からスカラーが求まる
+- `--public-key` で H に入れる A を差し替えると、catapult の検証を通らない署名も作れる
+
 ## キーストア
 
 ```sh

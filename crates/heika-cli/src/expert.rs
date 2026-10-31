@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use clap::Subcommand;
-use heika_core::hazmat;
+use heika_core::hazmat::{self, curve25519_dalek::traits::IsIdentity};
 use heika_core::key::PublicKey;
 
 use crate::Failure;
@@ -39,6 +39,25 @@ pub enum PublicKeyCommand {
         #[arg(required = true, num_args = 2.., value_name = "PUBLIC_KEY")]
         public_keys: Vec<PublicKey>,
     },
+    /// 公開鍵（曲線の点）の逆元を、正規形の16進で出す。add と合わせると引き算になる
+    Neg {
+        /// 公開鍵（16進）
+        public_key: PublicKey,
+    },
+    /// 公開鍵（曲線の点）が、素数位数の部分群に入っているかを調べる
+    ///
+    /// 入っていれば「主部分群」、外なら混ざった小さい位数の成分の位数を出す。単位元と、小さい位数の点そのものは
+    /// そう書く。部分群に入っていて単位元でないときだけ、終了コード 0 で終わる。外か単位元なら 1、正規形の曲線上の点
+    /// として読めなければ 2 で終わる。
+    Inspect {
+        /// 公開鍵（16進）
+        public_key: PublicKey,
+    },
+}
+
+fn decode(public_key: &PublicKey) -> Result<hazmat::curve25519_dalek::EdwardsPoint, String> {
+    hazmat::decode_any_point(&public_key.0)
+        .ok_or_else(|| format!("{public_key} は、正規形の曲線上の点として読めません"))
 }
 
 pub fn run(command: ExpertCommand) -> Result<(), Failure> {
@@ -57,6 +76,36 @@ pub fn run(command: ExpertCommand) -> Result<(), Failure> {
                 })?;
             }
             outln!("{}", PublicKey(sum));
+        }
+        ExpertCommand::PublicKey(PublicKeyCommand::Neg { public_key }) => {
+            let point = decode(&public_key)?;
+            outln!("{}", PublicKey((-point).compress().to_bytes()));
+        }
+        ExpertCommand::PublicKey(PublicKeyCommand::Inspect { public_key }) => {
+            let Some(point) = hazmat::decode_any_point(&public_key.0) else {
+                outln!("正規形の曲線上の点として読めません");
+                return Err(Failure::Code(2));
+            };
+            // 2^j 倍して主部分群に入る最小の 2^j が、小さい位数の成分の位数
+            let order = [1u8, 2, 4, 8]
+                .into_iter()
+                .find(|&order| {
+                    (point * hazmat::curve25519_dalek::Scalar::from(order)).is_torsion_free()
+                })
+                .expect("the curve's cofactor is 8");
+            if point.is_identity() {
+                outln!("単位元。誰でも署名できる");
+            } else if order == 1 {
+                outln!("主部分群");
+                return Ok(());
+            } else if point.is_small_order() {
+                outln!("小さい位数の点そのもの（位数 {order}）。今の検証では誰も署名できない");
+            } else {
+                outln!(
+                    "主部分群の外（小さい位数の成分の位数 {order}）。今の検証では誰も署名できない"
+                );
+            }
+            return Err(Failure::Code(1));
         }
     }
     Ok(())

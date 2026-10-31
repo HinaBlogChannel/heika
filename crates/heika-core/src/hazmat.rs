@@ -77,12 +77,20 @@ pub fn small_order_points() -> [([u8; 32], u8); 8] {
 /// 誰も署名できない鍵になる。ただし、これは今の検証の決まりの下での話で、位数 8 を掛けてから比べる検証
 /// （ZIP-215 など）では、元の鍵の持ち主が署名できる。小さい位数の点そのものなら、誰でも署名できる。
 pub fn add_points(a: &[u8; 32], b: &[u8; 32]) -> Option<[u8; 32]> {
-    let decode = |bytes: &[u8; 32]| {
-        ed25519::is_canonical(bytes)
-            .then(|| CompressedEdwardsY(*bytes).decompress())
-            .flatten()
-    };
-    Some((decode(a)? + decode(b)?).compress().to_bytes())
+    Some(
+        (decode_any_point(a)? + decode_any_point(b)?)
+            .compress()
+            .to_bytes(),
+    )
+}
+
+/// 点に戻す。[`decode_point`] と違い、素数位数の部分群に入っているかは問わず、正規形で曲線上にあれば受け付ける。
+/// 部分群の外の点を署名や鍵の交換に使うと、catapult とは違う結果になる
+pub fn decode_any_point(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
+    if !ed25519::is_canonical(bytes) {
+        return None;
+    }
+    CompressedEdwardsY(*bytes).decompress()
 }
 
 /// SHA-512。部分を順に続けたもの

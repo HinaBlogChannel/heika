@@ -297,7 +297,9 @@ impl Executor {
         self.voting_footer(epoch)
     }
 
-    /// 足を、`epoch` に投票の鍵を持つアカウントだけで数える。`None` ならエポックで絞らない（catapult のエポック 0）
+    /// 足を、`epoch` に投票の鍵を持つアカウントだけで数える。`None` ならエポックで絞らない（catapult のエポック 0）。
+    /// エポックで絞るときは、catapult の `ComputeHighValueAccountStatistics` と同じく、そのエポックの鍵がすべて 0 の
+    /// アカウントも数えない
     pub(super) fn voting_footer(&self, epoch: Option<u64>) -> (u32, u64, u64) {
         let finalization = &self.config.finalization;
         let mosaic = self.config.harvesting_mosaic_id;
@@ -312,9 +314,13 @@ impl Executor {
                 continue;
             }
             if let Some(epoch) = epoch
-                && !account.voting.iter().any(|key| {
-                    u64::from(key.start_epoch) <= epoch && epoch <= u64::from(key.end_epoch)
-                })
+                && !account
+                    .voting
+                    .iter()
+                    .find(|key| {
+                        u64::from(key.start_epoch) <= epoch && epoch <= u64::from(key.end_epoch)
+                    })
+                    .is_some_and(|key| key.key != [0; 32])
             {
                 continue;
             }

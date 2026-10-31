@@ -827,6 +827,10 @@ impl Executor {
             else {
                 continue;
             };
+            // catapult と同じく、すべて 0 の鍵は投票しないものとする。リンクするときには弾かれない
+            if key.key == [0; 32] {
+                continue;
+            }
             if config.treasury_reissuance_epoch <= epoch
                 && config.ineligible_voters.contains(address)
             {

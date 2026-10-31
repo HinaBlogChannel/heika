@@ -73,6 +73,32 @@ struct CreateArgs {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddAccountArgs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    words: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key: Option<String>,
+    network: String,
+    label: String,
+    passphrase: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameAccountArgs {
+    label: String,
+    new_label: String,
+    passphrase: String,
+}
+
+#[derive(Serialize)]
+struct RemoveAccountArgs {
+    label: String,
+    passphrase: String,
+}
+
+#[derive(Serialize)]
 struct UnlockArgs {
     passphrase: String,
 }
@@ -311,6 +337,9 @@ enum Screen {
     Home,
     Send,
     Accounts,
+    /// アカウントの一覧から開く
+    AddAccount,
+    EditAccount(AccountView),
     /// ノード（試験的）。デスクトップだけ
     Node,
     Settings,
@@ -327,7 +356,14 @@ impl Screen {
     fn inside(&self) -> bool {
         matches!(
             self,
-            Self::Home | Self::Send | Self::Accounts | Self::Node | Self::Settings | Self::Licenses
+            Self::Home
+                | Self::Send
+                | Self::Accounts
+                | Self::AddAccount
+                | Self::EditAccount(_)
+                | Self::Node
+                | Self::Settings
+                | Self::Licenses
         )
     }
 }
@@ -425,6 +461,17 @@ impl Ctx {
         });
     }
 
+    /// アカウントを足したり外したりしたあと。並びが変わるので、`address` のものを選び直す。なければ最初のもの
+    fn replace_accounts(self, accounts: Vec<AccountView>, address: Option<String>) {
+        let index = address.and_then(|address| {
+            accounts
+                .iter()
+                .position(|account| account.address == address)
+        });
+        self.accounts.set(accounts);
+        self.save(move |settings| settings.account_index = index);
+    }
+
     /// ホームに出すアカウント。最後に選んだものがなければ、最初のもの
     fn current(self) -> Option<AccountView> {
         let accounts = self.accounts.get();
@@ -507,6 +554,8 @@ fn App() -> impl IntoView {
                     Screen::Approve(draft) => approve(ctx, draft).into_any(),
                     Screen::ApproveLink(draft) => approve_link(ctx, draft).into_any(),
                     Screen::Accounts => accounts_view(ctx).into_any(),
+                    Screen::AddAccount => add_account(ctx).into_any(),
+                    Screen::EditAccount(account) => edit_account(ctx, account).into_any(),
                     Screen::Node => node_view(ctx).into_any(),
                     Screen::Settings => settings_view(ctx).into_any(),
                     Screen::Licenses => licenses_view(ctx).into_any(),
@@ -516,7 +565,12 @@ fn App() -> impl IntoView {
                 {move || {
                     let quiet = matches!(
                         ctx.screen.get(),
-                        Screen::Home | Screen::Send | Screen::Accounts | Screen::Approve(_)
+                        Screen::Home
+                            | Screen::Send
+                            | Screen::Accounts
+                            | Screen::AddAccount
+                            | Screen::EditAccount(_)
+                            | Screen::Approve(_)
                     )
                         && matches!(about.get(), Some(Ok(_)));
                     (!quiet).then(|| view! { <footer>{footer}</footer> })
@@ -530,10 +584,11 @@ fn App() -> impl IntoView {
 fn menu(ctx: Ctx) -> impl IntoView {
     let item = move |screen: Screen, label: &'static str, icon: &'static str| {
         let target = screen.clone();
-        // ライセンスの画面は、設定の中の画面として扱う
+        // ライセンスの画面は設定の、アカウントを足したり変えたりする画面は一覧の中の画面として扱う
         let active = move || {
             let current = match ctx.screen.get() {
                 Screen::Licenses => Screen::Settings,
+                Screen::AddAccount | Screen::EditAccount(_) => Screen::Accounts,
                 screen => screen,
             };
             std::mem::discriminant(&current) == std::mem::discriminant(&target)
@@ -835,6 +890,7 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
                     ctx.save(move |settings| settings.account_index = Some(index));
                     ctx.go(Screen::Home);
                 };
+                let edit = account.clone();
                 view! {
                     <li>
                         <button class="card glass" class:selected=selected on:click=choose>
@@ -845,6 +901,7 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
                             </span>
                             <span class="address">{spaced(&account.address)}</span>
                         </button>
+                        <button class="quiet" on:click=move |_| ctx.go(Screen::EditAccount(edit.clone()))>"名前を変える・外す"</button>
                     </li>
                 }
             })
@@ -853,6 +910,203 @@ fn accounts_view(ctx: Ctx) -> impl IntoView {
     view! {
         <p class="lead">"ホームに出すアカウントを選んでください。"</p>
         <ul class="accounts">{items}</ul>
+        <div class="row">
+            <button on:click=move |_| ctx.go(Screen::AddAccount)>"アカウントを足す"</button>
+        </div>
+    }
+}
+
+/// ほかのウォレットの単語か秘密鍵から、アカウントを足す
+fn add_account(ctx: Ctx) -> impl IntoView {
+    let kind = RwSignal::new("words".to_owned());
+    let words = RwSignal::new(String::new());
+    let key = RwSignal::new(String::new());
+    let network = RwSignal::new(
+        ctx.current()
+            .map_or("testnet".to_owned(), |account| account.network),
+    );
+    // 重ならないラベルを、はじめから入れておく
+    let taken: Vec<String> = ctx
+        .accounts
+        .get_untracked()
+        .into_iter()
+        .map(|account| account.label)
+        .collect();
+    let label = RwSignal::new(
+        (2..)
+            .map(|number| format!("アカウント {number}"))
+            .find(|label| !taken.contains(label))
+            .expect("some number is free"),
+    );
+    let passphrase = RwSignal::new(String::new());
+    let submit = move |event: SubmitEvent| {
+        event.prevent_default();
+        let mut args = AddAccountArgs {
+            words: None,
+            private_key: None,
+            network: network.get_untracked(),
+            label: label.get_untracked(),
+            passphrase: passphrase.get_untracked(),
+        };
+        if kind.get_untracked() == "words" {
+            let text = words.get_untracked();
+            let count = text.split_whitespace().count();
+            if ![12, 15, 18, 21, 24].contains(&count) {
+                ctx.error
+                    .set(Some(format!("単語が {count} 個です。12個か24個のはずです")));
+                return;
+            }
+            args.words = Some(text);
+        } else {
+            args.private_key = Some(key.get_untracked());
+        }
+        let before: Vec<String> = ctx
+            .accounts
+            .get_untracked()
+            .into_iter()
+            .map(|account| account.address)
+            .collect();
+        ctx.run("add_account", args, move |accounts: Vec<AccountView>| {
+            // 足したものをホームに出す
+            let added = accounts
+                .iter()
+                .find(|account| !before.contains(&account.address))
+                .map(|account| account.address.clone());
+            ctx.replace_accounts(accounts, added);
+            ctx.go(Screen::Home);
+        });
+    };
+    view! {
+        <p class="lead">"ほかのウォレットのアカウントを、このキーストアに足します。"</p>
+        <form on:submit=submit>
+            <label class="field">
+                "何から足すか"
+                <select bind:value=kind>
+                    <option value="words">"控えた単語（ニーモニックの 0 番）"</option>
+                    <option value="key">"秘密鍵（64文字の16進）"</option>
+                </select>
+            </label>
+            {move || if kind.get() == "words" {
+                view! {
+                    <label class="field">
+                        "単語（順番どおりに、空白で区切る）"
+                        <textarea class="secret" rows="5" autocomplete="off" autocapitalize="off" spellcheck="false" bind:value=words></textarea>
+                    </label>
+                }.into_any()
+            } else {
+                view! {
+                    <label class="field">
+                        "秘密鍵"
+                        <input type="password" class="secret" autocomplete="off" bind:value=key />
+                    </label>
+                }.into_any()
+            }}
+            <label class="field">
+                "ネットワーク"
+                <select bind:value=network>
+                    <option value="testnet">"テストネット"</option>
+                    <option value="mainnet">"メインネット"</option>
+                </select>
+            </label>
+            <label class="field">
+                "名前"
+                <input type="text" autocomplete="off" bind:value=label />
+            </label>
+            <label class="field">
+                "キーストアのパスフレーズ"
+                <input type="password" autocomplete="current-password" bind:value=passphrase />
+            </label>
+            <p class="hint">"キーストアを書き直すので、開いたときのパスフレーズをもう一度入れてください。"</p>
+            <div class="row">
+                <button type="button" on:click=move |_| ctx.go(Screen::Accounts)>"戻る"</button>
+                <button type="submit" class="primary" disabled=move || ctx.busy.get()>
+                    {move || if ctx.busy.get() { "しまっています…" } else { "足す" }}
+                </button>
+            </div>
+        </form>
+    }
+}
+
+/// アカウントの名前を変えるか、キーストアから外す
+fn edit_account(ctx: Ctx, account: AccountView) -> impl IntoView {
+    let label = RwSignal::new(account.label.clone());
+    let passphrase = RwSignal::new(String::new());
+    let confirmed = RwSignal::new(false);
+    let only = ctx.accounts.get_untracked().len() == 1;
+    let backup = if account.source == "秘密鍵" {
+        "秘密鍵の控え"
+    } else {
+        "単語の控え"
+    };
+    let current = label.get_untracked();
+    let rename = move |event: SubmitEvent| {
+        event.prevent_default();
+        let args = RenameAccountArgs {
+            label: current.clone(),
+            new_label: label.get_untracked(),
+            passphrase: passphrase.get_untracked(),
+        };
+        ctx.run("rename_account", args, move |accounts: Vec<AccountView>| {
+            ctx.accounts.set(accounts);
+            ctx.go(Screen::Accounts);
+        });
+    };
+    let removed = account.label.clone();
+    let remove = move |_| {
+        let args = RemoveAccountArgs {
+            label: removed.clone(),
+            passphrase: passphrase.get_untracked(),
+        };
+        // 外したあとも、選んでいたものを選んだままにする
+        let selected = ctx.current().map(|account| account.address);
+        ctx.run("remove_account", args, move |accounts: Vec<AccountView>| {
+            ctx.replace_accounts(accounts, selected);
+            ctx.go(Screen::Accounts);
+        });
+    };
+    view! {
+        <p class="lead">"名前を変えるか、このキーストアから外します。"</p>
+        <div class="card glass">
+            <span class="row">
+                <strong>{account.label.clone()}</strong>
+                <span class="badge">{account.network.clone()}</span>
+                <span class="hint">{account.source.clone()}</span>
+            </span>
+            <p class="address">{spaced(&account.address)}</p>
+        </div>
+        <form on:submit=rename>
+            <label class="field">
+                "名前"
+                <input type="text" autocomplete="off" bind:value=label />
+            </label>
+            <label class="field">
+                "キーストアのパスフレーズ"
+                <input type="password" autocomplete="current-password" bind:value=passphrase />
+            </label>
+            <p class="hint">"キーストアを書き直すので、開いたときのパスフレーズをもう一度入れてください。外すときも使います。"</p>
+            <div class="row">
+                <button type="button" on:click=move |_| ctx.go(Screen::Accounts)>"戻る"</button>
+                <button type="submit" class="primary" disabled=move || ctx.busy.get()>"名前を変える"</button>
+            </div>
+        </form>
+        <p class="lead section">"外す"</p>
+        {if only {
+            view! { <p class="hint">"最後のアカウントは外せません。"</p> }.into_any()
+        } else {
+            view! {
+                <p class="hint">
+                    {format!("このキーストアから外します。また使うには、{backup}から足し直します。")}
+                    "外す前の中身は、キーストアの隣の .bak に残ります。残したくないときは、そのファイルも消してください。"
+                </p>
+                <label class="check">
+                    <input type="checkbox" bind:checked=confirmed />
+                    {format!("{backup}があります")}
+                </label>
+                <div class="row">
+                    <button on:click=remove disabled=move || !confirmed.get() || ctx.busy.get()>"外す"</button>
+                </div>
+            }.into_any()
+        }}
     }
 }
 

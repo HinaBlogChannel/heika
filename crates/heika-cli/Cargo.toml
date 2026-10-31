@@ -19,7 +19,7 @@ der = "0.8.2"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
 heika-block = { version = "0.14.1", path = "../heika-block" }
 heika-cert = { version = "0.14.1", path = "../heika-cert", features = ["bootstrap-compat", "shoestring-compat"] }
-heika-core = { version = "0.14.1", path = "../heika-core" }
+heika-core = { version = "0.14.1", path = "../heika-core", features = ["hazmat"] }
 heika-harvesting = { version = "0.14.1", path = "../heika-harvesting" }
 heika-peer-protocol = { version = "0.14.1", path = "../heika-peer-protocol" }
 heika-packet = { version = "0.14.1", path = "../heika-packet" }

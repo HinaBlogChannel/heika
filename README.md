@@ -118,7 +118,7 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 
 ほかのコマンドと詳しい説明は、次にある。
 
-- [docs/keys.md](docs/keys.md): 鍵の生成と変換、キーストア、確かめた残高（`heika key`、`heika wallet`、`heika account`）
+- [docs/keys.md](docs/keys.md): 鍵の生成と変換、キーストア、確かめた残高、上級者向けの公開鍵の足し算（`heika key`、`heika wallet`、`heika account`、`heika expert`）
 - [docs/cert.md](docs/cert.md): 証明書の発行、更新、確認（`heika cert`）
 - [docs/harvesting.md](docs/harvesting.md): 投票鍵、ハーベストのリンクと委任、トランザクションの表示、署名、送信（`heika key voting`、`heika harvesting`、`heika tx`）
 - [docs/node.md](docs/node.md): 速いノードを探す、ノードあての委任の一覧、投票するノードが集めている投票のメッセージ（`heika node`）

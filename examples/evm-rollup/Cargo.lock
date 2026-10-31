@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "heika-api"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "axum",
  "base16ct 1.0.0",
@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "heika-block"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "heika-cert"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "base64ct",
  "der 0.8.3",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "heika-chain"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "heika-core"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "base16ct 1.0.0",
  "curve25519-dalek",
@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "heika-finalization"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "heika-harvesting"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "heika-mempool"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-chain",
  "heika-core",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "heika-node"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-api",
  "heika-block",
@@ -1884,14 +1884,14 @@ dependencies = [
 
 [[package]]
 name = "heika-packet"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-core",
 ]
 
 [[package]]
 name = "heika-peer"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-chain",
  "heika-core",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "heika-peer-protocol"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "heika-rest"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "heika-state-transition"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -1933,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "heika-store-redb"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-chain",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "heika-tls"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-cert",
  "heika-core",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "heika-transaction"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "heika-core",
  "ripemd",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "heika-wallet"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "aes-gcm",
  "base64ct",

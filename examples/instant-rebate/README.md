@@ -83,8 +83,8 @@ heika_node::driver::run_with_assemble(&manifest, &stopping, &memory, Arc::new(Pr
 
   ```toml
   [dependencies]
-  heika-chain = { git = "https://github.com/HinaBlogChannel/heika", tag = "v0.14.0" }
-  heika-node = { git = "https://github.com/HinaBlogChannel/heika", tag = "v0.14.0" }
+  heika-chain = { git = "https://github.com/HinaBlogChannel/heika", tag = "v0.14.1" }
+  heika-node = { git = "https://github.com/HinaBlogChannel/heika", tag = "v0.14.1" }
   ```
 
   タグを付けないと master に依存することになり、文書とずれます

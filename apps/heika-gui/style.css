@@ -606,6 +606,11 @@ button.card.selected {
   border-color: var(--blue);
 }
 
+/* 名前を変える画面では、どのアカウントかを一覧と同じカードで見せてから、入れる欄を並べる */
+.card + form {
+  margin-top: var(--space-6);
+}
+
 .lead.section {
   margin-top: var(--space-10);
 }

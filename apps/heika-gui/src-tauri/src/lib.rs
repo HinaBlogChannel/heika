@@ -195,13 +195,9 @@ async fn restore_wallet(
     network: String,
     passphrase: String,
 ) -> Result<Vec<AccountView>, String> {
-    let words = Zeroizing::new(words);
-    let words = Zeroizing::new(words.to_lowercase());
     let passphrase = Zeroizing::new(passphrase);
     let network = parse_network(&network)?;
-    let mnemonic: Mnemonic = words
-        .parse()
-        .map_err(|error| format!("単語を読めません: {error}"))?;
+    let mnemonic = parse_words(words)?;
     let wallet = wallet.inner().clone();
     run_blocking(move || create(&wallet, Secret::Mnemonic(mnemonic), network, &passphrase)).await
 }
@@ -214,13 +210,9 @@ async fn import_private_key(
     network: String,
     passphrase: String,
 ) -> Result<Vec<AccountView>, String> {
-    let private_key = Zeroizing::new(private_key);
     let passphrase = Zeroizing::new(passphrase);
     let network = parse_network(&network)?;
-    let private_key: PrivateKey = private_key
-        .trim()
-        .parse()
-        .map_err(|error| format!("秘密鍵を読めません: {error}"))?;
+    let private_key = parse_private_key(private_key)?;
     let wallet = wallet.inner().clone();
     run_blocking(move || {
         create(
@@ -257,6 +249,154 @@ fn create(
             }],
         })
         .map_err(|error| error.to_string())?;
+    let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
+    keystore_file::save(&mut rng, &path, &mut keystore, passphrase)
+        .map_err(|error| error.to_string())?;
+    let accounts = describe(&keystore)?;
+    wallet.lock().keystore = Some(keystore);
+    Ok(accounts)
+}
+
+fn parse_words(words: String) -> Result<Mnemonic, String> {
+    let words = Zeroizing::new(words);
+    let words = Zeroizing::new(words.to_lowercase());
+    words
+        .parse()
+        .map_err(|error| format!("単語を読めません: {error}"))
+}
+
+fn parse_private_key(private_key: String) -> Result<PrivateKey, String> {
+    let private_key = Zeroizing::new(private_key);
+    private_key
+        .trim()
+        .parse()
+        .map_err(|error| format!("秘密鍵を読めません: {error}"))
+}
+
+/// 開いているキーストアに、単語か秘密鍵のアカウントを足す。単語ならニーモニックの 0 番
+#[tauri::command]
+async fn add_account(
+    wallet: tauri::State<'_, Wallet>,
+    words: Option<String>,
+    private_key: Option<String>,
+    network: String,
+    label: String,
+    passphrase: String,
+) -> Result<Vec<AccountView>, String> {
+    let passphrase = Zeroizing::new(passphrase);
+    let network = parse_network(&network)?;
+    let secret = match (words, private_key) {
+        (Some(words), None) => Secret::Mnemonic(parse_words(words)?),
+        (None, Some(private_key)) => Secret::PrivateKey(parse_private_key(private_key)?),
+        _ => return Err("単語か秘密鍵のどちらかを入れてください".to_owned()),
+    };
+    let index = match secret {
+        Secret::Mnemonic(_) => Some(0),
+        Secret::PrivateKey(_) => None,
+    };
+    let account = Account {
+        network,
+        index,
+        label: label.trim().to_owned(),
+    };
+    let wallet = wallet.inner().clone();
+    run_blocking(move || {
+        edit(&wallet, &passphrase, |keystore| {
+            add_entry(keystore, secret, account)
+        })
+    })
+    .await
+}
+
+/// 秘密を、そのアカウントと一緒に足す。同じアドレスがもうあれば足さない。どちらで送るか決められないため
+fn add_entry(keystore: &mut Keystore, secret: Secret, account: Account) -> Result<(), String> {
+    keystore
+        .add(Entry {
+            secret,
+            harvest_secret: None,
+            accounts: vec![account],
+        })
+        .map_err(|error| error.to_string())?;
+    let accounts = describe(keystore)?;
+    let (added, others) = accounts.split_last().expect("just added");
+    match others.iter().find(|other| other.address == added.address) {
+        Some(other) => Err(format!(
+            "このアカウントは「{}」としてもうあります",
+            other.label
+        )),
+        None => Ok(()),
+    }
+}
+
+/// アカウントのラベルを変える
+#[tauri::command]
+async fn rename_account(
+    wallet: tauri::State<'_, Wallet>,
+    label: String,
+    new_label: String,
+    passphrase: String,
+) -> Result<Vec<AccountView>, String> {
+    let passphrase = Zeroizing::new(passphrase);
+    let wallet = wallet.inner().clone();
+    run_blocking(move || {
+        edit(&wallet, &passphrase, |keystore| {
+            keystore
+                .rename_account(&label, new_label.trim())
+                .map_err(|error| error.to_string())
+        })
+    })
+    .await
+}
+
+/// アカウントを外す。その秘密の最後のアカウントなら、秘密ごと消す。最後の1つは外さない
+#[tauri::command]
+async fn remove_account(
+    wallet: tauri::State<'_, Wallet>,
+    label: String,
+    passphrase: String,
+) -> Result<Vec<AccountView>, String> {
+    let passphrase = Zeroizing::new(passphrase);
+    let wallet = wallet.inner().clone();
+    run_blocking(move || edit(&wallet, &passphrase, |keystore| remove(keystore, &label))).await
+}
+
+fn remove(keystore: &mut Keystore, label: &str) -> Result<(), String> {
+    if keystore.accounts().count() == 1 {
+        return Err("最後のアカウントは外せません".to_owned());
+    }
+    let (entry, _) = keystore
+        .remove_account(label)
+        .map_err(|error| error.to_string())?;
+    if keystore.entries()[entry].accounts.is_empty() {
+        keystore
+            .remove_entry(entry)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// 開いているキーストアを変えて書き直す。
+///
+/// パスフレーズは覚えていないので、もう一度聞いて、ファイルを開き直して確かめる。開いているものに
+/// 確かめずに書くと、打ち間違えたパスフレーズに知らないうちに変わってしまうため。変えるのも開き直したものにして、
+/// 途中で失敗したら、ファイルも開いているものも変えない
+fn edit(
+    wallet: &Wallet,
+    passphrase: &str,
+    change: impl FnOnce(&mut Keystore) -> Result<(), String>,
+) -> Result<Vec<AccountView>, String> {
+    let path = {
+        let session = wallet.lock();
+        if session.keystore.is_none() {
+            return Err("キーストアを開いていません".to_owned());
+        }
+        session.path.clone()
+    };
+    let sealed = std::fs::read(&path)
+        .map_err(|error| format!("{} を読めません: {error}", path.display()))?;
+    let mut keystore =
+        Keystore::open(passphrase.as_bytes(), &sealed).map_err(|error| error.to_string())?;
+    change(&mut keystore)?;
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     keystore_file::save(&mut rng, &path, &mut keystore, passphrase)
         .map_err(|error| error.to_string())?;
@@ -490,6 +630,9 @@ pub fn run() {
             import_private_key,
             unlock,
             accounts,
+            add_account,
+            rename_account,
+            remove_account,
             lock,
             rest::settings,
             rest::save_settings,
@@ -537,4 +680,101 @@ pub fn run() {
                 _app.state::<std::sync::Arc<node::Node>>().stop_and_wait();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn private_key(byte: u8) -> Secret {
+        Secret::PrivateKey(PrivateKey::from_bytes(&[byte; 32]))
+    }
+
+    fn account(label: &str) -> Account {
+        Account {
+            network: NetworkIdentifier::TESTNET,
+            index: None,
+            label: label.to_owned(),
+        }
+    }
+
+    fn labels(accounts: &[AccountView]) -> Vec<&str> {
+        accounts
+            .iter()
+            .map(|account| account.label.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn adds_renames_and_removes_accounts_in_the_file() {
+        let directory =
+            std::env::temp_dir().join(format!("heika-gui-accounts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join(keystore_file::FILE_NAME);
+        let wallet = Wallet(Arc::new(Mutex::new(Session {
+            path: path.clone(),
+            pending: None,
+            keystore: None,
+        })));
+        create(&wallet, private_key(1), NetworkIdentifier::TESTNET, "right").unwrap();
+        let reopen = || {
+            let sealed = std::fs::read(&path).unwrap();
+            describe(&Keystore::open(b"right", &sealed).unwrap()).unwrap()
+        };
+
+        // 違うパスフレーズでは書かない
+        assert!(
+            edit(&wallet, "wrong", |keystore| add_entry(
+                keystore,
+                private_key(2),
+                account("2")
+            ))
+            .is_err()
+        );
+        assert_eq!(labels(&reopen()), ["取り込んだ鍵"]);
+
+        let added = edit(&wallet, "right", |keystore| {
+            add_entry(keystore, private_key(2), account("2"))
+        })
+        .unwrap();
+        assert_eq!(labels(&added), ["取り込んだ鍵", "2"]);
+        assert_eq!(labels(&reopen()), ["取り込んだ鍵", "2"]);
+
+        // 同じアドレスは、ラベルが違っても足さない
+        let Err(error) = edit(&wallet, "right", |keystore| {
+            add_entry(keystore, private_key(2), account("3"))
+        }) else {
+            panic!("added the same address twice");
+        };
+        assert!(error.contains("「2」"), "{error}");
+        assert_eq!(labels(&reopen()), ["取り込んだ鍵", "2"]);
+
+        let renamed = edit(&wallet, "right", |keystore| {
+            keystore
+                .rename_account("2", "サブ")
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(labels(&renamed), ["取り込んだ鍵", "サブ"]);
+
+        // 外すと、最後のアカウントだった秘密も消える
+        let removed = edit(&wallet, "right", |keystore| {
+            remove(keystore, "取り込んだ鍵")
+        })
+        .unwrap();
+        assert_eq!(labels(&removed), ["サブ"]);
+        let sealed = std::fs::read(&path).unwrap();
+        assert_eq!(
+            Keystore::open(b"right", &sealed).unwrap().entries().len(),
+            1
+        );
+        assert_eq!(
+            labels(&describe(wallet.lock().keystore.as_ref().unwrap()).unwrap()),
+            ["サブ"]
+        );
+
+        assert!(edit(&wallet, "right", |keystore| remove(keystore, "サブ")).is_err());
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

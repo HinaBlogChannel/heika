@@ -59,6 +59,9 @@ enum Command {
     /// 試験的な機能。コマンドの形も、設定の中身も、断りなく変わる
     #[command(subcommand)]
     Experimental(experimental::ExperimentalCommand),
+    /// 使い方を誤ると資産を失う、上級者向けの道具
+    #[command(subcommand)]
+    Expert(expert::ExpertCommand),
 }
 
 #[derive(Subcommand)]
@@ -222,6 +225,7 @@ mod account;
 mod cert;
 mod delegations;
 mod experimental;
+mod expert;
 mod harvesting;
 mod json;
 mod legal;
@@ -240,6 +244,7 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
         Command::Experimental(command) => experimental::run(command)?,
+        Command::Expert(command) => expert::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Wallet(command) => wallet::run(command)?,
         Command::Tx(command) => tx::run(command)?,

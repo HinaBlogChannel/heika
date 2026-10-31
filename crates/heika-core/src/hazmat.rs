@@ -11,8 +11,9 @@
 //! - 受け取った点は [`decode_point`] で確かめる。小さい位数の成分が混ざった点を使うと、catapult の検証を通らない
 
 pub use curve25519_dalek;
-use curve25519_dalek::edwards::EdwardsPoint;
+use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::IsIdentity;
 use zeroize::Zeroizing;
 
 use crate::ed25519;
@@ -53,6 +54,37 @@ pub fn decode_point(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
     ed25519::decode(bytes)
 }
 
+/// 小さい位数の点（位数が 8 の約数の点）8 個を、圧縮したバイト列と位数の組で返す。
+///
+/// 並びは位数の小さい順で、同じ位数の中ではバイト列の小さい順。8 個は位数 8 の巡回群をなし、単位元
+/// `01 00…00` も含む。番号の振り方には決まったものがないので、点はバイト列で扱う。
+pub fn small_order_points() -> [([u8; 32], u8); 8] {
+    let mut points = curve25519_dalek::constants::EIGHT_TORSION.map(|point| {
+        let order = [1u8, 2, 4, 8]
+            .into_iter()
+            .find(|&order| (point * Scalar::from(order)).is_identity())
+            .expect("eight-torsion points have order dividing 8");
+        (point.compress().to_bytes(), order)
+    });
+    points.sort_by_key(|&(bytes, order)| (order, bytes));
+    points
+}
+
+/// 2 つの点を足す。どちらも正規形で曲線上にあればよく、素数位数の部分群に入っているかは問わない。
+/// 結果は正規形の圧縮したバイト列。どちらかが点に戻せなければ `None`。
+///
+/// 公開鍵に小さい位数の点（単位元を除く）を足すと、catapult の検証が部分群の外の公開鍵を弾くので、
+/// 誰も署名できない鍵になる。ただし、これは今の検証の決まりの下での話で、位数 8 を掛けてから比べる検証
+/// （ZIP-215 など）では、元の鍵の持ち主が署名できる。小さい位数の点そのものなら、誰でも署名できる。
+pub fn add_points(a: &[u8; 32], b: &[u8; 32]) -> Option<[u8; 32]> {
+    let decode = |bytes: &[u8; 32]| {
+        ed25519::is_canonical(bytes)
+            .then(|| CompressedEdwardsY(*bytes).decompress())
+            .flatten()
+    };
+    Some((decode(a)? + decode(b)?).compress().to_bytes())
+}
+
 /// SHA-512。部分を順に続けたもの
 pub fn sha512<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Zeroizing<[u8; 64]> {
     ed25519::sha512(parts)
@@ -79,5 +111,76 @@ mod tests {
         signature[32..].copy_from_slice(s.as_bytes());
         assert_eq!(signature, key.sign(&[message]).0);
         assert!(decode_point(&public_key.0).is_some());
+    }
+
+    const IDENTITY: [u8; 32] = {
+        let mut bytes = [0; 32];
+        bytes[0] = 1;
+        bytes
+    };
+
+    #[test]
+    fn lists_the_eight_small_order_points() {
+        let points = small_order_points();
+        assert_eq!(points.map(|(_, order)| order), [1, 2, 4, 4, 8, 8, 8, 8]);
+        assert_eq!(points[0].0, IDENTITY);
+        // y = -1 が位数 2、y = 0 が位数 4
+        let mut minus_one = [0xFF; 32];
+        minus_one[0] = 0xEC;
+        minus_one[31] = 0x7F;
+        assert_eq!(points[1].0, minus_one);
+        assert_eq!(points[2].0, [0; 32]);
+        let mut zero_negative_x = [0; 32];
+        zero_negative_x[31] = 0x80;
+        assert_eq!(points[3].0, zero_negative_x);
+        // 足しても 8 個の中に閉じている
+        for (a, _) in points {
+            for (b, _) in points {
+                let sum = add_points(&a, &b).unwrap();
+                assert!(points.iter().any(|&(point, _)| point == sum));
+            }
+        }
+    }
+
+    #[test]
+    fn a_public_key_plus_a_small_order_point_cannot_sign() {
+        let key = PrivateKey::from_bytes(&[7; 32]);
+        let public_key = PublicKey::from_private_key(&key);
+        let message: &[u8] = b"message";
+        let signature = key.sign(&[message]);
+        for (point, order) in small_order_points() {
+            let shifted = add_points(&public_key.0, &point).unwrap();
+            if order == 1 {
+                assert_eq!(shifted, public_key.0);
+                continue;
+            }
+            assert!(decode_point(&shifted).is_none());
+            assert!(!PublicKey(shifted).verify(&[message], &signature));
+            // 元に戻せる
+            let back = add_points(
+                &shifted,
+                &(-CompressedEdwardsY(point).decompress().unwrap())
+                    .compress()
+                    .to_bytes(),
+            );
+            assert_eq!(back, Some(public_key.0));
+        }
+    }
+
+    #[test]
+    fn the_identity_plus_a_small_order_point_is_that_point() {
+        for (point, _) in small_order_points() {
+            assert_eq!(add_points(&IDENTITY, &point), Some(point));
+        }
+    }
+
+    #[test]
+    fn rejects_a_non_canonical_point() {
+        // y = p は正規形でない（y = 0 と同じ点になる）
+        let mut p = [0xFF; 32];
+        p[0] = 0xED;
+        p[31] = 0x7F;
+        assert_eq!(add_points(&p, &IDENTITY), None);
+        assert_eq!(add_points(&IDENTITY, &p), None);
     }
 }

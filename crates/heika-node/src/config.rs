@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use heika_packet::NodeRoles;
 use heika_store_redb::Searches;
+use heika_tls::proxy_protocol::IpRange;
 use serde::Deserialize;
 
 /// 読める設定の版
@@ -378,6 +379,30 @@ pub struct Listen {
     /// `[Peer, Api, IPv4]` のような catapult の名前の並びで書く。なければ [`NodeConfig::roles`] の既定
     #[serde(default, deserialize_with = "deserialize_roles")]
     pub roles: Option<NodeRoles>,
+    /// HAProxy や nginx などの中継の後ろで受けるときの、PROXY protocol。なければヘッダーを読まない
+    #[serde(default)]
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+/// 中継が接続の頭に書いてくる元の送信元（PROXY protocol のヘッダー。v1 と v2）を読み、そのアドレスで数えたり
+/// 締め出したりする
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyProtocol {
+    /// 信じる中継のアドレスの範囲（`127.0.0.1`、`10.0.0.0/8` など）。ここから来た接続にはヘッダーを求め、
+    /// ほかから来た接続ではヘッダーを読まない（中継を通さない接続も同じポートで受けられる）
+    #[serde(deserialize_with = "deserialize_ranges")]
+    pub trusted_from: Vec<IpRange>,
+}
+
+/// アドレスの範囲の並びを、文字列の並びから読む
+fn deserialize_ranges<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<IpRange>, D::Error> {
+    Vec::<String>::deserialize(deserializer)?
+        .iter()
+        .map(|text| text.parse().map_err(serde::de::Error::custom))
+        .collect()
 }
 
 /// `listen.roles` を、整数か名前の並びから読む
@@ -606,6 +631,28 @@ spec:
     }
 
     #[test]
+    fn reads_proxy_protocol() {
+        let listen = |extra: &str| {
+            Manifest::parse(&format!(
+                "{MINIMAL}  listen:\n    address: 0.0.0.0:7900\n    proxyProtocol:\n{extra}"
+            ))
+            .map(|manifest| manifest.spec.listen.unwrap().proxy_protocol.unwrap())
+            .map_err(|error| error.to_string())
+        };
+        let proxy = listen("      trustedFrom: [127.0.0.1, 10.0.0.0/8, \"::1\"]\n").unwrap();
+        assert_eq!(
+            proxy
+                .trusted_from
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["127.0.0.1/32", "10.0.0.0/8", "::1/128"]
+        );
+        assert!(listen("      trustedFrom: [10.0.0.0/40]\n").is_err());
+        assert!(listen("      trustedFrom: [127.0.0.1]\n      extra: 1\n").is_err());
+    }
+
+    #[test]
     fn reads_listen_harvest_and_pruning() {
         let text = format!(
             "{MINIMAL}  listen:
@@ -626,6 +673,7 @@ spec:
         assert_eq!(listen.address, "0.0.0.0:7900");
         assert_eq!(listen.public_host.as_deref(), Some("node.example"));
         assert_eq!(listen.friendly_name, None);
+        assert_eq!(listen.proxy_protocol, None);
         assert_eq!(spec.harvesters.len(), 2);
         assert_eq!(spec.harvesters[1].signer, PathBuf::from("/remote"));
         assert_eq!(spec.harvesters[1].vrf, PathBuf::from("/vrf2"));

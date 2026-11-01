@@ -505,7 +505,10 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
     chain.set_harvesters(combined(&own, delegated.as_ref()));
     let mempool = Arc::new(SharedMempool::new(Mempool::new(
         parameters,
-        heika_mempool::Config::default(),
+        heika_mempool::Config {
+            min_fee_multiplier: spec.min_fee_multiplier,
+            ..heika_mempool::Config::default()
+        },
     )));
     chain.set_pending(Arc::clone(&mempool) as Arc<dyn Pending>);
     if let Some(assemble) = &setup.assemble {

@@ -40,6 +40,11 @@ impl ClientConnection {
         self.connection.peer_certificates()
     }
 
+    /// 相手も heika で、heika だけのパケットを使えるか（heika-tls の ALPN）
+    pub fn is_heika(&self) -> bool {
+        self.connection.is_heika()
+    }
+
     /// チェーンの高さ、確定した高さ、スコア。
     pub fn chain_statistics(&mut self) -> Result<ChainStatistics, QueryError> {
         let body = self.request(packet_type::CHAIN_STATISTICS, &[])?;

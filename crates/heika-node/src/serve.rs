@@ -764,7 +764,12 @@ fn respond(
     if let Err(reason) = admit(gate, id, key) {
         return Ending::Failed(reason);
     }
-    println!("{address} から接続を受けました（鍵 {key}）");
+    let heika = if connection.is_heika() {
+        "、heika"
+    } else {
+        ""
+    };
+    println!("{address} から接続を受けました（鍵 {key}{heika}）");
     if let Err(error) = connection
         .set_read_timeout(Some(IDLE_TIMEOUT))
         .and_then(|()| connection.set_write_timeout(Some(WRITE_TIMEOUT)))
@@ -789,8 +794,12 @@ fn respond(
                     _ => failed(&error),
                 };
             }
-            // 大きすぎるか、全長がヘッダーより短い
-            Err(error @ (RequestError::TooLarge(_) | RequestError::InvalidSize(_))) => {
+            // 大きすぎるか、全長がヘッダーより短いか、heika のパケットが壊れている
+            Err(
+                error @ (RequestError::TooLarge(_)
+                | RequestError::InvalidSize(_)
+                | RequestError::Malformed(_)),
+            ) => {
                 return Ending::Misbehaved(error.to_string());
             }
             Err(error) => return failed(&error),

@@ -40,9 +40,6 @@ pub use rustls::ServerConfig;
 /// 版は、この名前での取り決めを壊すときにだけ上げる。できることは、つながったあとに capability で伝える
 pub const ALPN: &[u8] = b"heika-symbol/0";
 
-/// こちらができることとして伝える capability。今はまだない
-const CAPABILITIES: &[&str] = &[];
-
 pub mod proxy_protocol;
 
 /// TLS で名乗るための、証明書のチェーンと秘密鍵。
@@ -386,6 +383,8 @@ pub struct Connection {
     extension: bool,
     /// 相手から届いた capability。まだ届いていなければ `None`
     peer_capabilities: Option<Vec<String>>,
+    /// こちらができることとして相手に伝える capability
+    capabilities: &'static [&'static str],
     /// こちらの capability を送ったか
     capabilities_sent: bool,
 }
@@ -401,7 +400,7 @@ impl Connection {
         let config = client_config(identity, ServerVerification::Catapult);
         let connection = ClientConnection::new(Arc::new(config), server_name(address))
             .expect("the config is valid");
-        let mut connection = Self::handshake(connection.into(), socket)?;
+        let mut connection = Self::handshake(connection.into(), socket, &[])?;
         // 住所録に自分のアドレスが入っていても、自分にはつながない
         if connection.peer_key().as_ref() == Some(identity.key()) {
             return Err(ConnectError::Myself);
@@ -424,13 +423,14 @@ impl Connection {
     }
 
     /// 受け付けた `socket` で、[`server_config`] で作った `config` のハンドシェイクを済ませる。
-    /// 読み書きは `timeout` で打ち切る。
+    /// 読み書きは `timeout` で打ち切る。相手が heika なら、`capabilities` をこちらができることとして伝える。
     ///
     /// 相手が ALPN を出していても、[`ALPN`] がなければ選ばずに続ける（rustls は、重なるものがなければ切る）。
     /// 版を上げた heika や、ほかの名前を出すものとも、今までどおりつながるように。
     pub fn accept(
         mut socket: TcpStream,
         config: Arc<ServerConfig>,
+        capabilities: &'static [&'static str],
         timeout: Duration,
     ) -> Result<Self, ConnectError> {
         socket
@@ -476,12 +476,13 @@ impl Connection {
                 let _ = alert.write(&mut socket);
                 ConnectError::Handshake(io::Error::new(io::ErrorKind::InvalidData, error))
             })?;
-        Self::handshake(connection.into(), socket)
+        Self::handshake(connection.into(), socket, capabilities)
     }
 
     fn handshake(
         mut connection: rustls::Connection,
         mut socket: TcpStream,
+        capabilities: &'static [&'static str],
     ) -> Result<Self, ConnectError> {
         while connection.is_handshaking() {
             connection
@@ -494,6 +495,7 @@ impl Connection {
             socket,
             extension,
             peer_capabilities: None,
+            capabilities,
             capabilities_sent: false,
         })
     }
@@ -512,7 +514,7 @@ impl Connection {
         self.capabilities_sent = true;
         self.send_packet(
             extension::PUSH_CAPABILITIES,
-            &extension::capabilities_body(CAPABILITIES),
+            &extension::capabilities_body(self.capabilities),
         )
     }
 
@@ -1191,7 +1193,12 @@ mod tests {
         thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             sender
-                .send(Connection::accept(socket, config, Duration::from_secs(5)))
+                .send(Connection::accept(
+                    socket,
+                    config,
+                    &[extension::BLOCKS_ALL],
+                    Duration::from_secs(5),
+                ))
                 .unwrap();
         });
         (address, receiver)
@@ -1224,7 +1231,7 @@ mod tests {
         config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
         let socket = TcpStream::connect(address).unwrap();
         let connection = ClientConnection::new(Arc::new(config), server_name(address)).unwrap();
-        Connection::handshake(connection.into(), socket).unwrap()
+        Connection::handshake(connection.into(), socket, &[]).unwrap()
     }
 
     #[test]
@@ -1245,7 +1252,10 @@ mod tests {
         assert_eq!(server.peer_capabilities(), Some(&[][..]));
         server.send_packet(5, b"reply").unwrap();
         assert_eq!(client.receive_packet(1024).unwrap(), (5, b"reply".to_vec()));
-        assert_eq!(client.peer_capabilities(), Some(&[][..]));
+        assert_eq!(
+            client.peer_capabilities(),
+            Some(&[extension::BLOCKS_ALL.to_owned()][..])
+        );
     }
 
     #[test]

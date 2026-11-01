@@ -15,12 +15,16 @@ alloy-eips = { version = "2.5.0", default-features = false, features = ["std"] }
 alloy-primitives = { version = "1.7.3", features = ["serde"] }
 alloy-trie = { version = "0.9.9", features = ["ethereum"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+frost-core = "3.0.0"
+frost-ed25519 = "3.0.0"
 heika-core = { path = "../../crates/heika-core" }
 heika-node = { path = "../../crates/heika-node" }
 heika-rest = { path = "../../crates/heika-rest" }
 heika-transaction = { path = "../../crates/heika-transaction" }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 revm = { version = "43.0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 ureq = { version = "3.4.2", default-features = false }
+zeroize = "1.9.1"

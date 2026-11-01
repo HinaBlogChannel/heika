@@ -2,6 +2,8 @@
 
 pub mod envelope;
 pub mod follow;
+pub mod roast;
 pub mod rollup;
 pub mod rpc;
 pub mod symbol;
+pub mod vault;

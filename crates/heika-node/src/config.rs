@@ -106,6 +106,10 @@ pub struct NodeConfig {
     /// ディスクの空きがこれより少なければ、書く前に止める
     #[serde(default = "default_min_free")]
     pub min_free: ByteSize,
+    /// これより低い手数料の倍率（最大手数料を大きさで割ったもの）のトランザクションは受け付けない。REST の
+    /// `/network/fees/transaction` でも下限として答える。catapult の `minFeeMultiplier` にあたる。既定は 0
+    #[serde(default)]
+    pub min_fee_multiplier: u32,
     /// 接続を受ける。なければ、自分からつなぐだけ
     #[serde(default)]
     pub listen: Option<Listen>,
@@ -752,6 +756,10 @@ spec:
         assert_eq!(min_free("10G").unwrap(), ByteSize(10_000_000_000));
         assert_eq!(min_free("512Ki").unwrap(), ByteSize(512 << 10));
         assert_eq!(min_free("0").unwrap(), ByteSize(0));
+        // 手数料の倍率の下限は、書かなければ 0
+        assert_eq!(Manifest::parse(MINIMAL).unwrap().spec.min_fee_multiplier, 0);
+        let fee = format!("{MINIMAL}  minFeeMultiplier: 100\n");
+        assert_eq!(Manifest::parse(&fee).unwrap().spec.min_fee_multiplier, 100);
         for invalid in ["10GB", "1.5Gi", "Gi", "-1", "99999999999Ti"] {
             assert!(min_free(invalid).is_err(), "{invalid}");
         }

@@ -26,7 +26,7 @@ use heika_packet::partial::{
     read_pull_partial_request, split_detached_cosignatures, write_partial_infos,
 };
 use heika_packet::{
-    BlockHashesRequest, ChainStatistics, NetworkTime, PullBlocksRequest, packet_type,
+    BlockHashesRequest, ChainStatistics, NetworkTime, PullBlocksRequest, extension, packet_type,
     read_pull_transactions_request, split_size_prefixed,
 };
 use heika_tls::proxy_protocol::{IpRange, read_header};
@@ -124,7 +124,9 @@ pub struct Responder<'a> {
     /// [`Responder::pushes`] で駆動役に渡す
     pub votes: Option<&'a Mutex<Observer>>,
     /// heika から受けた接続で、こちらができることとして伝える capability（heika-packet の `extension`）
-    pub capabilities: &'static [&'static str],
+    pub capabilities: &'a [&'static str],
+    /// 封筒の `source/zip` で返す、このノードのソースの ZIP。`None` なら答えない
+    pub source_code: Option<&'static [u8]>,
 }
 
 impl Responder<'_> {
@@ -350,6 +352,15 @@ impl Responder<'_> {
                 }
                 Ok(Answer::Nothing)
             }
+            extension::ENVELOPE => match extension::read_envelope(body) {
+                Ok((extension::SOURCE_ZIP, [])) => match self.source_code {
+                    Some(zip) => reply(extension::envelope_body(extension::SOURCE_ZIP, zip)),
+                    None => Ok(Answer::Nothing),
+                },
+                // 知らない名前と、形の合わない中身には答えない
+                Ok(_) => Ok(Answer::Nothing),
+                Err(error) => Ok(Answer::Close(format!("封筒が読めません: {error}"))),
+            },
             // ほかの押し付けられたものは、今は読み捨てる
             packet_type::NODE_DISCOVERY_PUSH_PING | packet_type::NODE_DISCOVERY_PUSH_PEERS => {
                 Ok(Answer::Nothing)
@@ -1060,6 +1071,7 @@ mod tests {
             partials: None,
             votes: None,
             capabilities: &[],
+            source_code: None,
         }
         .answer(request_type, body)
     }
@@ -1308,6 +1320,7 @@ mod tests {
             partials: None,
             votes: None,
             capabilities: &[heika_packet::extension::BLOCKS_ALL],
+            source_code: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1359,6 +1372,7 @@ mod tests {
             partials: None,
             votes: None,
             capabilities,
+            source_code: None,
         };
         let (light, full) = (
             responder(&[]),
@@ -1384,6 +1398,54 @@ mod tests {
             let chosen = crate::catch_up::connect_any(&addresses, &identity(3), 2, timeout);
             let chosen: Vec<_> = chosen.iter().map(|peer| peer.address.as_str()).collect();
             assert_eq!(chosen, [addresses[1].as_str(), addresses[0].as_str()]);
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
+    #[test]
+    fn hands_out_the_source_over_peer() {
+        let source = memory(1, 30, 1..=2);
+        let parameters = &NetworkParameters::TESTNET;
+        let env = FixedEnv(parameters.epoch());
+        let responder = |capabilities, source_code| Responder {
+            source: &source,
+            env: &env,
+            parameters,
+            node: Vec::new(),
+            pushes: None,
+            mempool: None,
+            partials: None,
+            votes: None,
+            capabilities,
+            source_code,
+        };
+        let with = responder(&[extension::SOURCE_ZIP], Some(&b"PK\x05\x06"[..]));
+        let without = responder(&[], None);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let stopping = || stop.load(std::sync::atomic::Ordering::SeqCst);
+        let gates = [Gate::default(), Gate::default()];
+        std::thread::scope(|scope| {
+            let mut addresses = Vec::new();
+            for (responder, gate) in [(&with, &gates[0]), (&without, &gates[1])] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                addresses.push(listener.local_addr().unwrap().to_string());
+                let config = Arc::new(heika_tls::server_config(&identity(1)));
+                let stopping = &stopping;
+                scope.spawn(move || serve(listener, config, responder, gate, stopping));
+            }
+            let connect = |address: &str| {
+                heika_peer_protocol::ClientConnection::connect(
+                    address,
+                    &identity(3),
+                    std::time::Duration::from_secs(5),
+                )
+                .unwrap()
+            };
+            let mut client = connect(&addresses[0]);
+            assert_eq!(client.source_zip().unwrap().unwrap(), b"PK\x05\x06");
+            // 封筒のあとも、ふつうの問い合わせが続けられる
+            assert_eq!(client.chain_statistics().unwrap().height, 30);
+            assert_eq!(connect(&addresses[1]).source_zip().unwrap(), None);
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
@@ -1441,6 +1503,7 @@ mod tests {
             partials: None,
             votes: None,
             capabilities: &[],
+            source_code: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();

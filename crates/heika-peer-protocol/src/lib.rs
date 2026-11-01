@@ -10,8 +10,8 @@ use heika_packet::partial::{
     COSIGNATURE_SIZE, PartialInfo, ShortHashPair, pull_partial_request, read_partial_infos,
 };
 use heika_packet::{
-    ChainStatistics, DecodeError, NetworkNode, NetworkTime, packet_type, pull_blocks_request,
-    pull_transactions_request, split_size_prefixed,
+    ChainStatistics, DecodeError, NetworkNode, NetworkTime, extension, packet_type,
+    pull_blocks_request, pull_transactions_request, split_size_prefixed,
 };
 use heika_tls::{ConnectError, Connection, Identity, RequestError};
 
@@ -223,6 +223,37 @@ impl ClientConnection {
 
     pub fn push(&mut self, packet_type: u32, body: &[u8]) -> Result<(), QueryError> {
         Ok(self.connection.send_packet(packet_type, body)?)
+    }
+
+    /// 相手のソースの ZIP。AGPL-3.0 の 13 条のため、heika は REST を立てていなくても P2P で渡せる。
+    /// 相手が heika でないか、`source/zip` を名乗っていなければ `None`
+    pub fn source_zip(&mut self) -> Result<Option<Vec<u8>>, QueryError> {
+        if !self.connection.is_heika() {
+            return Ok(None);
+        }
+        // 相手の capability は最初の応答より先に届くので、まだなら軽い問い合わせを1つする
+        if self.connection.peer_capabilities().is_none() {
+            self.chain_statistics()?;
+        }
+        let offered = self
+            .connection
+            .peer_capabilities()
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == extension::SOURCE_ZIP)
+            });
+        if !offered {
+            return Ok(None);
+        }
+        let body = self.request(
+            extension::ENVELOPE,
+            &extension::envelope_body(extension::SOURCE_ZIP, &[]),
+        )?;
+        match extension::read_envelope(&body)? {
+            (extension::SOURCE_ZIP, zip) => Ok(Some(zip.to_vec())),
+            _ => Err(DecodeError::InvalidValue("違う名前の封筒が返ってきました").into()),
+        }
     }
 
     fn request(&mut self, packet_type: u32, body: &[u8]) -> Result<Vec<u8>, QueryError> {

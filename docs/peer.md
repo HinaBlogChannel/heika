@@ -145,6 +145,8 @@ heika は、TLS のハンドシェイクで ALPN に `heika-symbol/0` を出し�
 - 互いに heika なら、つないだ側が、できること（capability）の一覧を送り、受けた側は受け取ってから自分の一覧を返す
 - `storage.mode` が `Archive` か `Full` なら、受けた側は `blocks/all`（ネメシスから今の高さまでのブロックを全部持っていて、頼まれれば返す）を名乗る。`Light` は名乗らない
 - 追いつくときは、catapult と `blocks/all` を名乗った heika を先に選び、足りないときだけ名乗らない heika も使う
+- バイナリにソースが入っていれば（heika の git のリポジトリでビルドしたもの）、`source/zip` も名乗り、P2P でソースの ZIP を渡す。REST の `/heika/sourcecode.zip` と同じもの。REST を立てずにピアだけを公開していても、手を入れた heika のソースを渡せるようにするため（AGPL-3.0 の 13 条）。`heika node source --connect <ホスト:ポート> --client-cert <チェーン> --out <ZIP>` でもらえる
+- heika だけの拡張は、種類 `0x8000_0001` の封筒に、名前（capability と同じ）と中身を入れてやりとりする。相手が名乗った capability の名前でだけ送り、知らない名前には答えない
 - heika の範囲で知らない種類のパケットは、読み捨てて、つながったままにする
 - heika から受けた接続は、ログに「heika」と出る
 

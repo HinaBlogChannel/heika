@@ -384,7 +384,7 @@ pub struct Connection {
     /// 相手から届いた capability。まだ届いていなければ `None`
     peer_capabilities: Option<Vec<String>>,
     /// こちらができることとして相手に伝える capability
-    capabilities: &'static [&'static str],
+    capabilities: Vec<String>,
     /// こちらの capability を送ったか
     capabilities_sent: bool,
 }
@@ -430,7 +430,7 @@ impl Connection {
     pub fn accept(
         mut socket: TcpStream,
         config: Arc<ServerConfig>,
-        capabilities: &'static [&'static str],
+        capabilities: &[&str],
         timeout: Duration,
     ) -> Result<Self, ConnectError> {
         socket
@@ -482,7 +482,7 @@ impl Connection {
     fn handshake(
         mut connection: rustls::Connection,
         mut socket: TcpStream,
-        capabilities: &'static [&'static str],
+        capabilities: &[&str],
     ) -> Result<Self, ConnectError> {
         while connection.is_handshaking() {
             connection
@@ -495,7 +495,7 @@ impl Connection {
             socket,
             extension,
             peer_capabilities: None,
-            capabilities,
+            capabilities: capabilities.iter().map(|&name| name.to_owned()).collect(),
             capabilities_sent: false,
         })
     }
@@ -514,7 +514,13 @@ impl Connection {
         self.capabilities_sent = true;
         self.send_packet(
             extension::PUSH_CAPABILITIES,
-            &extension::capabilities_body(self.capabilities),
+            &extension::capabilities_body(
+                &self
+                    .capabilities
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            ),
         )
     }
 
@@ -573,12 +579,14 @@ impl Connection {
 
     /// パケットを1つ受け取って、種類と本体を返す。本体が `max_body_size` を超えるなら、読まずに失敗する。
     ///
-    /// 相手も heika なら、heika だけのパケットはここで扱って返さない。capability は覚え、まだ送っていなければ
-    /// こちらのものを返す。知らない種類は読み捨てる
+    /// 相手も heika なら、heika だけのパケットのうち capability はここで扱って返さない。覚えて、まだ送って
+    /// いなければこちらのものを返す。名前つきの拡張の封筒（`extension::ENVELOPE`）は返す。知らない種類は読み捨てる
     pub fn receive_packet(&mut self, max_body_size: usize) -> Result<(u32, Vec<u8>), RequestError> {
         loop {
             let (packet_type, body) = self.read_packet(max_body_size)?;
-            if !(self.extension && extension::is_extension(packet_type)) {
+            if !(self.extension && extension::is_extension(packet_type))
+                || packet_type == extension::ENVELOPE
+            {
                 return Ok((packet_type, body));
             }
             if packet_type == extension::PUSH_CAPABILITIES && self.peer_capabilities.is_none() {

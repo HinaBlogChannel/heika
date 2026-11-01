@@ -8,6 +8,14 @@
 //! - basefee は、1 件ごとに決める。時間あたりに使われたガスが目標より多いほど、指数で上がり、時間がたつと下がる
 //!   （[`base_fee`]）。払った basefee は燃える。同じ Symbol のブロックに入った人どうしで、ガスの枠を取り合わない
 //! - blob 付きのトランザクション（type 3）は入れない。blob を置く層がないので
+//!
+//! 橋（genesis に預かり口座 `vault` があるとき）：
+//!
+//! - 預かり口座への XYM の入金は、その Symbol のブロックの最初に、メッセージに書いた EVM のアドレスに入れる。
+//!   ロールアップの中の通貨は XYM で、XYM の最小単位（10^-6）が 10^12 wei にあたる（18 桁にそろえる）
+//! - [`WITHDRAW_ADDRESS`] に XYM を送るトランザクションは、引き出し。データに Symbol のアドレス（24 バイト）を入れる。
+//!   送った XYM はそこに残り、誰も動かせない（燃える）。橋の見張り役が、ファイナライズされてから預かり口座から払う
+//! - 宛先の Symbol のアドレスが読めない（チェックサムが合わない、ネットワークが違う）ときは、送った人に返す
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,13 +25,14 @@ use alloy_eips::Decodable2718;
 use alloy_primitives::{Address, B256, Bloom, Bytes, Log, TxKind, U256, keccak256};
 use alloy_trie::TrieAccount;
 use alloy_trie::root::{state_root_unsorted, storage_root_unhashed};
+use heika_core::address::Address as SymbolAddress;
 use revm::context::either::Either;
 use revm::context::result::ExecutionResult;
 use revm::context::{BlockEnv, TxEnv};
 use revm::database::{AccountState, CacheDB, EmptyDB};
 use revm::state::{AccountInfo, Bytecode};
 use revm::{Context, ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// ブロックの `gasLimit` として見せる値。資源は basefee で抑えるので、ブロックの合計の上限ではない。
 /// 1 件ごとの上限は、revm の既定（EIP-7825 の 2^24）
@@ -81,6 +90,30 @@ impl Excess {
     }
 }
 
+/// 引き出しの口。ここに XYM を送ると、橋が Symbol で払う。`58594d` は ASCII の `XYM`。
+/// 置いてあるコード（[`WITHDRAW_CODE`]）が、形の合わない引き出しを revert する
+pub const WITHDRAW_ADDRESS: Address =
+    alloy_primitives::address!("000000000000000000000000000000000058594d");
+
+/// XYM の最小単位 1 つぶんの wei
+pub const WEI_PER_MICRO_XYM: u64 = 1_000_000_000_000;
+
+/// [`WITHDRAW_ADDRESS`] のコード。次のどれかに当てはまれば revert する：
+///
+/// - コントラクトから呼ばれた（`CALLER != ORIGIN`）。引き出しは外側のトランザクションでしか拾わないので、
+///   コントラクトの中から送られた XYM は、払われないまま燃えてしまう
+/// - データが 24 バイト（Symbol のアドレス）ではない
+/// - 送る量が 0、または XYM の最小単位（10^12 wei）で割り切れない
+///
+/// ```text
+/// ORIGIN CALLER EQ  CALLDATASIZE PUSH1 24 EQ AND  CALLVALUE ISZERO ISZERO AND
+/// PUSH5 10^12 CALLVALUE MOD ISZERO AND  PUSH1 28 JUMPI  PUSH0 PUSH0 REVERT  JUMPDEST STOP
+/// ```
+pub const WITHDRAW_CODE: [u8; 30] = [
+    0x32, 0x33, 0x14, 0x36, 0x60, 0x18, 0x14, 0x16, 0x34, 0x15, 0x15, 0x16, 0x64, 0xe8, 0xd4, 0xa5,
+    0x10, 0x00, 0x34, 0x06, 0x15, 0x16, 0x60, 0x1c, 0x57, 0x5f, 0x5f, 0xfd, 0x5b, 0x00,
+];
+
 /// ロールアップの始まり
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,8 +121,58 @@ pub struct Genesis {
     pub chain_id: u64,
     /// この Symbol の高さの次のブロックから読む
     pub start: u64,
-    /// 最初の口座。geth の genesis の `alloc` と同じ形
+    /// 橋の預かり口座。あれば、ここへの入金をロールアップに入れ、引き出しを受け付ける
+    #[serde(default, deserialize_with = "symbol_address")]
+    pub vault: Option<SymbolAddress>,
+    /// 最初の口座。geth の genesis の `alloc` と同じ形。橋があるときは、残高を置けない
+    /// （預かった XYM より多い XYM ができてしまうので）
+    #[serde(default)]
     pub alloc: BTreeMap<Address, GenesisAccount>,
+}
+
+impl Genesis {
+    /// 橋があるのに、預かっていない残高を置いていないか
+    pub fn check(&self) -> Result<(), String> {
+        if self.vault.is_some()
+            && self
+                .alloc
+                .values()
+                .any(|account| !account.balance.is_zero())
+        {
+            return Err("預かり口座（vault）があるときは、alloc に残高を置けません".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn symbol_address<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SymbolAddress>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|text| text.parse().map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+/// 預かり口座への入金 1 つ
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deposit {
+    /// 入れる先（メッセージに書いてあったもの）
+    pub to: Address,
+    /// XYM の最小単位
+    pub amount: u64,
+}
+
+/// 引き出し 1 つ。橋がファイナライズされてから払う
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Withdrawal {
+    /// 0 から順に振る番号。橋が Symbol で払うときにメッセージに入れて、同じ引き出しで 2 回払わないようにする
+    pub id: u64,
+    pub height: u64,
+    /// 引き出しのトランザクションのハッシュ
+    pub transaction: B256,
+    pub recipient: SymbolAddress,
+    /// XYM の最小単位
+    pub amount: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -124,6 +207,10 @@ pub enum Outcome {
     Failed(B256, String),
     /// 入らなかった。レシートはない
     Skipped(String),
+    /// 引き出しを受け付けた
+    Withdrawn(Withdrawal),
+    /// 引き出しの宛先が読めなかったので、送った人に返した（レシートは成功のまま）
+    Refunded(B256, String),
 }
 
 /// 入ったトランザクションと、その結果
@@ -164,6 +251,9 @@ pub struct Rollup {
     excess: Excess,
     blocks: BTreeMap<u64, Block>,
     receipts: HashMap<B256, Receipt>,
+    vault: Option<SymbolAddress>,
+    /// 受け付けた引き出し。番号の順
+    pub withdrawals: Vec<Withdrawal>,
 }
 
 impl Rollup {
@@ -186,6 +276,17 @@ impl Rollup {
                     .expect("in memory");
             }
         }
+        if genesis.vault.is_some() && !genesis.alloc.contains_key(&WITHDRAW_ADDRESS) {
+            let code = Bytecode::new_raw(Bytes::from_static(&WITHDRAW_CODE));
+            db.insert_account_info(
+                WITHDRAW_ADDRESS,
+                AccountInfo {
+                    code_hash: code.hash_slow(),
+                    code: Some(code),
+                    ..Default::default()
+                },
+            );
+        }
         let mut rollup = Self {
             chain_id: genesis.chain_id,
             db,
@@ -195,17 +296,46 @@ impl Rollup {
             excess: Excess::default(),
             blocks: BTreeMap::new(),
             receipts: HashMap::new(),
+            vault: genesis.vault,
+            withdrawals: Vec::new(),
         };
         rollup.genesis_root = rollup.state_root();
         rollup
     }
 
-    /// Symbol の高さ `height` のブロックを実行する。`transactions` は、ブロックの中の順の EVM のトランザクション
-    pub fn apply(&mut self, height: u64, timestamp: u64, transactions: &[Vec<u8>]) -> Vec<Outcome> {
+    /// Symbol の高さ `height` のブロックを実行する。`deposits` は、そのブロックで預かり口座に入った入金で、最初に入れる。
+    /// `transactions` は、ブロックの中の順の EVM のトランザクション
+    pub fn apply(
+        &mut self,
+        height: u64,
+        timestamp: u64,
+        deposits: &[Deposit],
+        transactions: &[Vec<u8>],
+    ) -> Vec<Outcome> {
         assert!(height > self.height, "高さは増えていく");
         self.height = height;
         self.timestamp = timestamp;
+        let deposited = self.vault.is_some() && !deposits.is_empty();
+        if deposited {
+            for deposit in deposits {
+                let mut info = self.account(&deposit.to);
+                info.balance += U256::from(deposit.amount) * U256::from(WEI_PER_MICRO_XYM);
+                self.db.insert_account_info(deposit.to, info);
+            }
+        }
         if transactions.is_empty() {
+            if deposited {
+                let state_root = self.state_root();
+                self.blocks.insert(
+                    height,
+                    Block {
+                        timestamp,
+                        base_fee: self.base_fee(),
+                        transactions: Vec::new(),
+                        state_root,
+                    },
+                );
+            }
             return Vec::new();
         }
         self.excess = self.excess.at(timestamp);
@@ -247,6 +377,37 @@ impl Rollup {
                     self.excess.gas = self.excess.gas.saturating_add(gas_used).min(MAX_EXCESS);
                     cumulative_gas_used += gas_used;
                     outcomes.push(Outcome::Executed(hash));
+                    if result.is_success()
+                        && let Some(vault) = self.vault
+                        && envelope.to() == Some(WITHDRAW_ADDRESS)
+                    {
+                        let database = &mut evm.ctx.journaled_state.database;
+                        outcomes.push(match withdrawal(&vault, &envelope) {
+                            Ok((recipient, amount)) => {
+                                let withdrawal = Withdrawal {
+                                    id: self.withdrawals.len() as u64,
+                                    height,
+                                    transaction: hash,
+                                    recipient,
+                                    amount,
+                                };
+                                self.withdrawals.push(withdrawal.clone());
+                                Outcome::Withdrawn(withdrawal)
+                            }
+                            Err(reason) => {
+                                // 燃やさずに、送った人に返す
+                                let value = envelope.value();
+                                database
+                                    .load_account(WITHDRAW_ADDRESS)
+                                    .expect("in memory")
+                                    .info
+                                    .balance -= value;
+                                database.load_account(from).expect("in memory").info.balance +=
+                                    value;
+                                Outcome::Refunded(hash, reason)
+                            }
+                        });
+                    }
                     Receipt {
                         from,
                         height,
@@ -291,7 +452,7 @@ impl Rollup {
             included.push(hash);
         }
         self.db = evm.ctx.journaled_state.database;
-        if !included.is_empty() {
+        if !included.is_empty() || deposited {
             let state_root = self.state_root();
             self.blocks.insert(
                 height,
@@ -443,6 +604,29 @@ impl Rollup {
     }
 }
 
+/// 引き出しのトランザクションから、宛先の Symbol のアドレスと量（XYM の最小単位）を読む。
+/// 形（24 バイト、量が割り切れる）は [`WITHDRAW_CODE`] が確かめてあるので、ここではアドレスの中身を確かめる
+fn withdrawal(
+    vault: &SymbolAddress,
+    envelope: &TxEnvelope,
+) -> Result<(SymbolAddress, u64), String> {
+    let bytes: [u8; 24] = envelope
+        .input()
+        .as_ref()
+        .try_into()
+        .map_err(|_| "データが 24 バイトではありません".to_owned())?;
+    let recipient = SymbolAddress(bytes);
+    if recipient.network() != vault.network() {
+        return Err("宛先が、預かり口座と同じネットワークのアドレスではありません".to_owned());
+    }
+    if !recipient.has_valid_checksum() {
+        return Err("宛先のアドレスのチェックサムが合いません".to_owned());
+    }
+    let amount = envelope.value() / U256::from(WEI_PER_MICRO_XYM);
+    let amount = u64::try_from(amount).map_err(|_| "量が大きすぎます".to_owned())?;
+    Ok((recipient, amount))
+}
+
 /// `eth_call` の中身
 #[derive(Clone, Debug, Default)]
 pub struct Call {
@@ -575,7 +759,7 @@ mod tests {
         let mut rollup = Rollup::new(&genesis());
         assert_eq!(rollup.base_fee(), MIN_BASE_FEE);
         let transfer = alloy_primitives::hex::decode(TRANSFER).unwrap();
-        let outcomes = rollup.apply(11, 1_700_000_000, &[transfer]);
+        let outcomes = rollup.apply(11, 1_700_000_000, &[], &[transfer]);
         let hash = executed(&outcomes[0]);
         assert_eq!(
             hash.to_string(),
@@ -604,7 +788,7 @@ mod tests {
         let mut rollup = Rollup::new(&genesis());
         let free = alloy_primitives::hex::decode(FREE_TRANSFER).unwrap();
         let before = rollup.account(&FROM).balance;
-        let outcomes = rollup.apply(11, 0, &[free.clone(), free, vec![1, 2, 3]]);
+        let outcomes = rollup.apply(11, 0, &[], &[free.clone(), free, vec![1, 2, 3]]);
         let Outcome::Failed(hash, _) = &outcomes[0] else {
             panic!("失敗になっていません: {:?}", outcomes[0]);
         };
@@ -619,7 +803,7 @@ mod tests {
         // nonce 0 のものは、もう通らない
         let paid = alloy_primitives::hex::decode(TRANSFER).unwrap();
         assert!(matches!(
-            rollup.apply(12, 0, &[paid])[0],
+            rollup.apply(12, 0, &[], &[paid])[0],
             Outcome::Skipped(_)
         ));
     }
@@ -652,7 +836,7 @@ mod tests {
         let mut rollup = Rollup::new(&genesis);
         let transfer = alloy_primitives::hex::decode(TRANSFER).unwrap();
         assert!(matches!(
-            rollup.apply(11, 0, &[transfer])[0],
+            rollup.apply(11, 0, &[], &[transfer])[0],
             Outcome::Skipped(_)
         ));
     }
@@ -666,5 +850,199 @@ mod tests {
         assert_eq!(rollup.block(12).unwrap().state_root, root);
         assert_eq!(rollup.block(11).unwrap().state_root, root);
         assert!(rollup.block(13).is_none());
+    }
+
+    /// 橋のテストで、引き出しの宛先にする Symbol のアドレス
+    fn symbol_recipient() -> SymbolAddress {
+        SymbolAddress::from_public_key(
+            &heika_core::key::PublicKey([1; 32]),
+            heika_core::network::NetworkIdentifier::TESTNET,
+        )
+    }
+
+    fn bridged() -> Genesis {
+        Genesis {
+            chain_id: 1337,
+            start: 10,
+            vault: Some(SymbolAddress::from_public_key(
+                &heika_core::key::PublicKey([2; 32]),
+                heika_core::network::NetworkIdentifier::TESTNET,
+            )),
+            alloc: BTreeMap::new(),
+        }
+    }
+
+    /// 以下は、チェーン ID 1337 で、`FROM` から [`WITHDRAW_ADDRESS`] に送る引き出し（max fee 2 gwei、優先料 0、
+    /// ガス 50000）。データは [`symbol_recipient`] の 24 バイト。`cast mktx` で作った。
+    ///
+    /// nonce 0、1.5 XYM
+    const WITHDRAW: &str = "02f8888205398080847735940082c35094000000000000000000000000000000000058594d8814d1120d7b1600009898a991d03cba797aed52a061e6bf2f7f238d8a85cf8e8a85c001a0f981e5435f090006361001cd13c918c444cfc8f73e1db2beb03f6ed2333b573aa04815f8d663ea1615437df1b4acd293f147e7e58387de686ae9efe9c4df1d0bdc";
+    /// nonce 1、1.5 XYM。宛先の最後のバイト（チェックサム）を 1 ビット変えたもの
+    const WITHDRAW_BAD_CHECKSUM: &str = "02f8888205390180847735940082c35094000000000000000000000000000000000058594d8814d1120d7b1600009898a991d03cba797aed52a061e6bf2f7f238d8a85cf8e8a84c080a058fa5f46b12801625784baab002d417d5558fcc233f542f032c4cab96d7a8cdba036ea99efbe629af7f0c114a4d6f4c8fad7b478adb5450c42f483f487c2fdc2f7";
+    /// nonce 2、1.5 XYM と 1 wei（XYM の最小単位で割り切れない）
+    const WITHDRAW_DUST: &str = "02f8888205390280847735940082c35094000000000000000000000000000000000058594d8814d1120d7b1600019898a991d03cba797aed52a061e6bf2f7f238d8a85cf8e8a85c001a0641b096391c10f14e4a2b89b34ef7cd72fc1e393e015112e30abd88c8b7e268aa01327c3634313eab87b9c191192bec23a04a54422921c7dc5f7aee1faa2be1e6f";
+    /// nonce 3、1 XYM。宛先が 23 バイトしかない
+    const WITHDRAW_SHORT: &str = "02f8878205390380847735940082c35094000000000000000000000000000000000058594d880de0b6b3a76400009798a991d03cba797aed52a061e6bf2f7f238d8a85cf8e8ac001a0472d5c59429788d1dca3aa14ad11361117abb649439eb86c7a64204ebe18265fa036b5f20cf40a1e4c59f0d9505db6c2e634d4124f7f4a3e0f1596ba28069d6fe4";
+
+    fn xym(amount: u64) -> U256 {
+        U256::from(amount) * U256::from(WEI_PER_MICRO_XYM)
+    }
+
+    /// 入金は、トランザクションがなくてもブロックの状態を変える
+    #[test]
+    fn deposits_change_the_root() {
+        let mut rollup = Rollup::new(&bridged());
+        let root = rollup.state_root();
+        let deposit = Deposit {
+            to: FROM,
+            amount: 10_000_000,
+        };
+        assert!(rollup.apply(11, 0, &[deposit], &[]).is_empty());
+        assert_eq!(rollup.account(&FROM).balance, xym(10_000_000));
+        let block = rollup.block(11).unwrap();
+        assert_ne!(block.state_root, root);
+        assert_eq!(block.state_root, rollup.state_root());
+        assert!(block.transactions.is_empty());
+    }
+
+    /// 橋がなければ、入金は入れない
+    #[test]
+    fn deposits_need_a_vault() {
+        let mut rollup = Rollup::new(&genesis());
+        let before = rollup.account(&FROM).balance;
+        rollup.apply(
+            11,
+            0,
+            &[Deposit {
+                to: FROM,
+                amount: 1,
+            }],
+            &[],
+        );
+        assert_eq!(rollup.account(&FROM).balance, before);
+    }
+
+    /// 入金したばかりの XYM で、同じブロックの中で引き出せる。宛先の読めない引き出しは返し、
+    /// 形の合わない引き出しは [`WITHDRAW_CODE`] が revert する
+    #[test]
+    fn withdraws_refunds_and_reverts() {
+        let mut rollup = Rollup::new(&bridged());
+        let deposit = Deposit {
+            to: FROM,
+            amount: 10_000_000,
+        };
+        let transactions: Vec<Vec<u8>> = [
+            WITHDRAW,
+            WITHDRAW_BAD_CHECKSUM,
+            WITHDRAW_DUST,
+            WITHDRAW_SHORT,
+        ]
+        .iter()
+        .map(|hex| alloy_primitives::hex::decode(hex).unwrap())
+        .collect();
+        let outcomes = rollup.apply(11, 0, &[deposit], &transactions);
+        assert_eq!(outcomes.len(), 6, "{outcomes:?}");
+
+        // 受け付けた
+        let hash = executed(&outcomes[0]);
+        let Outcome::Withdrawn(withdrawal) = &outcomes[1] else {
+            panic!("受け付けていません: {:?}", outcomes[1]);
+        };
+        assert_eq!(
+            *withdrawal,
+            Withdrawal {
+                id: 0,
+                height: 11,
+                transaction: hash,
+                recipient: symbol_recipient(),
+                amount: 1_500_000,
+            }
+        );
+        assert_eq!(rollup.withdrawals, vec![withdrawal.clone()]);
+
+        // 返した
+        executed(&outcomes[2]);
+        assert!(
+            matches!(outcomes[3], Outcome::Refunded(..)),
+            "{:?}",
+            outcomes[3]
+        );
+
+        // revert した（ガスは払う）
+        for outcome in &outcomes[4..] {
+            let hash = executed(outcome);
+            assert!(!rollup.receipt(&hash).unwrap().success);
+        }
+
+        // 燃えたのは、受け付けた 1.5 XYM だけ
+        assert_eq!(rollup.account(&WITHDRAW_ADDRESS).balance, xym(1_500_000));
+        let balance = rollup.account(&FROM).balance;
+        assert!(
+            balance < xym(8_500_000) && balance > xym(8_490_000),
+            "{balance}"
+        );
+        assert_eq!(rollup.account(&FROM).nonce, 4);
+    }
+
+    /// 橋があるときは、genesis で残高を置けない
+    #[test]
+    fn bridged_genesis_has_no_free_balance() {
+        let mut genesis = bridged();
+        assert!(genesis.check().is_ok());
+        genesis.alloc.insert(
+            FROM,
+            GenesisAccount {
+                balance: U256::from(1),
+                ..Default::default()
+            },
+        );
+        assert!(genesis.check().is_err());
+        assert!(self::genesis().check().is_ok());
+    }
+
+    /// コントラクトの中から引き出しの口に送ると、revert する（外側のトランザクションしか拾わないので、払われずに燃えてしまう）
+    #[test]
+    fn contracts_cannot_withdraw() {
+        // 受け取ったデータと XYM を、そのまま `target` に送るコントラクト。送れなければ revert する
+        let forwarder = |target: Address| {
+            let mut code = vec![0x36, 0x5f, 0x5f, 0x37, 0x5f, 0x5f, 0x36, 0x5f, 0x34, 0x73];
+            code.extend_from_slice(target.as_slice());
+            code.extend_from_slice(&[0x5a, 0xf1, 0x60, 0x26, 0x57, 0x5f, 0x5f, 0xfd, 0x5b, 0x00]);
+            GenesisAccount {
+                code: code.into(),
+                ..Default::default()
+            }
+        };
+        let forwarder_address =
+            alloy_primitives::address!("00000000000000000000000000000000000f0f0f");
+        // 送り先がふつうのアドレスなら、ちゃんと送れる（コントラクトが正しく作れているか）
+        let control_address =
+            alloy_primitives::address!("00000000000000000000000000000000000c0c0c");
+        let mut genesis = bridged();
+        genesis
+            .alloc
+            .insert(forwarder_address, forwarder(WITHDRAW_ADDRESS));
+        genesis.alloc.insert(
+            control_address,
+            forwarder(alloy_primitives::address!(
+                "000000000000000000000000000000000000dEaD"
+            )),
+        );
+        let mut rollup = Rollup::new(&genesis);
+        let deposit = Deposit {
+            to: FROM,
+            amount: 10_000_000,
+        };
+        rollup.apply(11, 0, &[deposit], &[]);
+        let call = |to| Call {
+            from: Some(FROM),
+            to: Some(to),
+            value: Some(xym(1_500_000)),
+            input: Some(symbol_recipient().0.to_vec().into()),
+            ..Default::default()
+        };
+        assert!(rollup.call(call(WITHDRAW_ADDRESS)).unwrap().is_success());
+        assert!(!rollup.call(call(forwarder_address)).unwrap().is_success());
+        assert!(rollup.call(call(control_address)).unwrap().is_success());
     }
 }

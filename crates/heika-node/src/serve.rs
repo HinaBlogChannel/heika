@@ -123,6 +123,8 @@ pub struct Responder<'a> {
     /// `Pull_Finalization_Messages` に答える、集めている投票。`None` なら空で答える。押し付けられた投票は、
     /// [`Responder::pushes`] で駆動役に渡す
     pub votes: Option<&'a Mutex<Observer>>,
+    /// heika から受けた接続で、こちらができることとして伝える capability（heika-packet の `extension`）
+    pub capabilities: &'static [&'static str],
 }
 
 impl Responder<'_> {
@@ -754,10 +756,11 @@ fn respond(
         Ok(_) => {}
         Err(error) => return failed(&error),
     }
-    let mut connection = match Connection::accept(socket, config, HANDSHAKE_TIMEOUT) {
-        Ok(connection) => connection,
-        Err(error) => return failed(&error),
-    };
+    let mut connection =
+        match Connection::accept(socket, config, responder.capabilities, HANDSHAKE_TIMEOUT) {
+            Ok(connection) => connection,
+            Err(error) => return failed(&error),
+        };
     let Some(key) = connection.peer_key() else {
         return Ending::Failed("相手の鍵を読めません".to_owned());
     };
@@ -1056,6 +1059,7 @@ mod tests {
             mempool,
             partials: None,
             votes: None,
+            capabilities: &[],
         }
         .answer(request_type, body)
     }
@@ -1303,6 +1307,7 @@ mod tests {
             mempool: None,
             partials: None,
             votes: None,
+            capabilities: &[heika_packet::extension::BLOCKS_ALL],
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -1319,6 +1324,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(client.chain_statistics().unwrap().height, 30);
+            // capability は最初の応答より先に届いている
+            assert!(client.is_heika());
+            assert_eq!(
+                client.peer_capabilities(),
+                Some(&[heika_packet::extension::BLOCKS_ALL.to_owned()][..])
+            );
             assert_eq!(
                 client.pull_blocks(29, 10, 1 << 20).unwrap(),
                 [block(29), block(30)]
@@ -1330,6 +1341,50 @@ mod tests {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             server.join().unwrap().unwrap();
             assert!(client.chain_statistics().is_err());
+        });
+    }
+
+    #[test]
+    fn catching_up_prefers_peers_with_all_blocks() {
+        let source = memory(1, 30, 1..=2);
+        let parameters = &NetworkParameters::TESTNET;
+        let env = FixedEnv(parameters.epoch());
+        let responder = |capabilities| Responder {
+            source: &source,
+            env: &env,
+            parameters,
+            node: Vec::new(),
+            pushes: None,
+            mempool: None,
+            partials: None,
+            votes: None,
+            capabilities,
+        };
+        let (light, full) = (
+            responder(&[]),
+            responder(&[heika_packet::extension::BLOCKS_ALL]),
+        );
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let stopping = || stop.load(std::sync::atomic::Ordering::SeqCst);
+        let (light_gate, full_gate) = (Gate::default(), Gate::default());
+        std::thread::scope(|scope| {
+            let mut addresses = Vec::new();
+            for (responder, gate) in [(&light, &light_gate), (&full, &full_gate)] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                addresses.push(listener.local_addr().unwrap().to_string());
+                let config = Arc::new(heika_tls::server_config(&identity(1)));
+                let stopping = &stopping;
+                scope.spawn(move || serve(listener, config, responder, gate, stopping));
+            }
+            let timeout = std::time::Duration::from_secs(5);
+            let chosen = crate::catch_up::connect_any(&addresses, &identity(3), 1, timeout);
+            let chosen: Vec<_> = chosen.iter().map(|peer| peer.address.as_str()).collect();
+            assert_eq!(chosen, [addresses[1].as_str()]);
+            // 足りなければ、ライトも後ろに足す
+            let chosen = crate::catch_up::connect_any(&addresses, &identity(3), 2, timeout);
+            let chosen: Vec<_> = chosen.iter().map(|peer| peer.address.as_str()).collect();
+            assert_eq!(chosen, [addresses[1].as_str(), addresses[0].as_str()]);
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
 
@@ -1385,6 +1440,7 @@ mod tests {
             mempool: None,
             partials: None,
             votes: None,
+            capabilities: &[],
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();

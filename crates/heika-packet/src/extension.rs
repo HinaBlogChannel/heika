@@ -16,6 +16,10 @@ pub const RANGE_START: u32 = 0x8000_0000;
 /// 受けた側は、受け取ったら自分のものを1回返す。応答を待たずに次の要求を送ってよい
 pub const PUSH_CAPABILITIES: u32 = RANGE_START;
 
+/// capability: ネメシスから自分の今の高さまで、ブロックを抜けなく持っていて、頼まれれば返す。
+/// 同期中でも名乗ってよい（今の高さより上は、まだ持っていないだけ）。古いブロックを刈り込むなら名乗らない
+pub const BLOCKS_ALL: &str = "blocks/all";
+
 /// 1つのパケットに入れる capability の数の上限
 pub const MAX_CAPABILITIES: usize = 64;
 

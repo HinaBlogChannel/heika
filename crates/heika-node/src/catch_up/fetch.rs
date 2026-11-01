@@ -9,6 +9,7 @@ use heika_block::Block;
 use heika_chain::verify::{Tip, VerifyError, verify_alone, verify_link};
 use heika_core::hash::Hash256;
 use heika_core::network::NetworkParameters;
+use heika_packet::extension;
 use heika_peer_protocol::{ClientConnection, QueryError};
 use heika_tls::Identity;
 use rayon::prelude::*;
@@ -40,7 +41,7 @@ const RANGES_AHEAD_PER_PEER: usize = 8;
 /// 何ブロック送るごとに、取るスレッドの内訳を出すか
 const REPORT_EVERY: u64 = 500_000;
 
-/// `candidates` に並列につないでみて、答えたものを最大 `want` 個返す
+/// `candidates` に並列につないでみて、答えたものを最大 `want` 個返す。古いブロックを全部持っているものが先
 pub(crate) fn connect_any(
     candidates: &[String],
     identity: &Identity,
@@ -59,7 +60,31 @@ pub(crate) fn connect_any(
             })
         })
         .collect();
-    connected.into_iter().take(want).collect()
+    // 古いブロックを刈り込んだ heika（ライト）は、頼んでも返ってこないことがある。全部持っているもの（catapult と、
+    // そう名乗った heika）を先に選び、足りない分だけ使う。空で返ってきたら、ほかのピアと同じく休ませる
+    let (mut chosen, partial): (Vec<Peer>, Vec<Peer>) = connected
+        .into_iter()
+        .partition(|peer| serves_all_blocks(&peer.connection));
+    chosen.truncate(want);
+    for peer in partial.into_iter().take(want - chosen.len()) {
+        eprintln!(
+            "{} は古いブロックを全部は持っていませんが、ほかが足りないので使います",
+            peer.address
+        );
+        chosen.push(peer);
+    }
+    chosen
+}
+
+/// 古いブロックを頼めるか。heika なら、全部持っていると名乗ったものだけ。capability は最初の応答より先に
+/// 届くので、何か問い合わせたあとに使う
+fn serves_all_blocks(connection: &ClientConnection) -> bool {
+    !connection.is_heika()
+        || connection.peer_capabilities().is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == extension::BLOCKS_ALL)
+        })
 }
 
 /// 取るスレッドのどこに時間がかかったか

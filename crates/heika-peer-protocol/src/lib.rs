@@ -45,6 +45,12 @@ impl ClientConnection {
         self.connection.is_heika()
     }
 
+    /// 相手から届いた capability。相手が heika でないか、まだ届いていなければ `None`。
+    /// 相手の capability は、つないだあと最初の応答より先に届く
+    pub fn peer_capabilities(&self) -> Option<&[String]> {
+        self.connection.peer_capabilities()
+    }
+
     /// チェーンの高さ、確定した高さ、スコア。
     pub fn chain_statistics(&mut self) -> Result<ChainStatistics, QueryError> {
         let body = self.request(packet_type::CHAIN_STATISTICS, &[])?;

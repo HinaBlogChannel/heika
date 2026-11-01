@@ -372,6 +372,10 @@ pub struct Listen {
     /// 決めてもらう
     #[serde(default)]
     pub public_host: Option<String>,
+    /// 外から見たポート。ping で答え、つないだピアに名乗る。中継の後ろで、待ち受けるポートと外のポートが違うときに
+    /// 書く。なければ `address` のポート
+    #[serde(default)]
+    pub public_port: Option<u16>,
     /// ping で答え、名乗るときの名前
     #[serde(default)]
     pub friendly_name: Option<String>,
@@ -382,6 +386,17 @@ pub struct Listen {
     /// HAProxy や nginx などの中継の後ろで受けるときの、PROXY protocol。なければヘッダーを読まない
     #[serde(default)]
     pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+impl Listen {
+    /// 名乗るポート。`publicPort` があればそれ、なければ `address` のポート。どちらもなければ `None`
+    pub fn announced_port(&self) -> Option<u16> {
+        self.public_port.or_else(|| {
+            self.address
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse().ok())
+        })
+    }
 }
 
 /// 中継が接続の頭に書いてくる元の送信元（PROXY protocol のヘッダー。v1 と v2）を読み、そのアドレスで数えたり
@@ -631,6 +646,20 @@ spec:
     }
 
     #[test]
+    fn announces_the_public_port() {
+        let listen = |extra: &str| {
+            Manifest::parse(&format!(
+                "{MINIMAL}  listen:\n    address: 127.0.0.1:17900\n{extra}"
+            ))
+            .map(|manifest| manifest.spec.listen.unwrap().announced_port())
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(listen(""), Ok(Some(17900)));
+        assert_eq!(listen("    publicPort: 7900\n"), Ok(Some(7900)));
+        assert!(listen("    publicPort: 70000\n").is_err());
+    }
+
+    #[test]
     fn reads_proxy_protocol() {
         let listen = |extra: &str| {
             Manifest::parse(&format!(
@@ -674,6 +703,8 @@ spec:
         assert_eq!(listen.public_host.as_deref(), Some("node.example"));
         assert_eq!(listen.friendly_name, None);
         assert_eq!(listen.proxy_protocol, None);
+        assert_eq!(listen.public_port, None);
+        assert_eq!(listen.announced_port(), Some(7900));
         assert_eq!(spec.harvesters.len(), 2);
         assert_eq!(spec.harvesters[1].signer, PathBuf::from("/remote"));
         assert_eq!(spec.harvesters[1].vrf, PathBuf::from("/vrf2"));

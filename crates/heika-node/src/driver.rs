@@ -1193,8 +1193,7 @@ fn api_node(
         network_generation_hash_seed: parameters.generation_hash_seed.to_string(),
         roles: spec.roles().0,
         port: listen
-            .and_then(|listen| listen.address.rsplit_once(':'))
-            .and_then(|(_, port)| port.parse().ok())
+            .and_then(crate::config::Listen::announced_port)
             .unwrap_or(7900),
         network_identifier: parameters.identifier.0,
         host: listen
@@ -1305,9 +1304,7 @@ fn local_node(
     parameters: &NetworkParameters,
 ) -> Result<Vec<u8>, NodeError> {
     let port = listen
-        .address
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse().ok())
+        .announced_port()
         .ok_or("listen.address にポートがありません")?;
     let node = NetworkNode {
         version: ANNOUNCED_VERSION,

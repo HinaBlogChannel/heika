@@ -578,7 +578,13 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
         .map(Arc::new);
     let status = Arc::new(RwLock::new(chain.status()));
     let reply = RwLock::new(peers.reply());
-    let gate = Gate::default();
+    let gate = Gate::default().with_proxies(
+        spec.listen
+            .as_ref()
+            .and_then(|listen| listen.proxy_protocol.as_ref())
+            .map(|proxy| proxy.trusted_from.clone())
+            .unwrap_or_default(),
+    );
     let (events, inbox) = mpsc::channel::<NodeEvent>();
     let done = std::sync::atomic::AtomicBool::new(false);
     // REST の口。駆動役が様子を書き、API のスレッドが読んで返す

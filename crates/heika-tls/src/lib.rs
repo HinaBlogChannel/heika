@@ -29,6 +29,8 @@ use rustls::{
 
 pub use rustls::ServerConfig;
 
+pub mod proxy_protocol;
+
 /// TLS で名乗るための、証明書のチェーンと秘密鍵。
 pub struct Identity {
     certified_key: Arc<CertifiedKey>,

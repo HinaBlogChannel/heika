@@ -493,7 +493,7 @@ pub struct Gate {
     /// 同じアドレスから同時に受ける接続の数の上限と、ループバックとプライベートなアドレスを数えないか
     per_address: usize,
     exempt_local: bool,
-    /// PROXY protocol v2 のヘッダーを求める中継のアドレス。ここから来た接続は、ヘッダーの送信元で数える
+    /// PROXY protocol のヘッダーを求める中継のアドレス。ここから来た接続は、ヘッダーの送信元で数える
     proxies: Vec<IpRange>,
 }
 
@@ -532,7 +532,7 @@ impl Default for Gate {
 }
 
 impl Gate {
-    /// `proxies` から来た接続には PROXY protocol v2 のヘッダーを求め、その送信元で数える
+    /// `proxies` から来た接続には PROXY protocol のヘッダーを求め、その送信元で数える
     pub fn with_proxies(self, proxies: Vec<IpRange>) -> Self {
         Self { proxies, ..self }
     }
@@ -713,7 +713,7 @@ pub fn serve(
 }
 
 /// 1本の接続で、相手が閉じるまで要求に答える。受けた要求の数を種類ごとに `requests` に数える。
-/// `proxied` なら、まず PROXY protocol v2 のヘッダーを読み、`address` を元の送信元に置き換える
+/// `proxied` なら、まず PROXY protocol のヘッダーを読み、`address` を元の送信元に置き換える
 #[allow(clippy::too_many_arguments)]
 fn respond(
     mut socket: TcpStream,
@@ -1362,7 +1362,7 @@ mod tests {
         with_proxies(per_address, Vec::new(), run);
     }
 
-    /// [`with_server`] に加えて、`proxies` から来た接続に PROXY protocol v2 のヘッダーを求める
+    /// [`with_server`] に加えて、`proxies` から来た接続に PROXY protocol のヘッダーを求める
     fn with_proxies(per_address: usize, proxies: Vec<IpRange>, run: impl FnOnce(&str, &Gate)) {
         let source = memory(1, 30, 1..=2);
         let parameters = &NetworkParameters::TESTNET;
@@ -1438,9 +1438,10 @@ mod tests {
         });
     }
 
-    /// HAProxy の `send-proxy-v2` の代わり。受けた接続ごとに `server` へつなぎ、送信元を `source` とした
-    /// PROXY protocol v2 のヘッダーを書いてから、両向きにそのまま流す。受けるアドレスを返す
-    fn relay(server: &str, source: SocketAddr) -> String {
+    /// HAProxy の `send-proxy-v2`（`v1` なら nginx の `proxy_protocol on`）の代わり。受けた接続ごとに
+    /// `server` へつなぎ、送信元を `source` とした PROXY protocol のヘッダーを書いてから、両向きにそのまま
+    /// 流す。受けるアドレスを返す
+    fn relay(server: &str, source: SocketAddr, v1: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let server = server.to_owned();
@@ -1453,15 +1454,26 @@ mod tests {
                 else {
                     panic!("IPv4 only");
                 };
-                let header = [
-                    &heika_tls::proxy_protocol::SIGNATURE[..],
-                    &[0x21, 0x11, 0, 12],
-                    &from.ip().octets(),
-                    &to.ip().octets(),
-                    &from.port().to_be_bytes(),
-                    &to.port().to_be_bytes(),
-                ]
-                .concat();
+                let header = if v1 {
+                    format!(
+                        "PROXY TCP4 {} {} {} {}\r\n",
+                        from.ip(),
+                        to.ip(),
+                        from.port(),
+                        to.port()
+                    )
+                    .into_bytes()
+                } else {
+                    [
+                        &heika_tls::proxy_protocol::SIGNATURE[..],
+                        &[0x21, 0x11, 0, 12],
+                        &from.ip().octets(),
+                        &to.ip().octets(),
+                        &from.port().to_be_bytes(),
+                        &to.port().to_be_bytes(),
+                    ]
+                    .concat()
+                };
                 std::io::Write::write_all(&mut upstream, &header).unwrap();
                 let (mut client_back, mut upstream_back) =
                     (client.try_clone().unwrap(), upstream.try_clone().unwrap());
@@ -1476,7 +1488,7 @@ mod tests {
     fn counts_proxied_connections_by_their_original_source() {
         let source = |text: &str| text.parse::<SocketAddr>().unwrap();
         with_proxies(1, vec!["127.0.0.1".parse().unwrap()], |address, _| {
-            let first = relay(address, source("192.0.2.1:40000"));
+            let first = relay(address, source("192.0.2.1:40000"), false);
             let mut kept = connect(&first, 3);
             assert!(kept.chain_statistics().is_ok());
             // 中継は同じでも、元の送信元が同じなら数えて断る（TLS を始める前に切られるので、つなげない）
@@ -1488,14 +1500,25 @@ mod tests {
                 )
                 .is_err()
             );
-            // 元の送信元が違えば、同じ中継から受ける
-            let second = relay(address, source("192.0.2.2:40000"));
+            // 元の送信元が違えば、同じ中継から受ける。v1 のテキストの形でも読む
+            let second = relay(address, source("192.0.2.2:40000"), false);
             assert!(connect(&second, 5).chain_statistics().is_ok());
+            let third = relay(address, source("192.0.2.3:40000"), true);
+            let mut kept_v1 = connect(&third, 7);
+            assert!(kept_v1.chain_statistics().is_ok());
+            assert!(
+                heika_peer_protocol::ClientConnection::connect(
+                    &third,
+                    &identity(9),
+                    Duration::from_secs(5)
+                )
+                .is_err()
+            );
             // 信じる中継から、ヘッダーなしで直につなぐと受けない
             assert!(
                 heika_peer_protocol::ClientConnection::connect(
                     address,
-                    &identity(7),
+                    &identity(11),
                     Duration::from_secs(5)
                 )
                 .is_err()
@@ -1507,7 +1530,7 @@ mod tests {
     fn ignores_proxy_headers_unless_configured() {
         with_server(MAX_CONNECTIONS, |address, _| {
             // ヘッダーは TLS の頭として読まれ、ハンドシェイクが通らない
-            let proxied = relay(address, "192.0.2.1:40000".parse().unwrap());
+            let proxied = relay(address, "192.0.2.1:40000".parse().unwrap(), false);
             assert!(
                 heika_peer_protocol::ClientConnection::connect(
                     &proxied,

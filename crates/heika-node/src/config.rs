@@ -379,12 +379,12 @@ pub struct Listen {
     /// `[Peer, Api, IPv4]` のような catapult の名前の並びで書く。なければ [`NodeConfig::roles`] の既定
     #[serde(default, deserialize_with = "deserialize_roles")]
     pub roles: Option<NodeRoles>,
-    /// HAProxy などの中継の後ろで受けるときの、PROXY protocol v2。なければヘッダーを読まない
+    /// HAProxy や nginx などの中継の後ろで受けるときの、PROXY protocol。なければヘッダーを読まない
     #[serde(default)]
     pub proxy_protocol: Option<ProxyProtocol>,
 }
 
-/// 中継が接続の頭に書いてくる元の送信元（PROXY protocol v2 のヘッダー）を読み、そのアドレスで数えたり
+/// 中継が接続の頭に書いてくる元の送信元（PROXY protocol のヘッダー。v1 と v2）を読み、そのアドレスで数えたり
 /// 締め出したりする
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

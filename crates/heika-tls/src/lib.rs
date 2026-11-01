@@ -13,21 +13,35 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use heika_cert::certificate::{self, Certificate, ChainError};
 use heika_cert::key;
 use heika_core::key::{PrivateKey, PublicKey};
+use heika_packet::extension;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls13_signature_with_raw_key};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer,
     UnixTime,
 };
+use rustls::server::Acceptor;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::version::TLS13;
 use rustls::{
     CertificateError, ClientConfig, ClientConnection, CommonState, DigitallySignedStruct,
-    DistinguishedName, Error, ServerConnection, SignatureScheme,
+    DistinguishedName, Error, SignatureScheme,
 };
 
 pub use rustls::ServerConfig;
+
+/// heika どうしだとわかるための ALPN の名前。
+///
+/// heika はつなぐときにこれを出し、受けるときに相手が出していれば選んで返す。互いに見つけたら、heika だけの
+/// パケット（heika-packet の `extension`）も使う。catapult は ALPN を扱わないので、出しても無視され、
+/// 何も返ってこない。そのときは今までどおりにやりとりする。
+///
+/// 版は、この名前での取り決めを壊すときにだけ上げる。できることは、つながったあとに capability で伝える
+pub const ALPN: &[u8] = b"heika-symbol/0";
+
+/// こちらができることとして伝える capability。今はまだない
+const CAPABILITIES: &[&str] = &[];
 
 pub mod proxy_protocol;
 
@@ -112,7 +126,7 @@ pub enum ServerVerification {
 /// `identity` で名乗る、TLS 1.3 と X25519 だけのクライアントの設定。
 pub fn client_config(identity: &Identity, verification: ServerVerification) -> ClientConfig {
     let provider = provider();
-    ClientConfig::builder_with_provider(provider.clone())
+    let mut config = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&TLS13])
         .expect("ring supports TLS 1.3")
         .dangerous()
@@ -122,13 +136,15 @@ pub fn client_config(identity: &Identity, verification: ServerVerification) -> C
         }))
         .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(
             identity.certified_key.clone(),
-        )))
+        )));
+    config.alpn_protocols = vec![ALPN.to_vec()];
+    config
 }
 
 /// `identity` で名乗る、TLS 1.3 と X25519 だけのサーバーの設定。
 ///
 /// catapult が接続を受けるときと同じく、相手にも証明書を求め、チェーンの条件と有効期間を確かめる。
-/// セッションの再開は使わないので、チケットは送らない。
+/// セッションの再開は使わないので、チケットは送らない。相手が [`ALPN`] を出していれば選んで返す。
 pub fn server_config(identity: &Identity) -> ServerConfig {
     let provider = provider();
     let mut config = ServerConfig::builder_with_provider(provider.clone())
@@ -139,6 +155,7 @@ pub fn server_config(identity: &Identity) -> ServerConfig {
             identity.certified_key.clone(),
         )));
     config.send_tls13_tickets = 0;
+    config.alpn_protocols = vec![ALPN.to_vec()];
     config
 }
 
@@ -365,6 +382,12 @@ pub fn send(
 pub struct Connection {
     connection: rustls::Connection,
     socket: TcpStream,
+    /// 相手も heika で、heika だけのパケットを使えるか（[`ALPN`]）
+    extension: bool,
+    /// 相手から届いた capability。まだ届いていなければ `None`
+    peer_capabilities: Option<Vec<String>>,
+    /// こちらの capability を送ったか
+    capabilities_sent: bool,
 }
 
 impl Connection {
@@ -378,10 +401,16 @@ impl Connection {
         let config = client_config(identity, ServerVerification::Catapult);
         let connection = ClientConnection::new(Arc::new(config), server_name(address))
             .expect("the config is valid");
-        let connection = Self::handshake(connection.into(), socket)?;
+        let mut connection = Self::handshake(connection.into(), socket)?;
         // 住所録に自分のアドレスが入っていても、自分にはつながない
         if connection.peer_key().as_ref() == Some(identity.key()) {
             return Err(ConnectError::Myself);
+        }
+        // つないだ側から先に送る。受けた側は、受け取ってから返す。
+        // TLS 1.3 では、こちらの証明書が弾かれてもハンドシェイクはこちらで先に終わる。弾かれたことは次に
+        // 読んだときにわかるので、ここでは送れなくても失敗にしない
+        if connection.extension {
+            let _ = connection.send_capabilities();
         }
         Ok(connection)
     }
@@ -396,8 +425,11 @@ impl Connection {
 
     /// 受け付けた `socket` で、[`server_config`] で作った `config` のハンドシェイクを済ませる。
     /// 読み書きは `timeout` で打ち切る。
+    ///
+    /// 相手が ALPN を出していても、[`ALPN`] がなければ選ばずに続ける（rustls は、重なるものがなければ切る）。
+    /// 版を上げた heika や、ほかの名前を出すものとも、今までどおりつながるように。
     pub fn accept(
-        socket: TcpStream,
+        mut socket: TcpStream,
         config: Arc<ServerConfig>,
         timeout: Duration,
     ) -> Result<Self, ConnectError> {
@@ -405,7 +437,45 @@ impl Connection {
             .set_read_timeout(Some(timeout))
             .and_then(|()| socket.set_write_timeout(Some(timeout)))
             .map_err(ConnectError::Io)?;
-        let connection = ServerConnection::new(config).expect("the config is valid");
+        let mut acceptor = Acceptor::default();
+        let accepted = loop {
+            if acceptor
+                .read_tls(&mut socket)
+                .map_err(ConnectError::Handshake)?
+                == 0
+            {
+                return Err(ConnectError::Handshake(io::ErrorKind::UnexpectedEof.into()));
+            }
+            match acceptor.accept() {
+                Ok(Some(accepted)) => break accepted,
+                Ok(None) => {}
+                Err((error, mut alert)) => {
+                    let _ = alert.write(&mut socket);
+                    return Err(ConnectError::Handshake(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        error,
+                    )));
+                }
+            }
+        };
+        let offered = accepted
+            .client_hello()
+            .alpn()
+            .map(|mut names| names.any(|name| name == ALPN));
+        let config = match offered {
+            Some(false) => {
+                let mut plain = (*config).clone();
+                plain.alpn_protocols.clear();
+                Arc::new(plain)
+            }
+            _ => config,
+        };
+        let connection = accepted
+            .into_connection(config)
+            .map_err(|(error, mut alert)| {
+                let _ = alert.write(&mut socket);
+                ConnectError::Handshake(io::Error::new(io::ErrorKind::InvalidData, error))
+            })?;
         Self::handshake(connection.into(), socket)
     }
 
@@ -418,7 +488,32 @@ impl Connection {
                 .complete_io(&mut socket)
                 .map_err(ConnectError::Handshake)?;
         }
-        Ok(Self { connection, socket })
+        let extension = connection.alpn_protocol() == Some(ALPN);
+        Ok(Self {
+            connection,
+            socket,
+            extension,
+            peer_capabilities: None,
+            capabilities_sent: false,
+        })
+    }
+
+    /// 相手も heika で、heika だけのパケットを使えるか
+    pub fn is_heika(&self) -> bool {
+        self.extension
+    }
+
+    /// 相手から届いた capability。相手が heika でないか、まだ届いていなければ `None`
+    pub fn peer_capabilities(&self) -> Option<&[String]> {
+        self.peer_capabilities.as_deref()
+    }
+
+    fn send_capabilities(&mut self) -> Result<(), RequestError> {
+        self.capabilities_sent = true;
+        self.send_packet(
+            extension::PUSH_CAPABILITIES,
+            &extension::capabilities_body(CAPABILITIES),
+        )
     }
 
     /// 読むときのタイムアウト。`None` なら、届くまで待つ
@@ -475,7 +570,27 @@ impl Connection {
     }
 
     /// パケットを1つ受け取って、種類と本体を返す。本体が `max_body_size` を超えるなら、読まずに失敗する。
+    ///
+    /// 相手も heika なら、heika だけのパケットはここで扱って返さない。capability は覚え、まだ送っていなければ
+    /// こちらのものを返す。知らない種類は読み捨てる
     pub fn receive_packet(&mut self, max_body_size: usize) -> Result<(u32, Vec<u8>), RequestError> {
+        loop {
+            let (packet_type, body) = self.read_packet(max_body_size)?;
+            if !(self.extension && extension::is_extension(packet_type)) {
+                return Ok((packet_type, body));
+            }
+            if packet_type == extension::PUSH_CAPABILITIES && self.peer_capabilities.is_none() {
+                let capabilities =
+                    extension::read_capabilities(&body).map_err(RequestError::Malformed)?;
+                self.peer_capabilities = Some(capabilities);
+                if !self.capabilities_sent {
+                    self.send_capabilities()?;
+                }
+            }
+        }
+    }
+
+    fn read_packet(&mut self, max_body_size: usize) -> Result<(u32, Vec<u8>), RequestError> {
         let mut stream = self.stream();
         let mut header = [0; heika_packet::HEADER_SIZE];
         stream.read_exact(&mut header).map_err(request_error)?;
@@ -528,6 +643,8 @@ pub enum RequestError {
     InvalidSize(u32),
     /// 要求と違う種類の応答が来た
     UnexpectedType(u32),
+    /// heika だけのパケットの中身が決まりに合わない
+    Malformed(heika_packet::DecodeError),
     Io(io::Error),
 }
 
@@ -542,6 +659,7 @@ impl fmt::Display for RequestError {
             Self::UnexpectedType(packet_type) => {
                 write!(f, "違う種類 {packet_type:#x} の応答が来ました")
             }
+            Self::Malformed(error) => write!(f, "heika のパケットが読めません: {error}"),
             Self::Io(error) => write!(f, "通信できませんでした: {error}"),
         }
     }
@@ -1098,6 +1216,71 @@ mod tests {
         assert_eq!(server.receive_packet(1024).unwrap(), (5, b"ask".to_vec()));
         server.send_packet(5, b"reply").unwrap();
         assert_eq!(client.receive_packet(1024).unwrap(), (5, b"reply".to_vec()));
+    }
+
+    /// `alpn` を出す（空なら出さない）クライアントで `address` につなぐ
+    fn open_with_alpn(address: &str, alpn: &[&[u8]]) -> Connection {
+        let mut config = client_config(&client_identity(), ServerVerification::Catapult);
+        config.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
+        let socket = TcpStream::connect(address).unwrap();
+        let connection = ClientConnection::new(Arc::new(config), server_name(address)).unwrap();
+        Connection::handshake(connection.into(), socket).unwrap()
+    }
+
+    #[test]
+    fn heika_peers_find_each_other_and_exchange_capabilities() {
+        let (chain, key) = chain(1);
+        let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        let mut client =
+            Connection::open(&address, &client_identity(), Duration::from_secs(5)).unwrap();
+        let mut server = accepted.recv().unwrap().unwrap();
+        assert!(client.is_heika() && server.is_heika());
+        assert_eq!(client.peer_capabilities(), None);
+        // 知らない heika のパケットは読み捨て、capability は覚えて、ふつうのパケットだけを返す
+        client
+            .send_packet(extension::RANGE_START + 0x42, b"?")
+            .unwrap();
+        client.send_packet(5, b"ask").unwrap();
+        assert_eq!(server.receive_packet(1024).unwrap(), (5, b"ask".to_vec()));
+        assert_eq!(server.peer_capabilities(), Some(&[][..]));
+        server.send_packet(5, b"reply").unwrap();
+        assert_eq!(client.receive_packet(1024).unwrap(), (5, b"reply".to_vec()));
+        assert_eq!(client.peer_capabilities(), Some(&[][..]));
+    }
+
+    #[test]
+    fn talks_as_before_with_peers_without_our_alpn() {
+        let (chain, key) = chain(1);
+        let identity = || Identity::new(&chain, &key).unwrap();
+        // ALPN を出さない catapult と、ほかの名前だけを出すもの。どちらも切らずに、heika とはみなさない
+        for alpn in [&[][..], &[&b"heika-symbol/9"[..], b"h2"][..]] {
+            let (address, accepted) = accept_once(&identity());
+            let mut client = open_with_alpn(&address, alpn);
+            let mut server = accepted.recv().unwrap().unwrap();
+            assert!(!client.is_heika() && !server.is_heika(), "{alpn:?}");
+            // heika の範囲のパケットも、ふつうのパケットとして渡す
+            client
+                .send_packet(extension::PUSH_CAPABILITIES, &[0, 0])
+                .unwrap();
+            assert_eq!(
+                server.receive_packet(1024).unwrap(),
+                (extension::PUSH_CAPABILITIES, vec![0, 0])
+            );
+            assert_eq!(server.peer_capabilities(), None);
+        }
+    }
+
+    #[test]
+    fn refuses_malformed_capabilities() {
+        let (chain, key) = chain(1);
+        let (address, accepted) = accept_once(&Identity::new(&chain, &key).unwrap());
+        let mut client = open_with_alpn(&address, &[ALPN]);
+        let mut server = accepted.recv().unwrap().unwrap();
+        client
+            .send_packet(extension::PUSH_CAPABILITIES, &[1, 0])
+            .unwrap();
+        let error = server.receive_packet(1024).unwrap_err();
+        assert!(matches!(error, RequestError::Malformed(_)), "{error:?}");
     }
 
     #[test]

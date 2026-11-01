@@ -47,6 +47,7 @@ pub fn encode(packet_type: u32, body: &[u8]) -> Result<Vec<u8>, usize> {
     Ok(packet)
 }
 
+pub mod extension;
 pub mod partial;
 
 /// catapult の `ionet::PacketType` のうち使うもの。
@@ -470,6 +471,8 @@ pub enum DecodeError {
     SizeMismatch { declared: usize, actual: usize },
     /// 0 で埋めるはずのところが0でない
     NonZeroPadding,
+    /// 値が決まりに合わない。中身はわけ
+    InvalidValue(&'static str),
 }
 
 impl fmt::Display for DecodeError {
@@ -485,6 +488,7 @@ impl fmt::Display for DecodeError {
                 write!(f, "{size} バイトしかありません（最低 {minimum} バイト）")
             }
             Self::NonZeroPadding => write!(f, "0 で埋めるはずのところが0ではありません"),
+            Self::InvalidValue(reason) => f.write_str(reason),
             Self::SizeMismatch { declared, actual } => {
                 write!(
                     f,

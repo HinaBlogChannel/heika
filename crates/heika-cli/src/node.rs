@@ -117,6 +117,22 @@ pub enum NodeCommand {
         #[arg(long, value_name = "PATH")]
         client_cert: PathBuf,
     },
+    /// heika のノードから、そのノードのソースの ZIP をもらう
+    ///
+    /// heika は、動いているバイナリのソース（手を入れてビルドしたなら、そのソース）を、REST を立てていなくても
+    /// P2P で渡す（AGPL-3.0 の 13 条のため）。相手が catapult か、ソースを埋め込んでいないビルドなら、もらえない。
+    /// 名乗るのは --client-cert の証明書で、ノードの秘密鍵は標準入力から読む。
+    Source {
+        /// heika のノード
+        #[arg(long, value_name = "HOST:PORT")]
+        connect: String,
+        /// 名乗る証明書のチェーン（ノード、CA の順の PEM）
+        #[arg(long, value_name = "PATH")]
+        client_cert: PathBuf,
+        /// ZIP を書くファイル。すでにあるファイルは上書きしない
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
 }
 
 /// `heika node votes` の、1つのラウンドの1つの段階
@@ -188,6 +204,36 @@ pub fn run(command: NodeCommand) -> Result<(), Failure> {
             harvesters_dat: harvesters_dat.as_deref(),
             write_harvesters_dat: write_harvesters_dat.as_deref(),
         })?,
+        NodeCommand::Source {
+            connect,
+            client_cert,
+            out,
+        } => {
+            let chain = read_chain(&client_cert)?;
+            let AnyPrivateKey(key) = read_secret("ノードの秘密鍵", "node.key.pem")?;
+            let identity = Identity::new(&chain, &key)
+                .map_err(|error| format!("{}: {error}", client_cert.display()))?;
+            drop(key);
+            let mut node = ClientConnection::connect(&connect, &identity, TIMEOUT)
+                .map_err(|error| format!("{connect}: {error}"))?;
+            let Some(zip) = node
+                .source_zip()
+                .map_err(|error| format!("{connect}: {error}"))?
+            else {
+                let reason = if node.is_heika() {
+                    "ソースを埋め込んでいないビルドです"
+                } else {
+                    "heika ではありません"
+                };
+                return Err(format!(
+                    "{connect} は P2P でソースを渡していません（{reason}）。REST があれば /heika/sourcecode.zip を見てください"
+                )
+                .into());
+            };
+            drop(node);
+            crate::tx::write_new(&out, &zip)?;
+            outln!("{} に書きました（{} バイト）", out.display(), zip.len());
+        }
         NodeCommand::Votes {
             connect,
             client_cert,

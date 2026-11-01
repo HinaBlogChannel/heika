@@ -16,6 +16,18 @@ pub const RANGE_START: u32 = 0x8000_0000;
 /// 受けた側は、受け取ったら自分のものを1回返す。応答を待たずに次の要求を送ってよい
 pub const PUSH_CAPABILITIES: u32 = RANGE_START;
 
+/// 名前つきの拡張を入れる封筒。本体は、名前の長さ `u8`、名前（capability の名前と同じ決まり）、中身の順。
+///
+/// 拡張ごとに種類の番号を振る代わりに、名前で区切る。名前は capability と同じものを使い、相手がその
+/// capability を名乗っているときだけ送る。heika のほかの実装が足すものは、SSH の拡張と同じく `名前@ドメイン`
+/// にして、名前がぶつからないようにする。要求と応答は同じ名前で、1つの接続では1つずつ順に行き来する。
+/// 知らない名前の要求には答えない
+pub const ENVELOPE: u32 = RANGE_START + 1;
+
+/// capability と封筒の名前: このノードのソースの ZIP を返す（AGPL-3.0 の 13 条のため）。要求の中身は空で、
+/// 応答の中身が ZIP。ソースを埋め込んでいないビルドなら名乗らない
+pub const SOURCE_ZIP: &str = "source/zip";
+
 /// capability: ネメシスから自分の今の高さまで、ブロックを抜けなく持っていて、頼まれれば返す。
 /// 同期中でも名乗ってよい（今の高さより上は、まだ持っていないだけ）。古いブロックを刈り込むなら名乗らない
 pub const BLOCKS_ALL: &str = "blocks/all";
@@ -87,6 +99,39 @@ pub fn read_capabilities(body: &[u8]) -> Result<Vec<String>, DecodeError> {
     Ok(names)
 }
 
+/// 名前 `name` で中身が `content` の、[`ENVELOPE`] の本体。名前が使えないなら、使う側の間違いなので panic する
+pub fn envelope_body(name: &str, content: &[u8]) -> Vec<u8> {
+    assert!(is_capability_name(name), "封筒の名前 {name:?} は使えません");
+    let mut body = Vec::with_capacity(1 + name.len() + content.len());
+    body.push(name.len() as u8);
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(content);
+    body
+}
+
+/// [`ENVELOPE`] の本体を、名前と中身に分ける
+pub fn read_envelope(body: &[u8]) -> Result<(&str, &[u8]), DecodeError> {
+    let (&length, rest) = body.split_first().ok_or(DecodeError::Truncated {
+        needed: 1,
+        remaining: 0,
+    })?;
+    let length = length as usize;
+    if rest.len() < length {
+        return Err(DecodeError::Truncated {
+            needed: length,
+            remaining: rest.len(),
+        });
+    }
+    let (name, content) = rest.split_at(length);
+    let name = std::str::from_utf8(name)
+        .ok()
+        .filter(|name| is_capability_name(name))
+        .ok_or(DecodeError::InvalidValue(
+            "封筒の名前に使えない文字があります",
+        ))?;
+    Ok((name, content))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +157,18 @@ mod tests {
         assert!(read_capabilities(&[1, 0, 0]).is_err());
         assert!(read_capabilities(&[0, 0, 0]).is_err());
         assert!(read_capabilities(&[65, 0]).is_err());
+    }
+
+    #[test]
+    fn round_trips_envelopes() {
+        let body = envelope_body(SOURCE_ZIP, b"PK");
+        assert_eq!(body, [&[10][..], b"source/zip", b"PK"].concat());
+        assert_eq!(read_envelope(&body).unwrap(), (SOURCE_ZIP, &b"PK"[..]));
+        assert_eq!(read_envelope(&[1, b'a']).unwrap(), ("a", &[][..]));
+        assert!(read_envelope(&[]).is_err());
+        assert!(read_envelope(&[0]).is_err());
+        assert!(read_envelope(&[3, b'a']).is_err());
+        assert!(read_envelope(&[1, b' ']).is_err());
     }
 
     #[test]

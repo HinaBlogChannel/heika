@@ -451,6 +451,11 @@ pub fn offer_source(zip: &'static [u8]) {
     let _ = SOURCE.set(zip);
 }
 
+/// [`offer_source`] で渡したソースの ZIP。渡していないか空なら `None`
+pub fn offered_source() -> Option<&'static [u8]> {
+    SOURCE.get().copied().filter(|zip| !zip.is_empty())
+}
+
 #[derive(Clone)]
 struct Api {
     shared: Shared,
@@ -646,7 +651,7 @@ async fn announce_block(State(api): State<Api>, headers: HeaderMap, body: Bytes)
 
 /// このノードのソース（[`offer_source`]）
 async fn source_code() -> Response {
-    match SOURCE.get().filter(|zip| !zip.is_empty()) {
+    match offered_source() {
         Some(zip) => (
             [
                 (CONTENT_TYPE, "application/zip"),
@@ -659,7 +664,7 @@ async fn source_code() -> Response {
                     ),
                 ),
             ],
-            *zip,
+            zip,
         )
             .into_response(),
         None => error(

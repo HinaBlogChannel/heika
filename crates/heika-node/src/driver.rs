@@ -673,11 +673,15 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
             let (db, pushes, node) = (store.db(), events.clone(), node.to_vec());
             let (mempool, partials, votes) = (&*mempool, &*partials, observer.as_ref());
             let server_config = Arc::new(heika_tls::server_config(identity));
+            let source_code = heika_api::offered_source();
+            let mut capabilities = Vec::new();
             // ライトは古いブロックを刈り込むので、全部持っているとは名乗らない
-            let capabilities: &'static [&'static str] = match spec.storage.mode {
-                Mode::Light => &[],
-                Mode::Archive | Mode::Full => &[heika_packet::extension::BLOCKS_ALL],
-            };
+            if spec.storage.mode != Mode::Light {
+                capabilities.push(heika_packet::extension::BLOCKS_ALL);
+            }
+            if source_code.is_some() {
+                capabilities.push(heika_packet::extension::SOURCE_ZIP);
+            }
             scope.spawn(move || {
                 let source = DbSource {
                     db,
@@ -693,7 +697,8 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     mempool: Some(mempool),
                     partials: Some(partials),
                     votes,
-                    capabilities,
+                    capabilities: &capabilities,
+                    source_code,
                 };
                 let stop = || stopping() || done.load(std::sync::atomic::Ordering::SeqCst);
                 if let Err(error) = serve(listener, server_config, &responder, gate, &stop) {

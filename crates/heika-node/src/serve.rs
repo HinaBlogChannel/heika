@@ -1438,7 +1438,7 @@ mod tests {
         });
     }
 
-    /// HAProxy の `send-proxy-v2`（`v1` なら nginx の `proxy_protocol on`）の代わり。受けた接続ごとに
+    /// HAProxy の `send-proxy-v2`（`v1` なら `send-proxy`）の代わり。受けた接続ごとに
     /// `server` へつなぎ、送信元を `source` とした PROXY protocol のヘッダーを書いてから、両向きにそのまま
     /// 流す。受けるアドレスを返す
     fn relay(server: &str, source: SocketAddr, v1: bool) -> String {

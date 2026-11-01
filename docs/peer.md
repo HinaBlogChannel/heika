@@ -130,7 +130,7 @@ HAProxy や nginx などの中継の後ろで受けると、どの接続も中�
 
 - `trustedFrom`: 信じる中継のアドレスか範囲。ここから来た接続にはヘッダーを求め、ヘッダーがなければ切る。ほかから来た接続ではヘッダーを読まないので、中継を通さない接続も同じポートで受けられる。誰でもヘッダーを送れるので、ここには中継のアドレスだけを書く
 - v1 のテキストの形も v2 のバイナリの形も読む。どちらかは最初のバイトで見分けるので、設定は要らない。v2 で中継が自分の用事（死活の確かめなど）でつなぐ LOCAL も受ける
-- TLS は中継を素通しにして、ノードが終える。HAProxy なら `mode tcp` にして、`server` に `send-proxy-v2` を付ける。nginx なら `stream` の `server` で `proxy_pass` と `proxy_protocol on;` を書く（nginx が送るのは v1）
+- TLS は中継を素通しにして、ノードが終える。HAProxy なら `mode tcp` にして、`server` に `send-proxy-v2` を付ける。nginx なら `stream` の `server` で `proxy_pass` と `proxy_protocol on;` を書く
 - 書かなければ、ヘッダーは読まない
 
 ## REST

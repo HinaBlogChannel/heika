@@ -197,8 +197,8 @@ impl<'a> Setup<'a> {
     fn book(&self, db: &Db) -> Result<Book, NodeError> {
         let now = Instant::now();
         let mut book = Book::load(known_peers(db)?, now, unix_now());
-        if let Some(seed) = &self.spec.seed {
-            book.insert(seed.clone(), now);
+        for seed in self.spec.seeds() {
+            book.insert(seed, now);
         }
         Ok(book)
     }
@@ -337,15 +337,24 @@ fn catch_up_if_behind(
     }
     let book = setup.book(&db)?;
     let known: BTreeMap<String, KnownPeer> = book.records().into_iter().collect();
+    let seeds = spec.seeds();
     let mut addresses = best(&known, usize::MAX);
-    if let Some(seed) = &spec.seed
-        && !addresses.contains(seed)
-    {
-        addresses.push(seed.clone());
+    // 住所録の確からしいものを試し、それが全滅してもシードには届くように、シードはいつも後ろに足す
+    let mut first: Vec<String> = addresses
+        .iter()
+        .filter(|address| !seeds.contains(address))
+        .take(FIRST_TRIES)
+        .cloned()
+        .collect();
+    first.extend(seeds.iter().cloned());
+    for seed in &seeds {
+        if !addresses.contains(seed) {
+            addresses.push(seed.clone());
+        }
     }
     let mut peers = loop {
         let peers = catch_up::connect_any(
-            &addresses[..addresses.len().min(FIRST_TRIES)],
+            &first,
             &setup.identity,
             spec.peers + PROOF_PEERS,
             CONNECT_TIMEOUT,

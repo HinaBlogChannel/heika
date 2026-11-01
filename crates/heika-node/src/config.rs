@@ -98,9 +98,13 @@ pub struct NodeConfig {
     /// 先端の段階でつないでおくピアの数
     #[serde(default = "default_peers")]
     pub peers: usize,
-    /// 住所録が空か全滅したときに、最初につなぐノード（`ホスト:ポート`）
+    /// 住所録が空か全滅したときに、最初につなぐノード（`ホスト:ポート`）。1 つだけ書くときの形で、`seeds` と
+    /// あわせても使える
     #[serde(default)]
     pub seed: Option<String>,
+    /// [`seed`](Self::seed) の並び。どれかが消えても、ほかのノードからつなぎ直せる
+    #[serde(default)]
+    pub seeds: Vec<String>,
     /// 何を残すか、どれだけメモリに持つか
     #[serde(default)]
     pub storage: Storage,
@@ -153,6 +157,17 @@ impl Finalization {
 }
 
 impl NodeConfig {
+    /// `seed` と `seeds` を、書いた順に重なりなく並べたもの
+    pub fn seeds(&self) -> Vec<String> {
+        let mut seeds: Vec<String> = Vec::new();
+        for seed in self.seed.iter().chain(&self.seeds) {
+            if !seeds.contains(seed) {
+                seeds.push(seed.clone());
+            }
+        }
+        seeds
+    }
+
     /// 名乗るロール。`listen.roles` がなければ、Peer に、REST の口があれば Api を、投票するなら Voting を足す。
     /// メインネットの catapult と同じく IPv4 は立てない（catapult は、IPv4 も IPv6 もなければ IPv4 とみなす。
     /// ノードの一覧を作るクローラーには、IPv4 の立ったロールを読めないものがある）
@@ -643,6 +658,24 @@ spec:
         assert_eq!(spec.listen, None);
         assert!(spec.harvesters.is_empty());
         assert_eq!(manifest.metadata.name, "");
+    }
+
+    #[test]
+    fn reads_seeds() {
+        let seeds = |extra: &str| {
+            Manifest::parse(&format!("{MINIMAL}{extra}"))
+                .unwrap()
+                .spec
+                .seeds()
+        };
+        assert!(seeds("").is_empty());
+        assert_eq!(seeds("  seed: a:7900\n"), ["a:7900"]);
+        assert_eq!(seeds("  seeds: [b:7900, c:7900]\n"), ["b:7900", "c:7900"]);
+        // seed が先で、重なりは 1 つにする
+        assert_eq!(
+            seeds("  seed: a:7900\n  seeds: [b:7900, a:7900]\n"),
+            ["a:7900", "b:7900"]
+        );
     }
 
     #[test]

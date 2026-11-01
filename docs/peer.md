@@ -49,7 +49,9 @@ spec:
   dataDirectory: /path/to/data
   certificates:
     directory: /path/to/certificates
-  seed: <ホスト>:7900
+  seeds:
+    - <ホスト>:7900
+    - <別のホスト>:7900
   storage:
     mode: Light            # Archive / Full / Light
 ```
@@ -58,6 +60,7 @@ spec:
 - `dataDirectory`: ブロックと状態をしまうフォルダー
 - `certificates.directory`: `tls.crt`（ノードの証明書と CA の証明書の鎖）と `tls.key`（ノードの鍵）のあるフォルダー。`heika cert ca` と `heika cert node` で作れる。同じ IP から違う証明書で次々につなぐとほかのノードに嫌われるので、いつも同じ証明書を使う
 - `seed`: 住所録が空か、どこにもつながらないときに、最初につなぐノード（`ホスト:ポート`）。そのノードからほかのノードの一覧をもらい、住所録に足していく
+- `seeds`: `seed` の並び（`[a.example:7900, b.example:7900]` のように書く）。1 つが消えても、ほかのノードからつなぎ直せる。`seed` とあわせて書いてもよく、どちらもいつも住所録に入れ、つなぎ始めるときは住所録の確からしいノードのあとに試す
 - `peers`: 先端の段階でつないでおくピアの数。既定は 8
 - `minFree`: ディスクの空きがこれより少なければ、書く前に止める。既定は `10G`。大きさは Kubernetes の quantity のように、整数に単位を続けて書く（`Ki` `Mi` `Gi` `Ti` は 1024 の冪、`k` `M` `G` `T` は 1000 の冪。単位がなければバイト）
 - `minFeeMultiplier`: これより低い手数料の倍率（最大手数料をトランザクションの大きさで割ったもの）のトランザクションは、REST からもピアからも受け付けない。REST の `/network/fees/transaction` の `minFeeMultiplier` でもこの値を答えるので、そこから手数料を決める道具は、この下限より低くしない。catapult の `minFeeMultiplier` にあたる。既定は 0。ほかのノードが下限（100 など）を決めているネットワークで 0 のままにすると、受け付けたトランザクションがほかのノードで捨てられて、いつまでも承認されないことがある

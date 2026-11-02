@@ -345,3 +345,14 @@ progress {
 .field textarea:disabled {
   opacity: 0.5;
 }
+
+/* ハーベストの見込み */
+.meter {
+  margin-top: var(--space-4);
+}
+
+.meter-label {
+  margin-bottom: var(--space-2);
+  color: var(--ink);
+  font-size: 0.9rem;
+}

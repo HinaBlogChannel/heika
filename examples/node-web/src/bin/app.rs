@@ -40,6 +40,21 @@ struct Progress {
     tip: bool,
 }
 
+/// ハーベストの見込み（Worker の `meter`）
+#[derive(Clone, PartialEq)]
+struct Meter {
+    /// 親のブロックの時刻（UNIX のミリ秒）
+    parent: f64,
+    /// 次の当たりの時刻。1時間先までになければ `None`
+    hit: Option<f64>,
+    /// 次の当たりで、ほかのだれもそれより先に当たらない見込み
+    next: Option<f64>,
+    per_block: f64,
+    block_seconds: f64,
+    importance: f64,
+    active: f64,
+}
+
 /// 届いた委任1件
 #[derive(Clone, PartialEq)]
 struct Delegation {
@@ -56,6 +71,16 @@ fn bytes(value: f64) -> String {
         value if value < 1024.0 * 1024.0 => format!("{:.1} KiB", value / 1024.0),
         value if value < 1024.0 * 1024.0 * 1024.0 => format!("{:.1} MiB", value / 1024.0 / 1024.0),
         value => format!("{:.2} GiB", value / 1024.0 / 1024.0 / 1024.0),
+    }
+}
+
+/// 割合を、小さいものも読める桁で
+fn percent(value: f64) -> String {
+    let value = value * 100.0;
+    match value {
+        value if value >= 10.0 => format!("{value:.0}%"),
+        value if value >= 0.1 => format!("{value:.1}%"),
+        value => format!("{value:.4}%"),
     }
 }
 
@@ -109,6 +134,17 @@ fn App() -> impl IntoView {
     let plan = RwSignal::new(None::<String>);
     let node_key = RwSignal::new(String::new());
     let delegations = RwSignal::new(Vec::<Delegation>::new());
+    let meter = RwSignal::new(None::<Meter>);
+    // メーターを動かす時計。見込みがあるあいだだけ、画面の中で進める
+    let clock = RwSignal::new(js_sys::Date::now());
+    set_interval(
+        move || {
+            if meter.get_untracked().is_some() {
+                clock.set(js_sys::Date::now());
+            }
+        },
+        std::time::Duration::from_millis(250),
+    );
     let harvested = RwSignal::new(Vec::<String>::new());
 
     let worker = match Worker::new(WORKER_SCRIPT) {
@@ -167,6 +203,15 @@ fn App() -> impl IntoView {
                     });
                 }),
                 "plan" => plan.set(Some(text(1))),
+                "meter" => meter.set(message.get(1).as_f64().map(|parent| Meter {
+                    parent,
+                    hit: message.get(2).as_f64(),
+                    next: message.get(3).as_f64(),
+                    per_block: number(4),
+                    block_seconds: number(5),
+                    importance: number(6),
+                    active: number(7),
+                })),
                 "harvested" => harvested.update(|harvested| {
                     harvested.push(text(1));
                     if harvested.len() > WARNINGS {
@@ -221,6 +266,7 @@ fn App() -> impl IntoView {
         plan.set(None);
         harvested.set(Vec::new());
         delegations.set(Vec::new());
+        meter.set(None);
         let harvest = if harvesting.get_untracked() {
             let targets = submit.get_untracked();
             if let Some(storage) = storage() {
@@ -414,6 +460,44 @@ fn App() -> impl IntoView {
                             <dt>"ハーベスト"</dt>
                             <dd>{plan}</dd>
                         </dl>
+                    })}
+                    {move || meter.get().map(|meter| {
+                        let now = clock.get();
+                        let every = meter.block_seconds / meter.per_block.max(f64::MIN_POSITIVE);
+                        view! {
+                            <div class="meter">
+                                {meter.hit.map(|hit| {
+                                    let span = (hit - meter.parent).max(1.0);
+                                    let left = ((hit - now) / 1000.0).max(0.0);
+                                    view! {
+                                        <p class="meter-label">
+                                            {if left > 0.0 {
+                                                format!("当たりまで あと {left:.0} 秒（親から {:.0} 秒）", span / 1000.0)
+                                            } else {
+                                                format!("当たりの時刻です（親から {:.0} 秒）", span / 1000.0)
+                                            }}
+                                        </p>
+                                        <progress max=span.to_string() value=(now - meter.parent).clamp(0.0, span).to_string()></progress>
+                                        <p class="hint">
+                                            {format!(
+                                                "この当たりで作れる見込み: {}（ほかのだれもこれより先に当たらない見込み）",
+                                                percent(meter.next.unwrap_or(0.0))
+                                            )}
+                                        </p>
+                                    }
+                                })}
+                                <dl class="facts">
+                                    <dt>"1 ブロックあたり"</dt>
+                                    <dd>{format!("{}、平均でおよそ {} に 1 回", percent(meter.per_block), duration(every))}</dd>
+                                    <dt>"ハーベストしている量"</dt>
+                                    <dd>{format!(
+                                        "見積もり {} XYM 相当のうち、自分 {} XYM 相当",
+                                        group(meter.active),
+                                        group(meter.importance)
+                                    )}</dd>
+                                </dl>
+                            </div>
+                        }
                     })}
                     <Show when=move || !delegations.get().is_empty()>
                         <ul class="notes">

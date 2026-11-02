@@ -488,6 +488,26 @@ pub enum HarvestPlan {
 struct Planned {
     parent: Hash256,
     slot: Option<(u64, usize)>,
+    /// 当たりを求められた鍵の Importance の合計
+    importance: u64,
+}
+
+/// [`Chain::harvest_outlook`] が返す、ハーベストの見込み。画面に見せるための見積もりで、合意には使わない
+/// （[`crate::outlook`]）
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct HarvestOutlook {
+    /// 今の先端（作るブロックの親）の時刻（UTC）。当たりまでのメーターの始まり
+    pub parent: SystemTime,
+    /// 自分の鍵の Importance の合計
+    pub importance: u64,
+    /// 直近のブロックから見積もった、ハーベストしている Importance の合計（自分を含む）
+    pub active_importance: f64,
+    /// 1つのブロックを自分が作る見込み
+    pub per_block: f64,
+    /// 直近のブロックの平均の間隔（秒）
+    pub block_seconds: f64,
+    /// 次の当たりで、ほかのだれもそれより先に当たらない見込み。当たりがなければ `None`
+    pub next: Option<f64>,
 }
 
 /// 作るブロックの親まわりの写し。[`produce::Parent`] はこれを借りる
@@ -810,6 +830,33 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
             },
             _ => HarvestPlan::NotPlanned,
         }
+    }
+
+    /// 今の先端の上で求めた、ハーベストの見込み。当たりを求めていないか、直近のブロックが足りなければ `None`
+    pub fn harvest_outlook(&self) -> Option<HarvestOutlook> {
+        let planned = self
+            .planned
+            .as_ref()
+            .filter(|planned| planned.parent == self.tip.hash && planned.importance > 0)?;
+        let recent: Vec<BlockStatistic> = self.statistics.iter().copied().collect();
+        let estimated = crate::outlook::active_importance(&recent, self.parameters)?;
+        let importance = planned.importance;
+        // 直近のブロックを自分も作っていたなら、見積もりに自分も入っている。入っていなくても、自分の分より小さくはしない
+        let active = estimated.max(importance as f64);
+        let others = active - importance as f64;
+        let next = planned.slot.map(|(timestamp, _)| {
+            let elapsed = timestamp.saturating_sub(self.parent.timestamp) / 1000;
+            let difficulty = difficulty(&recent, self.parameters);
+            crate::outlook::none_before(elapsed, difficulty, others, self.parameters)
+        });
+        Some(HarvestOutlook {
+            parent: self.parameters.epoch() + Duration::from_millis(self.parent.timestamp),
+            importance,
+            active_importance: active,
+            per_block: importance as f64 / active,
+            block_seconds: crate::outlook::average_block_seconds(&recent)?,
+            next,
+        })
     }
 
     /// 接続してきたピアに答えるときの様子

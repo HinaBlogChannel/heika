@@ -268,6 +268,13 @@ impl U256 {
         out
     }
 
+    /// 近い f64。見積もりを見せるときだけに使い、当たりの判定には使わない
+    pub fn to_f64(self) -> f64 {
+        self.limbs.iter().fold(0.0, |value, &limb| {
+            value * 18_446_744_073_709_551_616.0 + limb as f64
+        })
+    }
+
     /// `value` より大きいか
     pub fn greater_than_u64(self, value: u64) -> bool {
         self > Self::from(value)
@@ -489,6 +496,14 @@ mod tests {
                 "{value}: {actual} と {expected}"
             );
         }
+    }
+
+    #[test]
+    fn converts_to_f64() {
+        assert_eq!(U256::from(12_345).to_f64(), 12_345.0);
+        let big = U256::from(u64::MAX).shl(48);
+        let expected = u64::MAX as f64 * 2f64.powi(48);
+        assert!((big.to_f64() - expected).abs() / expected < 1e-12);
     }
 
     #[test]

@@ -24,6 +24,7 @@
 //! - `/namespaces`、`POST /namespaces/names`、`POST /namespaces/account/names`、`POST /namespaces/mosaic/names`:
 //!   ネームスペースの検索と、その名前。これもノードが検索表を作っているときだけ
 //! - `/blocks/{height}`: ブロックのヘッダーと、その高さの9本の根
+//! - `/finalization/proof/epoch/{epoch}`: そのエポックでしまった最後のファイナライズの証明
 //! - `/network/fees/transaction`: 直近のブロックの手数料の倍率と、ノードが受け付ける下限
 //! - `/network/properties`: ネットワークの設定（catapult の `config-network.properties`）
 //! - `/transactions/confirmed`: 承認されたトランザクションを、関わったアドレスと高さで検索する。ノードが索引を
@@ -58,6 +59,7 @@ use heika_core::key::PublicKey;
 use heika_core::network::NetworkIdentifier;
 use heika_core::patricia::{self, SubCache};
 use heika_rest::block::BlockInfo;
+use heika_rest::finalization::FinalizationProof;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
     AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson,
@@ -208,6 +210,8 @@ pub trait Reader: Send + Sync {
     ) -> Result<MerkleStateInfo, StateError>;
     /// `height` のブロック。なければ（まだないか、刈り込んだか、その高さの根がもうなければ）`None`
     fn block(&self, height: u64) -> Result<Option<BlockInfo>, String>;
+    /// エポック `epoch` でしまった最後のファイナライズの証明（ノードが送り合うバイナリの形）。なければ `None`
+    fn finalization_proof(&self, epoch: u32) -> Result<Option<Vec<u8>>, String>;
     /// トランザクションの行方。知らなければ `None`
     fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String>;
     /// 承認されたトランザクションを `filter` で絞り、`page` の分を返す。`after` があれば、並び（高さとブロックの中の
@@ -1452,6 +1456,31 @@ async fn block(State(api): State<Api>, Path(height): Path<String>) -> Response {
     found(&height, api.node.reader.block(number))
 }
 
+async fn finalization_proof(State(api): State<Api>, Path(epoch): Path<String>) -> Response {
+    // catapult の REST と同じく、符号のない10進の数だけを受け付ける
+    let Some(number) = epoch
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| epoch.parse::<u32>().ok())
+        .flatten()
+    else {
+        return invalid("epoch has an invalid format".to_owned());
+    };
+    let proof = api
+        .node
+        .reader
+        .finalization_proof(number)
+        .and_then(|proof| {
+            proof
+                .map(|bytes| {
+                    FinalizationProof::from_bytes(&bytes)
+                        .ok_or_else(|| format!("エポック {number} の証明が読めません"))
+                })
+                .transpose()
+        });
+    found(&epoch, proof)
+}
+
 /// トランザクションのハッシュや、メタデータの1件を指すハッシュ。16進
 fn hash256(hash: &str) -> Option<Hash256> {
     if hash.len() != 64 {
@@ -2058,6 +2087,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/metadata/{hash}", get(metadata))
         .route("/metadata/{hash}/merkle", get(metadata_merkle))
         .route("/blocks/{height}", get(block))
+        .route("/finalization/proof/epoch/{epoch}", get(finalization_proof))
         .route("/network/fees/transaction", get(transaction_fees))
         .route("/transactionStatus/{hash}", get(transaction_status))
         .route("/transactions/confirmed", get(search_confirmed))
@@ -2613,6 +2643,24 @@ mod tests {
                 }))
                 .unwrap(),
             ))
+        }
+
+        fn finalization_proof(&self, epoch: u32) -> Result<Option<Vec<u8>>, String> {
+            // エポック 3 は署名のない証明、4 は壊れたもの
+            let proof = || {
+                serde_json::from_value::<FinalizationProof>(serde_json::json!({
+                    "version": 1, "finalizationEpoch": 3, "finalizationPoint": 2, "height": "120",
+                    "hash": "AB".repeat(32), "messageGroups": [],
+                }))
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+            };
+            Ok(match epoch {
+                3 => Some(proof()),
+                4 => Some(vec![1, 2, 3]),
+                _ => None,
+            })
         }
 
         fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String> {
@@ -3528,6 +3576,31 @@ mod tests {
         );
 
         assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+
+        // 証明は、しまったバイナリを catapult の REST と同じ形にして返す
+        let (status, body) = get_status("/finalization/proof/epoch/3").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (
+                &body["finalizationEpoch"],
+                &body["finalizationPoint"],
+                &body["height"]
+            ),
+            (&3.into(), &2.into(), &"120".into())
+        );
+        assert_eq!(body["messageGroups"], serde_json::json!([]));
+        assert_eq!(
+            get_status("/finalization/proof/epoch/5").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_status("/finalization/proof/epoch/4").await.0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            get_status("/finalization/proof/epoch/-1").await.0,
+            StatusCode::CONFLICT
+        );
 
         // ブロックの一覧は高さの順で、offset の高さの次から。持っていない高さは飛ばす
         let heights = |body: &serde_json::Value| -> Vec<String> {

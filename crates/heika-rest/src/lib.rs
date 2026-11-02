@@ -10,6 +10,7 @@ use std::fmt;
 
 pub mod balance;
 pub mod block;
+pub mod finalization;
 pub mod merkle;
 pub mod node;
 pub mod send;

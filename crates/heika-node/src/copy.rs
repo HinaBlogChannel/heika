@@ -59,7 +59,7 @@ pub fn copy_pruned(manifest: &Manifest, directory: &Path) -> Result<(), NodeErro
         statements: prune.blocks.map(|(through, _)| through),
         blocks: prune.blocks,
     });
-    db.copy_to(&target, bounds, |table, rows| {
+    db.copy_to(&target, bounds, spec.storage.searches(), |table, rows| {
         println!("{table}: {rows} 行");
         true
     })?;

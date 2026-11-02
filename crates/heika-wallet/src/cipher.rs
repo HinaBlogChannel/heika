@@ -7,6 +7,7 @@ use std::fmt;
 
 use aes_gcm::{AeadInOut, Aes256Gcm, KeyInit};
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+use curve25519_dalek::montgomery::MontgomeryPoint;
 use heika_core::key::{PrivateKey, PublicKey};
 use hmac::digest::FixedOutput;
 use hmac::{Hmac, Mac};
@@ -48,6 +49,43 @@ impl SharedKey {
 impl fmt::Debug for SharedKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SharedKey(..)")
+    }
+}
+
+/// 秘密鍵を、X25519 の秘密鍵にする。[`SharedKey::derive`] が掛けるスカラー（SHA-512 の前半をクランプしたもの）で、
+/// これで X25519 をすると、相手の点に同じスカラーを掛けたことになる。
+///
+/// 鍵を読み出せない形でしまえる仕組み（Web Crypto の X25519 など）に渡し、元の秘密鍵は捨てるときに使う
+pub fn x25519_private_key(private_key: &PrivateKey) -> Zeroizing<[u8; 32]> {
+    let mut scalar = Zeroizing::new([0; 32]);
+    scalar.copy_from_slice(&Sha512::digest(private_key.as_bytes())[..32]);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+    scalar
+}
+
+/// 相手の公開鍵を、X25519 の公開鍵（Montgomery の u）にする。[`SharedKey::derive`] と同じく、使えない点は断る
+pub fn x25519_public_key(public_key: &PublicKey) -> Result<[u8; 32], InvalidPublicKey> {
+    Ok(decode(&public_key.0)
+        .ok_or(InvalidPublicKey)?
+        .to_montgomery()
+        .to_bytes())
+}
+
+impl SharedKey {
+    /// X25519 の結果（共有した点の u）から、[`SharedKey::derive`] と同じ鍵の候補を2つ作る。
+    ///
+    /// catapult は共有した点を Edwards の形（y と x の符号）で圧縮して使うが、X25519 の結果には x の符号がない。
+    /// 符号の両方を候補にし、どちらが合うかは AES-GCM の認証タグで決める（[`open_x25519`]）
+    pub fn candidates_from_x25519(shared: &[u8; 32]) -> Option<[Self; 2]> {
+        let point = MontgomeryPoint(*shared);
+        let candidate = |sign| {
+            point
+                .to_edwards(sign)
+                .map(|point| Self(hkdf(Zeroizing::new(point.compress()).as_bytes())))
+        };
+        Some([candidate(0)?, candidate(1)?])
     }
 }
 
@@ -108,6 +146,28 @@ pub fn open(private_key: &PrivateKey, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>
     let key = SharedKey::derive(private_key, &PublicKey(*ephemeral_public_key))
         .map_err(|_| DecryptError::InvalidPublicKey)?;
     decrypt(&key, encrypted)
+}
+
+/// `seal` したものの先頭の、使い捨ての公開鍵
+pub fn sealed_ephemeral_key(sealed: &[u8]) -> Result<PublicKey, DecryptError> {
+    sealed
+        .first_chunk::<32>()
+        .map(|key| PublicKey(*key))
+        .ok_or(DecryptError::TooShort)
+}
+
+/// `seal` したものを、受け取る側の秘密鍵の代わりに、X25519 の結果で復号する。`shared` は、受け取る側の
+/// [`x25519_private_key`] と、使い捨ての公開鍵（[`sealed_ephemeral_key`]）の [`x25519_public_key`] の X25519
+pub fn open_x25519(shared: &[u8; 32], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, DecryptError> {
+    let (_, encrypted) = sealed
+        .split_first_chunk::<32>()
+        .ok_or(DecryptError::TooShort)?;
+    let candidates =
+        SharedKey::candidates_from_x25519(shared).ok_or(DecryptError::InvalidPublicKey)?;
+    candidates
+        .iter()
+        .find_map(|key| decrypt(key, encrypted).ok())
+        .ok_or(DecryptError::Failed)
 }
 
 fn cipher(key: &SharedKey) -> Aes256Gcm {
@@ -197,6 +257,49 @@ mod tests {
         let private_key: PrivateKey = text.parse().unwrap();
         let public_key = PublicKey::from_private_key(&private_key);
         (private_key, public_key)
+    }
+
+    /// X25519 をするもの（Web Crypto の代わり）
+    fn x25519(private_key: &[u8; 32], public_key: &[u8; 32]) -> [u8; 32] {
+        MontgomeryPoint(*public_key)
+            .mul_clamped(*private_key)
+            .to_bytes()
+    }
+
+    #[test]
+    fn opens_with_the_result_of_x25519() {
+        let (bob, bob_public) = key(BOB);
+        // 使い捨ての鍵を替えて、x の符号が両方になるようにする
+        for byte in 0..8u8 {
+            let randomness = [byte; 32 + IV_SIZE];
+            let sealed = seal(&mut Replay(&randomness), &bob_public, b"hello").unwrap();
+            let ephemeral = sealed_ephemeral_key(&sealed).unwrap();
+            let shared = x25519(
+                &x25519_private_key(&bob),
+                &x25519_public_key(&ephemeral).unwrap(),
+            );
+            assert_eq!(&*open_x25519(&shared, &sealed).unwrap(), b"hello");
+            // 別の鍵の X25519 では開けない
+            let (alice, _) = key(ALICE);
+            let wrong = x25519(
+                &x25519_private_key(&alice),
+                &x25519_public_key(&ephemeral).unwrap(),
+            );
+            assert_eq!(
+                open_x25519(&wrong, &sealed).unwrap_err(),
+                DecryptError::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn the_x25519_public_key_belongs_to_the_x25519_private_key() {
+        let (bob, bob_public) = key(BOB);
+        let base = curve25519_dalek::constants::X25519_BASEPOINT.to_bytes();
+        assert_eq!(
+            x25519(&x25519_private_key(&bob), &base),
+            x25519_public_key(&bob_public).unwrap()
+        );
     }
 
     #[test]

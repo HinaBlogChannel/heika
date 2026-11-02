@@ -27,9 +27,12 @@ heika-core = { path = "../../crates/heika-core", default-features = false, featu
 heika-block = { path = "../../crates/heika-block" }
 heika-chain = { path = "../../crates/heika-chain" }
 heika-packet = { path = "../../crates/heika-packet" }
+heika-harvesting = { path = "../../crates/heika-harvesting" }
 heika-rest = { path = "../../crates/heika-rest" }
 heika-state-transition = { path = "../../crates/heika-state-transition" }
 heika-store-redb = { path = "../../crates/heika-store-redb" }
+heika-wallet = { path = "../../crates/heika-wallet", default-features = false }
+zeroize = "1.9.1"
 serde_json = "1.0.151"
 js-sys = "0.3.106"
 leptos = { version = "0.8.22", features = ["csr"] }
@@ -37,6 +40,17 @@ wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = [
   "Blob",
+  "Crypto",
+  "CryptoKey",
+  "DomException",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "SubtleCrypto",
   "File",
   "FileList",
   "HtmlInputElement",

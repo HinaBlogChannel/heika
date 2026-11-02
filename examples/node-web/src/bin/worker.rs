@@ -5,13 +5,14 @@
 //!
 //! 画面から受け取るもの:
 //! - `["sync", オリジンを改行で区切った文字列, ハーベスト]`: 同期を始める。ハーベストは、しないなら `null`、するなら
-//!   `[署名の鍵, VRF の鍵, ブロックを出す REST のオリジンを改行で区切った文字列]`（鍵は16進の秘密鍵）
+//!   `[署名の鍵, VRF の鍵, ブロックを出す REST のオリジンを改行で区切った文字列]`。鍵は16進の秘密鍵で、委任だけで
+//!   ハーベストするなら空にする
 //! - `["stop"]`: 今の区切りを書いてから止める
 //! - `["import", File]`: 手元のノードの DB（redb）を、そのネットワークの DB として OPFS に写す。同期していないときだけ
 //!
 //! 画面に送るもの:
 //! - `["waiting"]`: ほかのタブの Worker が DB を持っている。そのタブが閉じるまで待つ
-//! - `["ready"]`: DB を持てた。同期を始められる
+//! - `["ready", ノードの公開鍵]`: DB を持てた。同期を始められる。委任は、ノードの公開鍵あてに送ってもらう
 //! - `["status", 文]`: いまやっていること
 //! - `["progress", ネットワーク, 書いた高さ, 確定した高さ, 1 秒あたりのブロック, StateHash, ファイルのバイト数]`
 //! - `["warning", 文]`: 1つの REST が取れないか、正しくないものを返した。ほかの REST で続ける
@@ -21,6 +22,7 @@
 //!   確定した先の先端を追っている
 //! - `["plan", 文]`: ハーベストするとき、次の当たり
 //! - `["harvested", 文]`: ハーベストしてブロックを作ったか、それを REST に出した結果
+//! - `["delegations", [[要求の高さ, メインアカウントのアドレス（なければ空）, 使っているか, わけ], …]]`: 届いた委任
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -42,6 +44,7 @@ use heika_core::key::PrivateKey;
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
+use node_web::delegation::{Delegations, NodeKey};
 use node_web::rest::{self, FetchError, Network, PAGE_SIZE};
 use node_web::{OpfsFile, hold_lock, remove, rename};
 use wasm_bindgen::prelude::*;
@@ -51,6 +54,8 @@ use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 const LOCK: &str = "heika-node-web/db";
 /// redb のキャッシュの上限
 const CACHE_SIZE: usize = 64 << 20;
+/// 委任の要求を REST で探し直し、状態で確かめ直す間隔（ミリ秒）
+const DELEGATION_MS: f64 = 60_000.0;
 /// 少なくともこの間隔（ミリ秒）でコミットする。短いほど止めたときに失うものが少ないが、書く回数が増える
 const COMMIT_EVERY_MS: f64 = 5_000.0;
 /// 先端を追うあいだ、中核に Tick を入れる間隔（ミリ秒）。ノードと同じ 5 秒
@@ -75,6 +80,8 @@ struct Opened {
 
 thread_local! {
     static OPENED: RefCell<Option<Opened>> = const { RefCell::new(None) };
+    /// ノードの鍵。委任の要求を開くのに使う
+    static NODE_KEY: RefCell<Option<NodeKey>> = const { RefCell::new(None) };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -102,6 +109,21 @@ fn main() {
             post(&["error".into(), format!("{error:?}").into()]);
             return;
         }
+        // 鍵を作るのは、ロックを持ってから（2つのタブで別々に作らないように）
+        let node_key = match NodeKey::load_or_create().await {
+            Ok(key) => {
+                let public_key = key.public_key.to_string();
+                NODE_KEY.with_borrow_mut(|node_key| *node_key = Some(key));
+                public_key
+            }
+            Err(error) => {
+                post(&[
+                    "warning".into(),
+                    format!("委任は受けられません: {error}").into(),
+                ]);
+                String::new()
+            }
+        };
         let stopping = Rc::new(Cell::new(false));
         let running = Rc::new(Cell::new(false));
         let onmessage = Closure::<dyn Fn(MessageEvent)>::new(move |event: MessageEvent| {
@@ -144,7 +166,7 @@ fn main() {
         scope().set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         // Worker が終わるまで受け取り続けるので、放さない
         onmessage.forget();
-        post(&["ready".into()]);
+        post(&["ready".into(), node_key.into()]);
     });
 }
 
@@ -268,8 +290,10 @@ fn spawn_fetch(
 
 /// ハーベストに使うもの
 struct Harvest {
-    /// 署名の鍵（リモートならリモートの鍵）と VRF の鍵。メモリにだけ置く
-    keys: Arc<Vec<(PrivateKey, PrivateKey)>>,
+    /// 直接入れた、署名の鍵（リモートならリモートの鍵）と VRF の鍵。メモリにだけ置く
+    keys: Vec<(PrivateKey, PrivateKey)>,
+    /// 委任を受けるノードの鍵。作れなかったら `None`
+    node_key: Option<NodeKey>,
     /// 作ったブロックを出す heika のノードの REST
     submit: Vec<String>,
 }
@@ -281,7 +305,14 @@ fn harvest(signing: &str, vrf: &str, submit: &str) -> Result<Harvest, String> {
             .parse::<PrivateKey>()
             .map_err(|error| format!("{name}を読めません: {error}"))
     };
-    let keys = (key(signing, "署名の鍵")?, key(vrf, "VRF の鍵")?);
+    let keys = match (signing.trim().is_empty(), vrf.trim().is_empty()) {
+        (true, true) => Vec::new(),
+        _ => vec![(key(signing, "署名の鍵")?, key(vrf, "VRF の鍵")?)],
+    };
+    let node_key = NODE_KEY.with_borrow(Clone::clone);
+    if keys.is_empty() && node_key.is_none() {
+        return Err("委任を受けられないので、ハーベストするなら鍵を直接入れてください".into());
+    }
     let submit = origins(submit);
     if submit.is_empty() {
         return Err(
@@ -289,7 +320,8 @@ fn harvest(signing: &str, vrf: &str, submit: &str) -> Result<Harvest, String> {
         );
     }
     Ok(Harvest {
-        keys: Arc::new(vec![keys]),
+        keys,
+        node_key,
         submit,
     })
 }
@@ -558,9 +590,11 @@ async fn follow_tip(
         .await
         .map_err(|error| format!("先端の段階を始められません: {error}"))?;
     chain.set_keep(KEEP);
-    if let Some(harvest) = harvest {
-        chain.set_harvesters(harvest.keys.clone());
-    }
+    // ハーベストに使っている署名の鍵の公開鍵。変わったときだけ中核に渡す
+    let mut harvesting: Vec<heika_core::key::PublicKey> = Vec::new();
+    let mut delegations = Delegations::default();
+    let mut last_scan = f64::NEG_INFINITY;
+    let mut scan_turn = 0;
     let (sender, mut events) = mpsc::unbounded::<ChainEvent>();
     // ピアの番号から REST へ。外したピアの番号は使い回さないので、入れ直すときは新しい番号にする
     let mut peers: HashMap<usize, String> = HashMap::new();
@@ -648,8 +682,68 @@ async fn follow_tip(
             }
         }
         report_tip(network, &chain.tip(), network_tip, file);
+        if let Some(harvest) = harvest
+            && now() - last_scan >= DELEGATION_MS
+        {
+            last_scan = now();
+            let mut keys: Vec<(PrivateKey, PrivateKey)> = harvest
+                .keys
+                .iter()
+                .map(|(signing, vrf)| {
+                    (
+                        PrivateKey::from_bytes(signing.as_bytes()),
+                        PrivateKey::from_bytes(vrf.as_bytes()),
+                    )
+                })
+                .collect();
+            if let Some(node_key) = &harvest.node_key {
+                scan_turn += 1;
+                let origin = &usable[scan_turn % usable.len()];
+                if let Err(error) = delegations
+                    .refresh(origin, node_key, network.parameters.identifier)
+                    .await
+                {
+                    post(&[
+                        "warning".into(),
+                        format!("{origin} で委任の要求を探せません: {error}").into(),
+                    ]);
+                }
+                let (delegated, statuses) =
+                    delegations.check(db, node_key, network.parameters.identifier);
+                keys.extend(delegated);
+                post(&[
+                    "delegations".into(),
+                    statuses
+                        .iter()
+                        .map(|status| {
+                            [
+                                JsValue::from(status.height as f64),
+                                status
+                                    .main_account
+                                    .map(|address| address.to_string())
+                                    .unwrap_or_default()
+                                    .into(),
+                                status.state.is_ok().into(),
+                                status.state.clone().err().unwrap_or_default().into(),
+                            ]
+                            .into_iter()
+                            .collect::<Array>()
+                        })
+                        .collect::<Array>()
+                        .into(),
+                ]);
+            }
+            let public_keys: Vec<_> = keys
+                .iter()
+                .map(|(signing, _)| heika_core::key::PublicKey::from_private_key(signing))
+                .collect();
+            if public_keys != harvesting {
+                harvesting = public_keys;
+                chain.set_harvesters(Arc::new(keys));
+            }
+        }
         if harvest.is_some() {
-            let plan = plan_text(chain.harvest_plan());
+            let plan = plan_text(chain.harvest_plan(), !harvesting.is_empty());
             if plan != shown_plan {
                 post(&["plan".into(), plan.as_str().into()]);
                 shown_plan = plan;
@@ -751,7 +845,10 @@ fn answer(
 }
 
 /// 次の当たりを、画面に出す文にする
-fn plan_text(plan: HarvestPlan) -> String {
+fn plan_text(plan: HarvestPlan, has_keys: bool) -> String {
+    if !has_keys {
+        return "使える鍵がまだありません（委任が届くのを待っています）".into();
+    }
     match plan {
         HarvestPlan::NotPlanned => {
             "当たりを求めています（REST の先端に追いつくのを待っています）".into()

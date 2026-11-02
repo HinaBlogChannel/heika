@@ -75,6 +75,33 @@ pub fn decode(node_private_key: &PrivateKey, message: &[u8]) -> Result<Harvester
     })
 }
 
+/// 要求の使い捨ての公開鍵を、X25519 の公開鍵にしたもの。ノードの鍵を読み出せない形でしまっているときは、
+/// これとノードの鍵で X25519 をして、[`decode_x25519`] に渡す
+pub fn x25519_ephemeral_key(message: &[u8]) -> Result<[u8; 32], DecodeError> {
+    if !is_harvest_request(message) {
+        return Err(DecodeError::NotHarvestRequest);
+    }
+    let ephemeral =
+        cipher::sealed_ephemeral_key(&message[MARKER.len()..]).map_err(DecodeError::Decrypt)?;
+    cipher::x25519_public_key(&ephemeral)
+        .map_err(|_| DecodeError::Decrypt(DecryptError::InvalidPublicKey))
+}
+
+/// ノードの秘密鍵の代わりに、X25519 の結果（[`x25519_ephemeral_key`] とノードの
+/// [`cipher::x25519_private_key`]）で要求を復号する
+pub fn decode_x25519(shared: &[u8; 32], message: &[u8]) -> Result<HarvesterKeys, DecodeError> {
+    if !is_harvest_request(message) {
+        return Err(DecodeError::NotHarvestRequest);
+    }
+    let plaintext =
+        cipher::open_x25519(shared, &message[MARKER.len()..]).map_err(DecodeError::Decrypt)?;
+    let (signing, vrf) = plaintext.split_at(32);
+    Ok(HarvesterKeys {
+        signing: PrivateKey::from_bytes(signing.try_into().expect("64 bytes are encrypted")),
+        vrf: PrivateKey::from_bytes(vrf.try_into().expect("64 bytes are encrypted")),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// 目印で始まっていないか、長さが合わない
@@ -137,6 +164,19 @@ mod tests {
     #[test]
     fn the_node_decodes_the_keys() {
         let decoded = decode(&node().0, &message()).unwrap();
+        assert_eq!(decoded.signing.as_bytes(), keys().signing.as_bytes());
+        assert_eq!(decoded.vrf.as_bytes(), keys().vrf.as_bytes());
+    }
+
+    #[test]
+    fn the_node_decodes_the_keys_with_x25519() {
+        let message = message();
+        let ephemeral = x25519_ephemeral_key(&message).unwrap();
+        let private_key = cipher::x25519_private_key(&node().0);
+        let shared = curve25519_dalek::montgomery::MontgomeryPoint(ephemeral)
+            .mul_clamped(*private_key)
+            .to_bytes();
+        let decoded = decode_x25519(&shared, &message).unwrap();
         assert_eq!(decoded.signing.as_bytes(), keys().signing.as_bytes());
         assert_eq!(decoded.vrf.as_bytes(), keys().vrf.as_bytes());
     }

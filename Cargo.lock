@@ -818,6 +818,7 @@ dependencies = [
  "heika-cert",
  "heika-chain",
  "heika-core",
+ "heika-mempool",
  "heika-peer-protocol",
  "heika-rest",
  "heika-state-transition",

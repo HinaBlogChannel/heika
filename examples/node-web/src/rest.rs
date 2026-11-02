@@ -323,3 +323,44 @@ pub async fn put_block(origin: &str, block: &[u8]) -> Result<(), FetchError> {
         format!("HTTP {status} {message}").trim_end().to_owned(),
     ))
 }
+
+/// 未承認のトランザクションを取って組み直す。アグリゲートは、平たく並んで返る中のトランザクションをまとめて入れる。
+/// 組み直せないもの（ページの境目で中のトランザクションが切れたものなど）は飛ばす。中身は確かめないので、使う側が
+/// 確かめる（[`heika_mempool::Mempool::add`] は署名と規則を確かめる）
+pub async fn fetch_unconfirmed(origin: &str, max_pages: u32) -> Result<Vec<Vec<u8>>, FetchError> {
+    let mut found: Vec<TransactionInfo> = Vec::new();
+    for number in 1..=max_pages {
+        let page = get_json(
+            origin,
+            &format!(
+                "/transactions/unconfirmed?embedded=true&pageSize={PAGE_SIZE}&pageNumber={number}"
+            ),
+        )
+        .await?;
+        let data: Vec<TransactionInfo> =
+            serde_json::from_value(page["data"].clone()).map_err(|error| {
+                FetchError::Malformed(format!("/transactions/unconfirmed: {error}"))
+            })?;
+        let done = (data.len() as u64) < PAGE_SIZE;
+        found.extend(data);
+        if done {
+            break;
+        }
+    }
+    Ok(found
+        .iter()
+        .filter(|entry| entry.meta.aggregate_hash.is_none())
+        .filter_map(|entry| {
+            if matches!(entry.transaction.transaction_type, 0x4141 | 0x4241) {
+                entry
+                    .with_embedded(&found)
+                    .ok()?
+                    .transaction
+                    .to_bytes()
+                    .ok()
+            } else {
+                entry.transaction.to_bytes().ok()
+            }
+        })
+        .collect())
+}

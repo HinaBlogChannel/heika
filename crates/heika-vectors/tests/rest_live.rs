@@ -9,6 +9,8 @@
 //! - アカウントの残高を、[`verify_balance`] で最新のブロックの StateHash まで確かめられる。
 //!   まだ使われていないアドレスは、載っていないことを確かめられる（これも HEIKA_TEST_REST だけでよい）
 //! - 最近のブロックが、ハーベストしたアカウントの Importance で当たりになっている（これも HEIKA_TEST_REST だけでよい）
+//! - 未承認のトランザクションを REST の JSON から組み直すと、ハッシュが REST と合い、未承認の置き場が署名と規則を確かめて
+//!   受け付ける（これも HEIKA_TEST_REST だけでよい）
 //!
 //! つなぐノード、名乗る証明書、REST のオリジンは、リポジトリに残さないように環境変数で渡す。
 //!
@@ -732,4 +734,68 @@ fn rest_blocks_are_hits_for_their_harvesters() {
     );
     assert!(checked > 0);
     assert!(missed_with_half * 2 > checked);
+}
+
+#[test]
+#[ignore = "公開 REST を使う"]
+fn rest_unconfirmed_transactions_rebuild_and_pass_the_mempool() {
+    use heika_core::network::{NetworkIdentifier, NetworkParameters};
+    use heika_mempool::{Config, Mempool, Rejected};
+    use heika_rest::transaction::TransactionInfo;
+
+    let Some(origin) = rest_origin() else {
+        return;
+    };
+    let parameters: &'static NetworkParameters =
+        match rest(&origin, "/node/info")["networkIdentifier"].as_u64() {
+            Some(104) => &NetworkParameters::MAINNET,
+            Some(152) => &NetworkParameters::TESTNET,
+            other => panic!("知らないネットワーク {other:?}"),
+        };
+    assert!(matches!(
+        parameters.identifier,
+        NetworkIdentifier::MAINNET | NetworkIdentifier::TESTNET
+    ));
+    let height: u64 = rest(&origin, "/chain/info")["height"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let found: Vec<TransactionInfo> =
+        read_all(&pages(&origin, "/transactions/unconfirmed?embedded=true"));
+    let now = std::time::SystemTime::now()
+        .duration_since(parameters.epoch())
+        .unwrap()
+        .as_millis() as u64;
+    let mut mempool = Mempool::new(parameters, Config::default());
+    let (mut accepted, mut bonded, mut rebuilt) = (0, 0, 0);
+    for entry in found
+        .iter()
+        .filter(|entry| entry.meta.aggregate_hash.is_none())
+    {
+        let info = if matches!(entry.transaction.transaction_type, 0x4141 | 0x4241) {
+            entry.with_embedded(&found).unwrap()
+        } else {
+            entry.clone()
+        };
+        let bytes = info.transaction.to_bytes().unwrap();
+        rebuilt += 1;
+        match mempool.add(bytes, now, height + 1) {
+            Ok(hash) => {
+                assert_eq!(
+                    Some(hash.to_string()),
+                    entry.meta.hash,
+                    "ハッシュが REST と違います"
+                );
+                accepted += 1;
+            }
+            Err(Rejected::Bonded) => bonded += 1,
+            // 取るあいだに期限が過ぎたものは数えない
+            Err(Rejected::Expired) => {}
+            Err(error) => panic!("{:?} を受け付けません: {error}", entry.meta.hash),
+        }
+    }
+    eprintln!(
+        "未承認 {rebuilt} 件を組み直し、{accepted} 件を受け付けました（ボンデッド {bonded} 件）"
+    );
 }

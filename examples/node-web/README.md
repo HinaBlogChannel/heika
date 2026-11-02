@@ -51,7 +51,8 @@ heika harvesting --delegate <ノードの公開鍵> …
 - サイトのデータを消すとノードの鍵も消えるので、委任をやり直すことになります
 - 鍵を直接入れてもハーベストできます（委任と合わせて使えます）。直接入れた鍵も、メモリにだけ置きます
 - catapult の REST には、ブロックを受け取る口がありません。出す先は heika のノードにします。取る REST は、今までどおりどれでもかまいません
-- 作るのは、トランザクションを入れない空のブロックです（手数料は入りません）
+- 当たりが 1 分より近づくと、未承認のトランザクションを REST（`/transactions/unconfirmed`）から 5 秒ごとに取り、未承認の置き場（`heika_mempool::Mempool`）に入れます。置き場は、受け付けるときに署名と規則を確かめます。残高などの状態に依ることは、ブロックを作るときに確かめ、通らないものは外します。なので、REST が偽のトランザクションを返しても、作るブロックには入りません。当たりが遠いうちは取りに行かないので、REST への負荷はわずかです
+- 連署を待つアグリゲートボンデッドは、まだ入れません
 - 当たりの時刻は、ブラウザの時計で測ります。時計がずれていると、ほかのノードに受け入れられません
 - 出したブロックを足すかは、受け取ったノードのチェーンが決めます。ほかのブロックに負ければ、こちらの先端も枝の取り替えで戻ります
 
@@ -65,6 +66,7 @@ heika harvesting --delegate <ノードの公開鍵> …
 - `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします。残し方（`heika_chain::chain::Keep`）を渡すと、刈り込みながら進みます。`partial` なら、アカウントなどの大きい表を全部はメモリに持たず、ブロックごとに要る分だけを DB の書きかけから読みます
 - `heika_chain::chain::Chain::set_harvesters` と `Chain::harvest_plan`: 先端を追う中核に鍵を渡すと、当たりの時刻を求めてブロックを作り、ピアへの押し付け（`PeerCommand::Push`）として返します。この例は、それを `PUT /blocks` に出します。`harvest_plan` で次の当たりを読めます
 - `heika_wallet::harvest_request::decode_x25519`: 委任の要求を、ノードの秘密鍵の代わりに X25519 の結果で開きます。catapult は共有した点を Edwards の形（y と x の符号）で使いますが、X25519 の結果には x の符号がありません。両方を試し、AES-GCM の認証タグで合うほうを選びます。ノードの鍵を X25519 の鍵にするのは `heika_wallet::cipher::x25519_private_key`、要求の使い捨ての鍵を X25519 の公開鍵にするのは `harvest_request::x25519_ephemeral_key` です
+- `heika_mempool::Mempool` と `SharedMempool`: 未承認の置き場です。`Chain::set_pending` に渡すと、ブロックを作るときに候補をもらい、入ったもの、戻ったもの、弾かれたものを `Action::Included`、`Action::Restored`、`Action::Dropped` で知らせてきます
 - `heika_harvesting::unlocked::check` と `choose`: 開いた委任が今の状態で使えるか（catapult と同じ3つの紐づけ）を確かめ、重要度の大きい順に選びます
 - `heika_store_redb::Db::open_with_backend`: ファイルのパスの代わりに、redb の `StorageBackend` の上に DB を開きます。`StorageBackend` が求める5つは、OPFS の `FileSystemSyncAccessHandle` とそのまま対応します
 
@@ -126,4 +128,5 @@ while replay.height() < target {
 
 ## この先
 
-- 未承認のトランザクションを REST から取り、ブロックに入れる
+- 当たりまでの待ち時間を、VRF から求めたメーターで見せる
+- 連署のそろったアグリゲートボンデッドも入れる

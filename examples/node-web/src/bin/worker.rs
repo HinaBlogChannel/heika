@@ -21,6 +21,9 @@
 //! - `["tip", ネットワーク, 手元の先端の高さ, REST の言う先端の高さ, ファイルのバイト数, 先端のブロックのハッシュ]`:
 //!   確定した先の先端を追っている
 //! - `["plan", 文]`: ハーベストするとき、次の当たり
+//! - `["meter", 親の時刻, 当たりの時刻, 当たりで作れる見込み, 1ブロックあたりの見込み, 平均の間隔（秒）, 自分の Importance,
+//!   ハーベストしている Importance の見積もり]`: ハーベストの見込み。時刻は UNIX のミリ秒、Importance は XYM の単位。
+//!   当たりがなければ、当たりの時刻と見込みは `null`。見込みが出せなければ `["meter", null]`
 //! - `["harvested", 文]`: ハーベストしてブロックを作ったか、それを REST に出した結果
 //! - `["delegations", [[要求の高さ, メインアカウントのアドレス（なければ空）, 使っているか, わけ], …]]`: 届いた委任
 
@@ -35,7 +38,7 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use heika_block::Block;
 use heika_chain::chain::Keep;
-use heika_chain::chain::{Action, Chain, HarvestPlan, Notice, Outcome};
+use heika_chain::chain::{Action, Chain, HarvestOutlook, HarvestPlan, Notice, Outcome};
 use heika_chain::env::Env;
 use heika_chain::event::{ChainEvent, PeerCommand, PeerId};
 use heika_chain::store::EXECUTOR_META;
@@ -644,6 +647,7 @@ async fn follow_tip(
     // 中核は作ったブロックをピアの数だけ押し付けるので、同じものは1回だけ出す
     let mut submitted: Option<Arc<Vec<u8>>> = None;
     let mut shown_plan = String::new();
+    let mut shown_meter = None;
     loop {
         for action in chain.take_actions() {
             match action {
@@ -813,6 +817,17 @@ async fn follow_tip(
             });
         }
         if harvest.is_some() {
+            let meter = chain.harvest_outlook().map(|outlook| {
+                let hit = match chain.harvest_plan() {
+                    HarvestPlan::Hit { timestamp, .. } => Some(unix_millis(timestamp)),
+                    _ => None,
+                };
+                (outlook, hit)
+            });
+            if meter != shown_meter {
+                post(&meter_message(meter.as_ref()));
+                shown_meter = meter;
+            }
             let mut plan = plan_text(chain.harvest_plan(), !harvesting.is_empty());
             let pending = mempool.lock().len();
             if pending > 0 {
@@ -918,6 +933,32 @@ fn answer(
         };
         let _ = sender.unbounded_send(event);
     });
+}
+
+fn unix_millis(time: SystemTime) -> f64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as f64
+}
+
+/// ハーベストの見込みを、画面に送る形にする
+fn meter_message(meter: Option<&(HarvestOutlook, Option<f64>)>) -> Vec<JsValue> {
+    let Some((outlook, hit)) = meter else {
+        return vec!["meter".into(), JsValue::NULL];
+    };
+    // Importance は、XYM の最小単位（10^-6）で数える
+    let xym = |value: f64| JsValue::from(value / 1_000_000.0);
+    let optional = |value: Option<f64>| value.map_or(JsValue::NULL, JsValue::from);
+    vec![
+        "meter".into(),
+        unix_millis(outlook.parent).into(),
+        optional(*hit),
+        optional(hit.and(outlook.next)),
+        outlook.per_block.into(),
+        outlook.block_seconds.into(),
+        xym(outlook.importance as f64),
+        xym(outlook.active_importance),
+    ]
 }
 
 /// 次の当たりを、画面に出す文にする

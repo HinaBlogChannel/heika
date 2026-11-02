@@ -1,39 +1,39 @@
-//! 画面。DB を持つ Worker を立て、OPFS に残っているか、ほかのタブと取り合わないか、書き読みの速さを見せる。
+//! 画面。DB を持つ Worker を立て、REST のオリジンを渡して同期させ、進み具合を見せる。
 
 use js_sys::Array;
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker};
 
-/// trunk が Worker のバイナリから作る読み込み用のスクリプト
-const WORKER_SCRIPT: &str = "./worker_loader.js";
+/// trunk が Worker のバイナリから作る読み込み用のスクリプト。ビルドごとの印を付けて、前の版をキャッシュから読まない
+const WORKER_SCRIPT: &str = concat!("./worker_loader.js?v=", env!("NODE_WEB_BUILD"));
+/// 入れたオリジンを覚えておく localStorage のキー
+const ORIGINS_KEY: &str = "node-web/origins";
+/// 画面に残す注意の数
+const WARNINGS: usize = 5;
 
 fn main() {
     leptos::mount::mount_to_body(App);
 }
 
-/// Worker の今のようす
+/// DB を持つ Worker のようす
 #[derive(Clone, PartialEq)]
 enum Phase {
     Starting,
     Waiting,
     Ready,
-    Failed(String),
 }
 
-/// DB を開いたときの値
-#[derive(Clone, PartialEq)]
-struct Opened {
-    count: f64,
-    open_ms: f64,
-}
-
-/// 書き読みを測った結果
-#[derive(Clone, PartialEq)]
-struct Bench {
-    blocks: f64,
-    write_ms: f64,
-    read_ms: f64,
+/// 同期の進み具合
+#[derive(Clone, PartialEq, Default)]
+struct Progress {
+    network: String,
+    height: f64,
+    /// 確定した高さ。止まったあとは `None`
+    target: Option<f64>,
+    rate: f64,
+    state_hash: String,
+    size: f64,
 }
 
 /// バイト数を、読みやすい単位にする
@@ -41,23 +41,57 @@ fn bytes(value: f64) -> String {
     match value {
         value if value < 1024.0 => format!("{value:.0} B"),
         value if value < 1024.0 * 1024.0 => format!("{:.1} KiB", value / 1024.0),
-        value => format!("{:.1} MiB", value / 1024.0 / 1024.0),
+        value if value < 1024.0 * 1024.0 * 1024.0 => format!("{:.1} MiB", value / 1024.0 / 1024.0),
+        value => format!("{:.2} GiB", value / 1024.0 / 1024.0 / 1024.0),
     }
+}
+
+/// 3桁ごとに区切る
+fn group(value: f64) -> String {
+    let digits = format!("{:.0}", value.max(0.0));
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// 秒を、読みやすい単位にする
+fn duration(seconds: f64) -> String {
+    match seconds {
+        seconds if !seconds.is_finite() => "—".into(),
+        seconds if seconds < 60.0 => format!("{seconds:.0} 秒"),
+        seconds if seconds < 3600.0 => format!("{:.0} 分", seconds / 60.0),
+        seconds if seconds < 86400.0 => format!("{:.1} 時間", seconds / 3600.0),
+        seconds => format!("{:.1} 日", seconds / 86400.0),
+    }
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    window().local_storage().ok().flatten()
 }
 
 #[component]
 fn App() -> impl IntoView {
     let phase = RwSignal::new(Phase::Starting);
-    let opened = RwSignal::new(None::<Opened>);
-    let tip = RwSignal::new(0.0_f64);
-    let size = RwSignal::new(0.0_f64);
-    let bench = RwSignal::new(None::<Bench>);
-    let measuring = RwSignal::new(false);
+    let running = RwSignal::new(false);
+    let status = RwSignal::new(String::new());
+    let progress = RwSignal::new(None::<Progress>);
+    let warnings = RwSignal::new(Vec::<String>::new());
+    let failure = RwSignal::new(None::<String>);
+    let origins = RwSignal::new(
+        storage()
+            .and_then(|storage| storage.get_item(ORIGINS_KEY).ok().flatten())
+            .unwrap_or_default(),
+    );
 
     let worker = match Worker::new(WORKER_SCRIPT) {
         Ok(worker) => Some(worker),
         Err(error) => {
-            phase.set(Phase::Failed(format!("Worker を立てられません: {error:?}")));
+            failure.set(Some(format!("Worker を立てられません: {error:?}")));
             None
         }
     };
@@ -65,31 +99,32 @@ fn App() -> impl IntoView {
         let onmessage = Closure::<dyn Fn(MessageEvent)>::new(move |event: MessageEvent| {
             let message: Array = event.data().unchecked_into();
             let number = |index| message.get(index).as_f64().unwrap_or(0.0);
-            match message.get(0).as_string().as_deref() {
-                Some("waiting") => phase.set(Phase::Waiting),
-                Some("opened") => {
-                    opened.set(Some(Opened {
-                        count: number(1),
-                        open_ms: number(2),
-                    }));
-                    tip.set(number(3));
-                    size.set(number(4));
-                    phase.set(Phase::Ready);
-                }
-                Some("bench") => {
-                    bench.set(Some(Bench {
-                        blocks: number(1),
-                        write_ms: number(2),
-                        read_ms: number(3),
-                    }));
-                    tip.set(number(4));
-                    size.set(number(5));
-                    measuring.set(false);
+            let text = |index| message.get(index).as_string().unwrap_or_default();
+            match text(0).as_str() {
+                "waiting" => phase.set(Phase::Waiting),
+                "ready" => phase.set(Phase::Ready),
+                "status" => status.set(text(1)),
+                "progress" => progress.set(Some(Progress {
+                    network: text(1),
+                    height: number(2),
+                    target: message.get(3).as_f64(),
+                    rate: number(4),
+                    state_hash: text(5),
+                    size: number(6),
+                })),
+                "warning" => warnings.update(|warnings| {
+                    warnings.push(text(1));
+                    if warnings.len() > WARNINGS {
+                        warnings.remove(0);
+                    }
+                }),
+                "stopped" => {
+                    running.set(false);
+                    status.set("止めました".into());
                 }
                 _ => {
-                    measuring.set(false);
-                    let reason = message.get(1).as_string().unwrap_or_default();
-                    phase.set(Phase::Failed(reason));
+                    running.set(false);
+                    failure.set(Some(text(1)));
                 }
             }
         });
@@ -98,76 +133,127 @@ fn App() -> impl IntoView {
         onmessage.forget();
     }
     let worker = StoredValue::new_local(worker);
-
-    let measure = move |_| {
-        measuring.set(true);
+    let send = move |parts: &[JsValue]| {
         worker.with_value(|worker| {
             if let Some(worker) = worker {
-                let _ = worker.post_message(&"bench".into());
+                let _ = worker.post_message(&parts.iter().collect::<Array>());
             }
         });
+    };
+
+    let start = move |_| {
+        let text = origins.get_untracked();
+        if let Some(storage) = storage() {
+            let _ = storage.set_item(ORIGINS_KEY, &text);
+        }
+        failure.set(None);
+        warnings.set(Vec::new());
+        running.set(true);
+        send(&["sync".into(), text.into()]);
+    };
+    let stop = move |_| {
+        status.set("今の区切りを書いてから止めます…".into());
+        send(&["stop".into()]);
     };
 
     view! {
         <main class="screen">
             <h1>"heika"</h1>
-            <p class="lead">"ブラウザの中に、ノードの DB を置く"</p>
+            <p class="lead">"ブラウザの中で、チェーンを確かめながら同期する"</p>
             <p class="hint">
-                "OPFS（ブラウザの中の、このサイトだけのファイル）に redb を置き、Web Worker から同期で読み書きします。"
-                "DB を持つ Worker は、Web Locks でこのサイトに1つだけにしています。"
+                "公開されている REST からブロックを取り、Nemesis から順に、署名、難易度、VRF、状態のハッシュまで確かめて実行します。"
+                "REST の答えは信じないので、どの REST から取っても、間違ったものは弾かれます。"
+                "DB はブラウザの中（OPFS）に置き、閉じても続きから始めます。"
             </p>
 
-            <section class="glass panel">
-                {move || match phase.get() {
-                    Phase::Starting => view! { <p class="state">"DB を開いています…"</p> }.into_any(),
-                    Phase::Waiting => view! {
-                        <p class="state">"ほかのタブがこの DB を使っています"</p>
-                        <p class="hint">"そのタブを閉じると、ここが引き継いで開きます。"</p>
-                    }.into_any(),
-                    Phase::Failed(reason) => view! {
-                        <p class="state failed">"開けませんでした"</p>
-                        <p class="hint path">{reason}</p>
-                    }.into_any(),
-                    Phase::Ready => view! {
-                        <p class="state ok">"開きました"</p>
-                        <dl class="facts">
-                            <dt>"開いた回数"</dt>
-                            <dd>{move || opened.get().map(|opened| format!("{:.0} 回目", opened.count))}</dd>
-                            <dt>"開くのにかかった時間"</dt>
-                            <dd>{move || opened.get().map(|opened| format!("{:.1} ms", opened.open_ms))}</dd>
-                            <dt>"ブロックの高さ"</dt>
-                            <dd>{move || format!("{:.0}", tip.get())}</dd>
-                            <dt>"ファイルの大きさ"</dt>
-                            <dd>{move || bytes(size.get())}</dd>
-                        </dl>
-                        <p class="hint">"再読み込みして回数が増えていれば、DB はブラウザに残っています。"</p>
-                    }.into_any(),
-                }}
-            </section>
+            {move || match phase.get() {
+                Phase::Starting => view! { <p class="state">"DB を用意しています…"</p> }.into_any(),
+                Phase::Waiting => view! {
+                    <section class="glass panel">
+                        <p class="state">"ほかのタブが同期しています"</p>
+                        <p class="hint">"そのタブを閉じると、ここが引き継ぎます。"</p>
+                    </section>
+                }.into_any(),
+                Phase::Ready => view! {
+                    <section class="glass panel">
+                        <label class="field">
+                            "REST のオリジン（1 行に 1 つ。取る区切りごとに順に使います）"
+                            <textarea
+                                rows="3"
+                                spellcheck="false"
+                                placeholder="https://example.com:3001"
+                                prop:value=move || origins.get()
+                                on:input=move |event| origins.set(event_target_value(&event))
+                                disabled=move || running.get()
+                            ></textarea>
+                        </label>
+                        <div class="row">
+                            <Show
+                                when=move || running.get()
+                                fallback=move || view! { <button class="primary" on:click=start>"同期する"</button> }
+                            >
+                                <button on:click=stop>"止める"</button>
+                            </Show>
+                        </div>
+                    </section>
+                }.into_any(),
+            }}
 
-            <Show when=move || phase.get() == Phase::Ready>
+            <Show when=move || progress.get().is_some() || running.get() || failure.get().is_some()>
                 <section class="glass panel">
-                    <p class="state">"書き読みの速さ"</p>
-                    <p class="hint">"4 KiB のバイト列を、ブロックの代わりに 1,000 個書いて、全部読み戻します。"</p>
-                    {move || bench.get().map(|bench| view! {
-                        <dl class="facts">
-                            <dt>"書く（1 回のコミット）"</dt>
-                            <dd>{format!("{:.0} ms（1 個あたり {:.2} ms）", bench.write_ms, bench.write_ms / bench.blocks)}</dd>
-                            <dt>"読む"</dt>
-                            <dd>{format!("{:.0} ms（1 個あたり {:.3} ms）", bench.read_ms, bench.read_ms / bench.blocks)}</dd>
-                        </dl>
+                    <p class="state">{move || status.get()}</p>
+                    {move || progress.get().map(|progress| {
+                        let remaining = progress.target.map(|target| (target - progress.height).max(0.0));
+                        view! {
+                            <dl class="facts">
+                                <dt>"ネットワーク"</dt>
+                                <dd>{progress.network.clone()}</dd>
+                                <dt>"確かめて書いた高さ"</dt>
+                                <dd>{match progress.target {
+                                    Some(target) => format!("{} / {}", group(progress.height), group(target)),
+                                    None => group(progress.height),
+                                }}</dd>
+                                <dt>"速さ"</dt>
+                                <dd>{format!("{:.0} ブロック/秒", progress.rate)}</dd>
+                                <dt>"残り"</dt>
+                                <dd>{match remaining {
+                                    Some(0.0) => "追いつきました".to_owned(),
+                                    Some(blocks) if progress.rate > 0.0 => format!("{} ブロック、およそ {}", group(blocks), duration(blocks / progress.rate)),
+                                    Some(blocks) => format!("{} ブロック", group(blocks)),
+                                    None => "—".to_owned(),
+                                }}</dd>
+                                <dt>"StateHash"</dt>
+                                <dd class="hash">
+                                    <span class="verified">"確かめた"</span>
+                                    " "
+                                    {progress.state_hash.clone()}
+                                </dd>
+                                <dt>"DB の大きさ"</dt>
+                                <dd>{bytes(progress.size)}</dd>
+                            </dl>
+                            {progress.target.map(|target| view! {
+                                <progress max=target.to_string() value=progress.height.to_string()></progress>
+                            })}
+                        }
                     })}
-                    <div class="row">
-                        <button class="primary" on:click=measure disabled=move || measuring.get()>
-                            {move || if measuring.get() { "測っています…" } else { "測る" }}
-                        </button>
-                    </div>
+                    {move || failure.get().map(|reason| view! {
+                        <p class="state failed">"止まりました"</p>
+                        <p class="hint path">{reason}</p>
+                    })}
+                    <Show when=move || !warnings.get().is_empty()>
+                        <ul class="notes warnings">
+                            <For each=move || warnings.get() key=|warning| warning.clone() let:warning>
+                                <li class="path">{warning}</li>
+                            </For>
+                        </ul>
+                    </Show>
                 </section>
             </Show>
 
             <ul class="notes">
+                <li>"同期するのは、確定した高さまでです。確定した先は巻き戻ることがあるので、まだ取りません。"</li>
                 <li>"別のタブでこのページを開くと、こちらを閉じるまで待ちます。"</li>
-                <li>"データはこのブラウザのこのサイトの中だけにあり、サイトのデータを消すと消えます。"</li>
+                <li>"DB はこのブラウザのこのサイトの中だけにあり、サイトのデータを消すと消えます。"</li>
             </ul>
         </main>
     }

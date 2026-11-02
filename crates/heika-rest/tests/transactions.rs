@@ -318,3 +318,65 @@ fn transaction_positions_round_trip_and_sort_like_the_chain() {
     assert_eq!(parse_transaction_position("00000059EB8F0000000C000"), None);
     assert_eq!(parse_transaction_position("00000059EB8F0000000C000G"), None);
 }
+
+mod common;
+
+/// 外側とアグリゲートの中が平たく並んだ検索の答えから、ブロック全体を組み直す
+#[test]
+fn assembles_a_whole_block_from_flattened_search_results() {
+    use heika_block::Block;
+    use heika_core::hash::Hash256;
+    use heika_rest::block::BlockInfo;
+
+    let transaction = aggregate();
+    let bytes = transaction.to_bytes();
+    let json = json(&transaction);
+    let hash = transaction.hash(&SEED).to_string();
+    let mut second = without_embedded(&json);
+    second["meta"]["index"] = json!(1);
+    let mut elsewhere = without_embedded(&json);
+    elsewhere["meta"]["height"] = json!("4999999");
+    // 検索の順は ID の順で、ブロックの中の順とは限らない
+    let found: Vec<TransactionInfo> = [
+        flattened(&json, &hash),
+        second,
+        without_embedded(&json),
+        elsewhere,
+    ]
+    .iter()
+    .map(read)
+    .collect();
+
+    let block = |size: usize, count: u32| -> BlockInfo {
+        let mut block =
+            common::block_json_with(5_000_000, &[Hash256([0; 32]); 9], &Hash256([0; 32]));
+        block["meta"]["transactionsCount"] = json!(count);
+        block["block"]["size"] = json!(size);
+        serde_json::from_value(block).unwrap()
+    };
+    let padded = bytes.len().next_multiple_of(8);
+    let unpadded_size = 376 + padded + bytes.len();
+    for size in [unpadded_size, 376 + 2 * padded] {
+        let assembled = block(size, 2).assemble(&found).unwrap();
+        assert_eq!(assembled.len(), size);
+        let decoded = Block::from_bytes(&assembled).unwrap();
+        let transactions: Vec<&[u8]> = decoded.transactions().collect();
+        assert_eq!(transactions, [&bytes[..], &bytes[..]]);
+    }
+
+    // 数か大きさが合わなければ弾く
+    assert_eq!(
+        block(unpadded_size, 3).assemble(&found),
+        Err(RestError::Mismatch {
+            field: "meta.transactionsCount"
+        })
+    );
+    assert_eq!(
+        block(unpadded_size + 8, 2).assemble(&found),
+        Err(RestError::Mismatch {
+            field: "block.size"
+        })
+    );
+    // 中のトランザクションが抜けていれば、アグリゲートを組み直せない
+    assert!(block(unpadded_size, 2).assemble(&found[1..]).is_err());
+}

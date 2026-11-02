@@ -1,11 +1,15 @@
 # node-web
 
-ブラウザの中に、heika のノードの DB を置く例です。ブラウザのノードに向けた最初の一歩で、今はまだ同期しません。DB を開いて、残るか、ほかのタブと取り合わないか、書き読みがどれくらい速いかを確かめます。
+ブラウザの中で、Symbol のチェーンを確かめながら同期する例です。公開されている REST からブロックを取り、Nemesis から順に、署名、難易度、VRF、状態のハッシュまで確かめて実行し、DB をブラウザの中に書きます。
 
-- DB は、ネイティブの heika と同じ redb（`heika-store-redb`）です。ファイルの代わりに OPFS（Origin Private File System、ブラウザの中のこのサイトだけのファイル）に置きます
-- OPFS の同期ハンドルは Dedicated Worker の中でしか作れないので、DB は Worker が持ちます。画面とはメッセージでやり取りします
-- DB を持つ Worker は、Web Locks でこのサイトに1つだけにします。2つ目のタブは、1つ目が閉じるまで待ってから引き継ぎます
+- REST の答えは信じません。組み直したブロックを、ネイティブの heika と同じ規則で確かめるので、どの REST から取っても、間違ったものは弾かれます。catapult の REST でも heika の REST でも使えます
+- 取る区切りごとに REST を順に替えるので、1か所に負荷が寄りません
+- 同期するのは、確定した高さまでです。確定した先は巻き戻ることがあるので、まだ取りません
+- DB は、ネイティブの heika と同じ redb（`heika-store-redb`）です。ファイルの代わりに OPFS（Origin Private File System、ブラウザの中のこのサイトだけのファイル）に置くので、閉じても続きから始めます
+- DB を持つのは Dedicated Worker で、Web Locks でこのサイトに1つだけにします。2つ目のタブは、1つ目が閉じるまで待ってから引き継ぎます
 - COOP や COEP のヘッダーは要りません。GitHub Pages のような、ヘッダーを変えられないところにも置けます
+
+今はメインネットとテストネットだけに対応しています。全部のブロックと状態の差分を書くので、DB はアーカイブのノードと同じくらい大きくなり、状態はメモリにまるごと持ちます。
 
 ## 動かす
 
@@ -13,11 +17,7 @@
 trunk serve --release
 ```
 
-表示されたアドレスを開きます。OPFS と Web Locks は安全なコンテキストでしか使えないので、`localhost` か HTTPS で開いてください。
-
-- 「開いた回数」は、開くたびに DB に書いて数えます。再読み込みして増えていれば、DB はブラウザに残っています
-- 「測る」を押すと、4 KiB のバイト列をブロックの代わりに 1,000 個、1 回のコミットで書き、全部読み戻して時間を出します
-- 別のタブで開くと「ほかのタブがこの DB を使っています」になり、最初のタブを閉じると引き継ぎます
+表示されたアドレスを開き、REST のオリジン（`https://<ホスト>:3001` など）を 1 行に 1 つ入れて「同期する」を押します。OPFS と Web Locks は安全なコンテキストでしか使えないので、`localhost` か HTTPS で開いてください。
 
 データを消すときは、ブラウザでこのサイトのデータを消します。
 
@@ -25,9 +25,9 @@ trunk serve --release
 
 ### 渡されるもの
 
-`heika_store_redb::Db::open_with_backend` は、ファイルのパスの代わりに redb の `StorageBackend` を受け取って DB を開きます。`StorageBackend` は `heika_store_redb` から使えるので、redb の版を合わせる必要はありません。
-
-`StorageBackend` が求める5つは、OPFS の `FileSystemSyncAccessHandle` とそのまま対応します。
+- `heika_rest::block::BlockInfo::assemble`: `/blocks` の1件と、その高さを含む `/transactions/confirmed?embedded=true` の答えから、ブロック全体のバイト列（P2P の `Pull_Blocks` と同じ形）を組み直します。並べるだけで、中身は確かめません
+- `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします
+- `heika_store_redb::Db::open_with_backend`: ファイルのパスの代わりに、redb の `StorageBackend` の上に DB を開きます。`StorageBackend` が求める5つは、OPFS の `FileSystemSyncAccessHandle` とそのまま対応します
 
 | `StorageBackend` | `FileSystemSyncAccessHandle` |
 |---|---|
@@ -37,7 +37,7 @@ trunk serve --release
 | `set_len(len)` | `truncate(len)` |
 | `sync_data()` | `flush()` |
 
-この対応を書いたのが `src/lib.rs` の `OpfsFile` です。
+この例の `src/lib.rs` に、OPFS の `OpfsFile`、Web Locks の `hold_lock`、REST から取る `rest` があります。
 
 ### 最小の形
 
@@ -45,33 +45,43 @@ Dedicated Worker の中で書きます。
 
 ```rust
 use heika_store_redb::Db;
+use heika_store_redb::replay::Replay;
+use node_web::rest::{self, Network};
 use node_web::{OpfsFile, hold_lock};
 
-// ほかのタブの Worker が持っていたら、閉じるまで待つ
 hold_lock("my-app/db", || { /* 待っていることを画面に知らせる */ }).await?;
-let file = OpfsFile::open("heika.redb").await?;
-let db = Db::open_with_backend(file, 64 << 20)?;
+let network = Network::from_node_info(&rest::get_json(origin, "/node/info").await?)?;
+let db = Db::open_with_backend(OpfsFile::open("heika.redb").await?, 64 << 20)?;
 
-let mut batch = db.batch()?;
-batch.put_block(1, &block_bytes)?;
-batch.commit()?;
+let mut replay = Replay::open(&db, network.config.clone(), network.parameters, network.nemesis)?;
+let target = rest::finalized_height(origin).await?;
+while replay.height() < target {
+    let from = replay.height() + 1;
+    for bytes in rest::fetch_blocks(origin, from, target).await? {
+        replay.push(bytes)?;
+    }
+    replay.commit()?;
+}
 ```
-
-開いたあとは、ネイティブと同じ `Db` です。
 
 ### 守ること
 
+- `Replay::push` で弾かれたら、その `Replay` は途中まで当たった状態なので捨て、`Replay::open` で最後のコミットから開き直します。続けて弾かれるなら、別の REST から取り直します
+- `Replay` は巻き戻せません。確定した高さより先は取らないでください
+- `commit` するまで DB には残りません。間隔が長いと止めたときに失う分が増え、短いと書く回数が増えます。この例は 5 秒ごとです
 - `OpfsFile` は、スレッドを使わない wasm でだけ使えます。JS のものを `Send` と `Sync` にしているので、`atomics` を有効にしてビルドすると止まるようにしてあります
-- 同期ハンドルはファイルを1人占めします。開く前に `hold_lock` で順番を待ってください。待たずに開くと、ほかのタブが持っているあいだは失敗します
-- ロックは Worker が終わるまで持ち続けます。タブを閉じるか Worker を止めると放されます
-- ブラウザには空き容量を調べる手段がないので、`Db::set_min_free` は 0 のままにします。0 でないと、書くときに失敗します
-- ブラウザがサイトのデータを消すことがあります。消えても困らないように、DB は作り直せるものとして扱ってください。秘密鍵はここに置きません
+- 同期ハンドルはファイルを1人占めします。開く前に `hold_lock` で順番を待ってください
+- ブラウザには空き容量を調べる手段がないので、`Db::set_min_free` は 0 のままにします
+- ブラウザがサイトのデータを消すことがあります。DB は作り直せるものとして扱い、秘密鍵は置きません
 
 ### ほかの使い道
 
+- `assemble` と `Replay` は、ネイティブでも動きます。REST しか開いていないところから、確かめながら DB を作れます（`crates/heika-vectors/tests/rest_replay.rs`）
 - `OpfsFile` は redb の `StorageBackend` なので、heika の DB に限らず、redb をブラウザで使いたいときにそのまま使えます
 - `hold_lock` は、OPFS のほかにも「このサイトで1つだけ動かしたいもの」に使えます
 
 ## この先
 
-ここから、公開されている REST からブロックを取り、検証して状態を進める、見るだけのノードにしていく予定です。
+- ライトのノードのように、古いブロックと状態の差分を刈り込む
+- 状態を全部はメモリに持たない
+- 確定した先の先端を追い、ハーベストする

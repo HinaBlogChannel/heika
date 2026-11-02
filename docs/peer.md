@@ -179,6 +179,7 @@ heika は、TLS のハンドシェイクで ALPN に `heika-symbol/0` を出し�
 | `POST /namespaces/account/names`、`POST /namespaces/mosaic/names` | `{"addresses": [...]}` か `{"mosaicIds": [...]}` を別名にしている、今有効なネームスペースの名前（`symbol.xym` のようにルートからつないだもの）。1回に 100 件まで |
 | `/accounts/{accountId}/merkle`、`/account/{address}/multisig/merkle`、`/lock/hash/{hash}/merkle`、`/lock/secret/{compositeHash}/merkle`、`/restrictions/account/{address}/merkle`、`/restrictions/mosaic/{compositeHash}/merkle`、`/mosaics/{mosaicId}/merkle`、`/namespaces/{namespaceId}/merkle`、`/metadata/{compositeHash}/merkle` | 状態の木の、根からその葉への道（`raw`）。ないことを示す道も返す。ネームスペースの木の葉はルートごとなので、子の ID ではないことを示す道になる（catapult と同じ） |
 | `/blocks/{height}` | ブロックのヘッダーと、その高さの9本の根。根はその高さの木から求め直すので、差分を刈り込んだ高さ（フルの残し方での古いブロック）は 404 |
+| `/blocks` | ブロックの一覧。高さの順に、`pageSize`、`pageNumber`、`order`、`orderBy`（`id` か `height`。どちらも高さの順）、`offset`（高さ。昇順ならその次から）でページを送る。持っていない高さは飛ばす。署名者、受取先、時刻での絞り込みは 501 |
 | `/network/fees/transaction` | 直近 300 ブロックの手数料の倍率（平均、中央値、最高、最低）と、ノードが受け付ける下限 |
 | `/network/properties` | ネットワークの設定（catapult の `config-network.properties`）。catapult の REST と同じ書き方（`6h`、`0x6BED'913F'A202'23F8` など）で返す。heika が持っていない `maxRollbackBlocks`、`initialCurrencyAtomicUnits`、`reservedRootNamespaceNames` はない |
 | `/transactionStatus/{hash}` | 送ったトランザクションの行方。メモリプールにあれば `unconfirmed`、直近のブロック（`storage.search` に `Transactions` があれば、しまってある全部のブロック）に入っていれば `confirmed` と高さ |

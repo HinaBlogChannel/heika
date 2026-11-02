@@ -243,3 +243,68 @@ button:disabled {
     margin-bottom: var(--space-2);
   }
 }
+
+/* 入れる欄。heika-gui と同じ */
+.field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--space-5);
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+}
+
+textarea {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--blue-line);
+  border-radius: 2px;
+  background: var(--glass);
+  color: var(--ink);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+textarea:focus {
+  border-color: var(--blue);
+}
+
+textarea:focus-visible {
+  outline: none;
+}
+
+/* 追いつくまでの進み具合。heika-gui と同じ */
+progress {
+  width: 100%;
+  height: 0.5rem;
+  margin-top: var(--space-4);
+  accent-color: var(--blue);
+}
+
+.field textarea {
+  margin-top: var(--space-2);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  letter-spacing: 0;
+  resize: vertical;
+}
+
+.panel .field {
+  margin-bottom: 0;
+}
+
+/* 確かめた、という印 */
+.verified {
+  color: var(--ok);
+  font-family: var(--sans);
+  font-size: 0.8rem;
+}
+
+.facts dd.hash {
+  font-size: 0.8rem;
+}
+
+.warnings {
+  margin-top: var(--space-4);
+}

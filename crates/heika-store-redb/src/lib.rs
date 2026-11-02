@@ -34,6 +34,7 @@
 //! まだ作っていない高さがあるあいだは、昔の値は引けない。
 
 mod chain_store;
+pub mod replay;
 pub mod search;
 
 use std::collections::BTreeMap;

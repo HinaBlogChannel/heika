@@ -1580,12 +1580,16 @@ Apache License 2.0
 - windows-result 0.4.1
 - windows-strings 0.5.1
 - windows-sys 0.45.0
+- windows-sys 0.52.0
 - windows-sys 0.61.2
 - windows-targets 0.42.2
+- windows-targets 0.52.6
 - windows-threading 0.2.1
 - windows-version 0.1.7
 - windows 0.62.2
+- windows_x86_64_gnu 0.52.6
 - windows_x86_64_msvc 0.42.2
+- windows_x86_64_msvc 0.52.6
 
                                  Apache License
                            Version 2.0, January 2004

@@ -3594,8 +3594,7 @@ mod tests {
         let (_, body) =
             get_status("/transactions/unconfirmed?embedded=true&pageSize=10&pageNumber=2").await;
         assert_eq!(body["data"].as_array().unwrap().len(), 2);
-        let (_, body) =
-            get_status(&format!("/transactions/unconfirmed?address={}", known())).await;
+        let (_, body) = get_status(&format!("/transactions/unconfirmed?address={}", known())).await;
         assert_eq!(body["data"].as_array().unwrap().len(), 1);
         assert_eq!(
             get_status("/transactions/unconfirmed?embedded=yes").await.0,

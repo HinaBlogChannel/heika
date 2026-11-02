@@ -1270,6 +1270,10 @@ impl heika_api::Reader for DbReader {
             .collect())
     }
 
+    fn finalization_proof(&self, epoch: u32) -> Result<Option<Vec<u8>>, String> {
+        self.db.proof(epoch).map_err(|error| error.to_string())
+    }
+
     fn unconfirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
         let bytes = self.mempool.lock().get(hash).map(<[u8]>::to_vec);
         Ok(bytes

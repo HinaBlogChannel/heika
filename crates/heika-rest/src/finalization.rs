@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RestError, hex_array, number};
+use crate::{RestError, hex, hex_array, number};
 
 /// `FinalizationProofDTO`。
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -85,6 +85,83 @@ impl FinalizationProof {
         proof.extend_from_slice(&body);
         Ok(proof)
     }
+
+    /// ノードが持つバイナリの証明を、REST の形にする（[`to_bytes`](Self::to_bytes) の逆）。
+    /// 長さが合わなければ `None`。署名と重みは確かめない
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut reader = Reader(bytes);
+        let size = reader.u32()? as usize;
+        if size != bytes.len() {
+            return None;
+        }
+        let version = reader.u32()?;
+        let finalization_epoch = reader.u32()?;
+        let finalization_point = reader.u32()?;
+        let height = reader.u64()?.to_string();
+        let hash = hex(reader.take(32)?);
+        let mut message_groups = Vec::new();
+        while !reader.0.is_empty() {
+            let size = reader.u32()? as usize;
+            let mut group = Reader(reader.take(size.checked_sub(4)?)?);
+            let hashes = group.u32()?;
+            let signatures = group.u32()?;
+            let stage = group.u32()?;
+            let height = group.u64()?.to_string();
+            let hashes = (0..hashes)
+                .map(|_| group.take(32).map(hex))
+                .collect::<Option<_>>()?;
+            let mut pair = || {
+                Some(ParentPublicKeySignaturePair {
+                    parent_public_key: hex(group.take(32)?),
+                    signature: hex(group.take(64)?),
+                })
+            };
+            let signatures = (0..signatures)
+                .map(|_| {
+                    Some(BmTreeSignature {
+                        root: pair()?,
+                        bottom: pair()?,
+                    })
+                })
+                .collect::<Option<_>>()?;
+            if !group.0.is_empty() {
+                return None;
+            }
+            message_groups.push(MessageGroup {
+                stage,
+                height,
+                hashes,
+                signatures,
+            });
+        }
+        Some(Self {
+            version,
+            finalization_epoch,
+            finalization_point,
+            height,
+            hash,
+            message_groups,
+        })
+    }
+}
+
+/// 頭から順に読む
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, size: usize) -> Option<&'a [u8]> {
+        let (head, rest) = self.0.split_at_checked(size)?;
+        self.0 = rest;
+        Some(head)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +204,11 @@ mod tests {
         assert_eq!(&group[8..12], &1u32.to_le_bytes());
         assert_eq!(&group[56..88], &[0x11; 32]);
         assert_eq!(&group[88..152], &[0x22; 64]);
+        // バイナリから戻すと、同じ JSON になる
+        assert_eq!(FinalizationProof::from_bytes(&bytes), Some(proof));
+        assert_eq!(
+            FinalizationProof::from_bytes(&bytes[..bytes.len() - 1]),
+            None
+        );
     }
 }

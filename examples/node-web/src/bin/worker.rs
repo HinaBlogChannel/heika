@@ -4,7 +4,8 @@
 //! DB を OPFS に開き、確定した高さまで、取る、確かめて実行する、書く、を繰り返す。追いついたら、少し待って続きを見る。
 //!
 //! 画面から受け取るもの:
-//! - `["sync", オリジンを改行で区切った文字列]`: 同期を始める
+//! - `["sync", オリジンを改行で区切った文字列, ハーベスト]`: 同期を始める。ハーベストは、しないなら `null`、するなら
+//!   `[署名の鍵, VRF の鍵, ブロックを出す REST のオリジンを改行で区切った文字列]`（鍵は16進の秘密鍵）
 //! - `["stop"]`: 今の区切りを書いてから止める
 //! - `["import", File]`: 手元のノードの DB（redb）を、そのネットワークの DB として OPFS に写す。同期していないときだけ
 //!
@@ -18,22 +19,26 @@
 //! - `["imported", ネットワーク, 先端の高さ]`: 写し終えた
 //! - `["tip", ネットワーク, 手元の先端の高さ, REST の言う先端の高さ, ファイルのバイト数, 先端のブロックのハッシュ]`:
 //!   確定した先の先端を追っている
+//! - `["plan", 文]`: ハーベストするとき、次の当たり
+//! - `["harvested", 文]`: ハーベストしてブロックを作ったか、それを REST に出した結果
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use heika_block::Block;
 use heika_chain::chain::Keep;
-use heika_chain::chain::{Action, Chain, Outcome};
+use heika_chain::chain::{Action, Chain, HarvestPlan, Notice, Outcome};
 use heika_chain::env::Env;
 use heika_chain::event::{ChainEvent, PeerCommand, PeerId};
 use heika_chain::store::EXECUTOR_META;
 use heika_chain::verify::{Tip, verify_alone};
+use heika_core::key::PrivateKey;
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
@@ -104,11 +109,17 @@ fn main() {
             match message.get(0).as_string().as_deref() {
                 Some("sync") if !running.get() => {
                     let origins = message.get(1).as_string().unwrap_or_default();
+                    let harvest = message.get(2);
+                    let harvest = (!harvest.is_null() && !harvest.is_undefined()).then(|| {
+                        let harvest: Array = harvest.unchecked_into();
+                        let text = |index| harvest.get(index).as_string().unwrap_or_default();
+                        (text(0), text(1), text(2))
+                    });
                     running.set(true);
                     stopping.set(false);
                     let (running, stopping) = (running.clone(), stopping.clone());
                     wasm_bindgen_futures::spawn_local(async move {
-                        match sync(&origins, &stopping).await {
+                        match sync(&origins, harvest, &stopping).await {
                             Ok(()) => post(&["stopped".into()]),
                             Err(error) => post(&["error".into(), error.into()]),
                         }
@@ -255,12 +266,47 @@ fn spawn_fetch(
     receiver
 }
 
+/// ハーベストに使うもの
+struct Harvest {
+    /// 署名の鍵（リモートならリモートの鍵）と VRF の鍵。メモリにだけ置く
+    keys: Arc<Vec<(PrivateKey, PrivateKey)>>,
+    /// 作ったブロックを出す heika のノードの REST
+    submit: Vec<String>,
+}
+
+/// 画面から受け取った鍵とオリジンを読む
+fn harvest(signing: &str, vrf: &str, submit: &str) -> Result<Harvest, String> {
+    let key = |text: &str, name: &str| {
+        text.trim()
+            .parse::<PrivateKey>()
+            .map_err(|error| format!("{name}を読めません: {error}"))
+    };
+    let keys = (key(signing, "署名の鍵")?, key(vrf, "VRF の鍵")?);
+    let submit = origins(submit);
+    if submit.is_empty() {
+        return Err(
+            "ハーベストするなら、ブロックを出す heika の REST を1つ以上入れてください".into(),
+        );
+    }
+    Ok(Harvest {
+        keys: Arc::new(vec![keys]),
+        submit,
+    })
+}
+
 /// 止められるか、続けられなくなるまで同期する
-async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
+async fn sync(
+    text: &str,
+    harvest_input: Option<(String, String, String)>,
+    stopping: &Cell<bool>,
+) -> Result<(), String> {
     let origins = origins(text);
     if origins.is_empty() {
         return Err("REST のオリジンを1つ以上入れてください".into());
     }
+    let mut harvest = harvest_input
+        .map(|(signing, vrf, submit)| self::harvest(&signing, &vrf, &submit))
+        .transpose()?;
     status("REST のネットワークを確かめています");
     let mut network = None;
     let mut usable = Vec::new();
@@ -292,13 +338,38 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
         }
     }
     let network = network.ok_or("使える REST がありません")?;
+    if let Some(harvest) = &mut harvest {
+        status("ブロックを出す REST を確かめています");
+        let mut checked = Vec::new();
+        for origin in &harvest.submit {
+            let found = match rest::get_json(origin, "/node/info").await {
+                Ok(info) => Network::from_node_info(&info).map(|found| found.name),
+                Err(error) => Err(error.to_string()),
+            };
+            match found {
+                Ok(name) if name == network.name => checked.push(origin.clone()),
+                Ok(name) => post(&[
+                    "warning".into(),
+                    format!("{origin} は {name} なので、ブロックを出しません").into(),
+                ]),
+                Err(error) => post(&[
+                    "warning".into(),
+                    format!("{origin} にブロックを出しません: {error}").into(),
+                ]),
+            }
+        }
+        if checked.is_empty() {
+            return Err("ブロックを出せる REST がありません".into());
+        }
+        harvest.submit = checked;
+    }
     let (db, file) = open(network.name).await?;
 
     loop {
         if !catch_up(&db, &file, &network, &usable, stopping).await? {
             return Ok(());
         }
-        match follow_tip(&db, &file, &network, &usable, stopping).await? {
+        match follow_tip(&db, &file, &network, &usable, harvest.as_ref(), stopping).await? {
             TipEnd::Behind => continue,
             TipEnd::Stopped => return Ok(()),
         }
@@ -478,6 +549,7 @@ async fn follow_tip(
     file: &OpfsFile,
     network: &Network,
     usable: &[String],
+    harvest: Option<&Harvest>,
     stopping: &Cell<bool>,
 ) -> Result<TipEnd, String> {
     status("先端を追う用意をしています");
@@ -486,6 +558,9 @@ async fn follow_tip(
         .await
         .map_err(|error| format!("先端の段階を始められません: {error}"))?;
     chain.set_keep(KEEP);
+    if let Some(harvest) = harvest {
+        chain.set_harvesters(harvest.keys.clone());
+    }
     let (sender, mut events) = mpsc::unbounded::<ChainEvent>();
     // ピアの番号から REST へ。外したピアの番号は使い回さないので、入れ直すときは新しい番号にする
     let mut peers: HashMap<usize, String> = HashMap::new();
@@ -510,9 +585,23 @@ async fn follow_tip(
     }
     status("先端を追っています");
     let mut network_tip = 0;
+    // 中核は作ったブロックをピアの数だけ押し付けるので、同じものは1回だけ出す
+    let mut submitted: Option<Arc<Vec<u8>>> = None;
+    let mut shown_plan = String::new();
     loop {
         for action in chain.take_actions() {
             match action {
+                // REST から取るだけで押し付けは届かないので、押し付けは自分で作ったものだけ
+                Action::Command(_, PeerCommand::Push(bytes)) => {
+                    if let Some(harvest) = harvest
+                        && submitted
+                            .as_ref()
+                            .is_none_or(|last| !Arc::ptr_eq(last, &bytes))
+                    {
+                        submit(&harvest.submit, bytes.clone());
+                        submitted = Some(bytes);
+                    }
+                }
                 Action::Command(peer, command) => match peers.get(&peer.0) {
                     Some(origin) => answer(network, origin.clone(), peer, command, sender.clone()),
                     None => {
@@ -552,10 +641,20 @@ async fn follow_tip(
                 Action::Notify(notice) if notice.is_warning() => {
                     post(&["warning".into(), notice.to_string().into()]);
                 }
+                Action::Notify(notice @ Notice::Produced { .. }) => {
+                    post(&["harvested".into(), notice.to_string().into()]);
+                }
                 _ => {}
             }
         }
         report_tip(network, &chain.tip(), network_tip, file);
+        if harvest.is_some() {
+            let plan = plan_text(chain.harvest_plan());
+            if plan != shown_plan {
+                post(&["plan".into(), plan.as_str().into()]);
+                shown_plan = plan;
+            }
+        }
         if stopping.get() {
             return Ok(TipEnd::Stopped);
         }
@@ -649,6 +748,44 @@ fn answer(
         };
         let _ = sender.unbounded_send(event);
     });
+}
+
+/// 次の当たりを、画面に出す文にする
+fn plan_text(plan: HarvestPlan) -> String {
+    match plan {
+        HarvestPlan::NotPlanned => {
+            "当たりを求めています（REST の先端に追いつくのを待っています）".into()
+        }
+        HarvestPlan::NoHit => "1 時間先まで当たりがありません。次の先端で求め直します".into(),
+        HarvestPlan::Hit { height, timestamp } => {
+            let local = js_sys::Date::new(&JsValue::from_f64(
+                timestamp
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as f64,
+            ));
+            let at = local
+                .to_locale_time_string("ja-JP")
+                .as_string()
+                .unwrap_or_default();
+            format!("高さ {height} が当たりです（{at} に作ります）")
+        }
+    }
+}
+
+/// 作ったブロックを、ブロックを出す REST のすべてに出し、結果を画面に知らせる
+fn submit(origins: &[String], bytes: Arc<Vec<u8>>) {
+    let height = Block::from_bytes(&bytes).map_or(0, |block| block.height);
+    for origin in origins {
+        let (origin, bytes) = (origin.clone(), bytes.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let text = match rest::put_block(&origin, &bytes).await {
+                Ok(()) => format!("高さ {height} を {origin} に出しました"),
+                Err(error) => format!("高さ {height} を {origin} に出せませんでした: {error}"),
+            };
+            post(&["harvested".into(), text.into()]);
+        });
+    }
 }
 
 fn report_tip(network: &Network, tip: &Tip, network_tip: u64, file: &OpfsFile) {

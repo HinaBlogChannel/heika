@@ -202,6 +202,7 @@ jobs:
 
   # examples/web-vanitygen は https://hinablogchannel.github.io/heika/examples/web-vanitygen/ に、
   # examples/sunboru-kusa は https://hinablogchannel.github.io/heika/examples/sunboru-kusa/ に、
+  # examples/node-web は https://hinablogchannel.github.io/heika/examples/node-web/ に、
   # crate の API の文書は https://hinablogchannel.github.io/heika/crates/ になる
   pages:
     needs: release

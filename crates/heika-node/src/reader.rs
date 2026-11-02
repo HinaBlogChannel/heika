@@ -184,6 +184,26 @@ impl DbReader {
         })
     }
 
+    /// 未承認のもの（ハッシュ `hash`、バイト列 `bytes`）の JSON。`meta` は連署を待つものと同じく、高さを 0 にする
+    fn unconfirmed_info(&self, hash: &Hash256, transaction: &Transaction) -> TransactionInfo {
+        TransactionInfo {
+            id: None,
+            meta: TransactionMeta {
+                height: Some("0".to_owned()),
+                hash: Some(hash.to_string()),
+                merkle_component_hash: Some(
+                    transaction.merkle_component_hash(&self.seed).to_string(),
+                ),
+                index: Some(0),
+                aggregate_hash: None,
+                aggregate_id: None,
+                timestamp: None,
+                fee_multiplier: None,
+            },
+            transaction: TransactionJson::from(transaction),
+        }
+    }
+
     /// `transaction` に `address` が関わるか。外側の署名者、中のトランザクションの署名者、連署者、送金の宛先
     fn involves(&self, transaction: &Transaction, address: &Address) -> bool {
         let of = |key: &heika_core::key::PublicKey| Address::from_public_key(key, self.network);
@@ -1248,6 +1268,66 @@ impl heika_api::Reader for DbReader {
                     .flatten()
             })
             .collect())
+    }
+
+    fn unconfirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
+        let bytes = self.mempool.lock().get(hash).map(<[u8]>::to_vec);
+        Ok(bytes
+            .and_then(|bytes| Transaction::from_bytes(&bytes).ok())
+            .map(|transaction| self.unconfirmed_info(hash, &transaction)))
+    }
+
+    fn unconfirmed_transactions(
+        &self,
+        filter: &PartialFilter,
+        embedded: bool,
+    ) -> Result<Vec<TransactionInfo>, String> {
+        // 読むあいだ置き場を止めないように、写してから JSON にする
+        let listed: Vec<(Hash256, Vec<u8>)> = self
+            .mempool
+            .lock()
+            .transactions()
+            .map(|(hash, bytes)| (*hash, bytes.to_vec()))
+            .collect();
+        // catapult と同じく、中のものは関わったアドレスで絞らないときだけ
+        let embedded = embedded && filter.address.is_none();
+        let mut out = Vec::new();
+        for (hash, bytes) in listed {
+            let Ok(transaction) = Transaction::from_bytes(&bytes) else {
+                continue;
+            };
+            let signer_ok = filter
+                .signer
+                .is_none_or(|signer| transaction.signer_public_key == signer);
+            let address_ok = filter
+                .address
+                .is_none_or(|address| self.involves(&transaction, &address));
+            if !(signer_ok && address_ok) {
+                continue;
+            }
+            out.push(self.unconfirmed_info(&hash, &transaction));
+            if let (true, Body::AggregateComplete(aggregate) | Body::AggregateBonded(aggregate)) =
+                (embedded, &transaction.body)
+            {
+                for (index, inner) in aggregate.transactions().iter().enumerate() {
+                    out.push(TransactionInfo {
+                        id: None,
+                        meta: TransactionMeta {
+                            height: Some("0".to_owned()),
+                            hash: None,
+                            merkle_component_hash: None,
+                            index: Some(index as u32),
+                            aggregate_hash: Some(hash.to_string()),
+                            aggregate_id: None,
+                            timestamp: None,
+                            fee_multiplier: None,
+                        },
+                        transaction: TransactionJson::from(inner),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn network(&self) -> NetworkIdentifier {

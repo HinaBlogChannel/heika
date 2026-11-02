@@ -506,7 +506,7 @@ pub struct HarvestOutlook {
     pub per_block: f64,
     /// 直近のブロックの平均の間隔（秒）
     pub block_seconds: f64,
-    /// 次の当たりで、ほかのだれもそれより先に当たらない見込み。当たりがなければ `None`
+    /// 次の当たりで、ほかのだれにも先を越されない見込み（同じ秒に並ぶものは半々）。当たりがなければ `None`
     pub next: Option<f64>,
 }
 
@@ -847,7 +847,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
         let next = planned.slot.map(|(timestamp, _)| {
             let elapsed = timestamp.saturating_sub(self.parent.timestamp) / 1000;
             let difficulty = difficulty(&recent, self.parameters);
-            crate::outlook::none_before(elapsed, difficulty, others, self.parameters)
+            crate::outlook::win_chance(elapsed, difficulty, others, self.parameters)
         });
         Some(HarvestOutlook {
             parent: self.parameters.epoch() + Duration::from_millis(self.parent.timestamp),

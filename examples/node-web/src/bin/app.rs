@@ -40,6 +40,15 @@ struct Progress {
     tip: bool,
 }
 
+/// 届いた委任1件
+#[derive(Clone, PartialEq)]
+struct Delegation {
+    height: f64,
+    main_account: String,
+    used: bool,
+    reason: String,
+}
+
 /// バイト数を、読みやすい単位にする
 fn bytes(value: f64) -> String {
     match value {
@@ -98,6 +107,8 @@ fn App() -> impl IntoView {
     let vrf = RwSignal::new(String::new());
     let submit = RwSignal::new(remembered(SUBMIT_KEY));
     let plan = RwSignal::new(None::<String>);
+    let node_key = RwSignal::new(String::new());
+    let delegations = RwSignal::new(Vec::<Delegation>::new());
     let harvested = RwSignal::new(Vec::<String>::new());
 
     let worker = match Worker::new(WORKER_SCRIPT) {
@@ -114,7 +125,26 @@ fn App() -> impl IntoView {
             let text = |index| message.get(index).as_string().unwrap_or_default();
             match text(0).as_str() {
                 "waiting" => phase.set(Phase::Waiting),
-                "ready" => phase.set(Phase::Ready),
+                "ready" => {
+                    node_key.set(text(1));
+                    phase.set(Phase::Ready);
+                }
+                "delegations" => {
+                    let rows: Array = message.get(1).unchecked_into();
+                    delegations.set(
+                        rows.iter()
+                            .map(|row| {
+                                let row: Array = row.unchecked_into();
+                                Delegation {
+                                    height: row.get(0).as_f64().unwrap_or(0.0),
+                                    main_account: row.get(1).as_string().unwrap_or_default(),
+                                    used: row.get(2).as_bool().unwrap_or(false),
+                                    reason: row.get(3).as_string().unwrap_or_default(),
+                                }
+                            })
+                            .collect(),
+                    );
+                }
                 "status" => status.set(text(1)),
                 "progress" => progress.set(Some(Progress {
                     network: text(1),
@@ -190,6 +220,7 @@ fn App() -> impl IntoView {
         warnings.set(Vec::new());
         plan.set(None);
         harvested.set(Vec::new());
+        delegations.set(Vec::new());
         let harvest = if harvesting.get_untracked() {
             let targets = submit.get_untracked();
             if let Some(storage) = storage() {
@@ -266,8 +297,18 @@ fn App() -> impl IntoView {
                             <summary>"ハーベストする"</summary>
                             <p class="hint">
                                 "先端を追うあいだ、当たりの時刻が来たらブロックを作り、heika のノードの REST（PUT /blocks）に出します。catapult の REST には出せません。"
-                                "使うのは、ハーベストに紐づけた署名の鍵（リモートの鍵）と VRF の鍵です。鍵はこのページのメモリにだけ置き、保存しません。読み込み直したら、入れ直してください。"
+                                "このブラウザのノードの公開鍵に委任してもらうと、届いた委任でハーベストします。"
                             </p>
+                            <Show when=move || !node_key.get().is_empty()>
+                                <dl class="facts">
+                                    <dt>"ノードの公開鍵"</dt>
+                                    <dd class="hash">{move || node_key.get()}</dd>
+                                </dl>
+                                <p class="hint">
+                                    "委任は、この公開鍵を委任先にして送ります（heika の CLI なら heika harvesting --delegate 公開鍵）。"
+                                    "このブラウザが持つ鍵は、読み出せない形でしまってあり、ページからも中身は読めません。サイトのデータを消すと鍵も消えるので、委任をやり直すことになります。"
+                                </p>
+                            </Show>
                             <label class="check">
                                 <input
                                     type="checkbox"
@@ -277,8 +318,11 @@ fn App() -> impl IntoView {
                                 />
                                 " ハーベストする"
                             </label>
+                            <p class="hint">
+                                "鍵を直接入れてもハーベストできます（委任と合わせて使えます）。ハーベストに紐づけた署名の鍵（リモートの鍵）と VRF の鍵で、このページのメモリにだけ置き、保存しません。"
+                            </p>
                             <label class="field">
-                                "署名の鍵（16 進の秘密鍵）"
+                                "署名の鍵（16 進の秘密鍵。委任だけなら空のまま）"
                                 <input
                                     type="password"
                                     autocomplete="off"
@@ -371,6 +415,24 @@ fn App() -> impl IntoView {
                             <dd>{plan}</dd>
                         </dl>
                     })}
+                    <Show when=move || !delegations.get().is_empty()>
+                        <ul class="notes">
+                            <For
+                                each=move || delegations.get()
+                                key=|delegation| (delegation.height.to_bits(), delegation.main_account.clone(), delegation.reason.clone())
+                                let:delegation
+                            >
+                                <li class="path">
+                                    {format!(
+                                        "高さ {} の委任（{}）: {}",
+                                        group(delegation.height),
+                                        if delegation.main_account.is_empty() { "メインアカウント不明".to_owned() } else { delegation.main_account.clone() },
+                                        if delegation.used { "ハーベストに使っています".to_owned() } else { delegation.reason.clone() },
+                                    )}
+                                </li>
+                            </For>
+                        </ul>
+                    </Show>
                     <Show when=move || !harvested.get().is_empty()>
                         <ul class="notes">
                             <For each=move || harvested.get() key=|line| line.clone() let:line>

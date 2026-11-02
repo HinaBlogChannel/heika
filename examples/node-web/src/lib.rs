@@ -6,6 +6,7 @@
 //!   待っていたほかのタブの Worker が引き継ぐ
 //! - [`rest`]: 公開されている REST からブロックを取って組み直す
 
+pub mod delegation;
 pub mod rest;
 
 use std::cell::Cell;

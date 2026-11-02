@@ -1,6 +1,11 @@
 //! 中核（heika-chain）の保存の口 [`ChainStore`] を、[`Db`] で実装する。
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// ブラウザ（wasm32-unknown-unknown）の std の Instant は呼ぶと panic するので、performance.now() を使うものにする
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use std::time::Instant;
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+use web_time::Instant;
 
 use heika_chain::ChainError;
 use heika_chain::store::{BlockWrite, ChainStore, EXECUTOR_META, Prune, Pruned};

@@ -44,6 +44,8 @@ use heika_core::hash::Hash256;
 use heika_state_transition::executor::ExecError;
 use heika_state_transition::executor::source::StateSource;
 
+/// [`Db::open_with_backend`] に渡すもの。redb の版を合わせなくて済むように出しておく
+pub use redb::StorageBackend;
 pub use search::{MetadataFields, Searches, TransactionNetwork};
 
 use heika_block::statement::BlockStatement;
@@ -266,7 +268,8 @@ enum Handle {
 /// 開いた DB。書く側は1つのプロセスだけで、書いているあいだはほかのプロセスから読むだけにも開けない。
 pub struct Db {
     handle: Handle,
-    directory: std::path::PathBuf,
+    /// DB を置いたディレクトリ。空きを調べるのに使う。[`Db::open_with_backend`] で開いたものにはない
+    directory: Option<std::path::PathBuf>,
     /// 書く前に確かめるディスクの空き。0 なら確かめない
     min_free: u64,
     /// [`Batch`] で `history` を書かない
@@ -292,6 +295,26 @@ impl Db {
             .set_cache_size(cache_size)
             .create(directory.join(FILE_NAME))
             .map_err(db_error)?;
+        Self::prepare(database, Some(directory.to_path_buf()))
+    }
+
+    /// ファイルの代わりに `backend` の上で、書けるように開く。空なら作る。キャッシュの上限は `cache_size` バイト。
+    ///
+    /// ブラウザの OPFS のように、ふつうのファイルがないところで使う。空きは調べられないので、
+    /// [`Db::set_min_free`] は 0 のままにしておく
+    pub fn open_with_backend(
+        backend: impl StorageBackend,
+        cache_size: usize,
+    ) -> Result<Self, DbError> {
+        let database = Database::builder()
+            .set_cache_size(cache_size)
+            .create_with_backend(backend)
+            .map_err(db_error)?;
+        Self::prepare(database, None)
+    }
+
+    /// 開いた `database` に表をそろえ、版を確かめる
+    fn prepare(database: Database, directory: Option<std::path::PathBuf>) -> Result<Self, DbError> {
         // 表がないと読むときに困るので、最初に作っておく
         let transaction = database.begin_write().map_err(db_error)?;
         transaction.open_table(BLOCKS).map_err(db_error)?;
@@ -346,7 +369,7 @@ impl Db {
         transaction.commit().map_err(db_error)?;
         Ok(Self {
             handle: Handle::Write(database),
-            directory: directory.to_path_buf(),
+            directory,
             min_free: 0,
             defer_history: false,
             quiet_through: [None; 2],
@@ -370,7 +393,7 @@ impl Db {
         check_format(format.as_deref())?;
         Ok(Self {
             handle: Handle::Read(database),
-            directory: directory.to_path_buf(),
+            directory: Some(directory.to_path_buf()),
             min_free: 0,
             defer_history: false,
             quiet_through: [None; 2],
@@ -993,7 +1016,10 @@ impl Db {
         if self.min_free == 0 {
             return Ok(());
         }
-        let free = free_space(&self.directory).map_err(db_error)?;
+        let free = match &self.directory {
+            Some(directory) => free_space(directory).map_err(db_error)?,
+            None => return Err(db_error(no_free_space())),
+        };
         if free < self.min_free {
             return Err(DbError::LowSpace {
                 free,
@@ -2804,10 +2830,14 @@ fn free_space(path: &Path) -> std::io::Result<u64> {
 /// 空きを調べられないなら、足りているとはみなさない
 #[cfg(not(any(unix, windows)))]
 fn free_space(_path: &Path) -> std::io::Result<u64> {
-    Err(std::io::Error::new(
+    Err(no_free_space())
+}
+
+fn no_free_space() -> std::io::Error {
+    std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "この環境では空き容量を調べられません。minFree を 0 にしてください",
-    ))
+    )
 }
 
 impl StateSource for Db {
@@ -2888,6 +2918,62 @@ mod tests {
                 .unwrap();
             transaction.commit().unwrap();
         }
+    }
+
+    /// メモリの上のファイル。閉じても中身が残るので、開き直せる。ブラウザの OPFS の代わり
+    #[derive(Debug, Clone, Default)]
+    struct SharedBytes(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl StorageBackend for SharedBytes {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            Ok(self.0.lock().unwrap().len() as u64)
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            let bytes = self.0.lock().unwrap();
+            let start = offset as usize;
+            let source = bytes
+                .get(start..start + out.len())
+                .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+            out.copy_from_slice(source);
+            Ok(())
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.0.lock().unwrap().resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            let mut bytes = self.0.lock().unwrap();
+            let end = offset as usize + data.len();
+            if bytes.len() < end {
+                bytes.resize(end, 0);
+            }
+            bytes[offset as usize..end].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn opens_on_a_backend_and_reopens_it() {
+        let file = SharedBytes::default();
+        {
+            let db = Db::open_with_backend(file.clone(), DEFAULT_CACHE_SIZE).unwrap();
+            let mut batch = db.batch().unwrap();
+            batch.put_block(1, b"one").unwrap();
+            batch.commit().unwrap();
+        }
+        let mut db = Db::open_with_backend(file.clone(), DEFAULT_CACHE_SIZE).unwrap();
+        assert_eq!(db.blocks_tip().unwrap(), 1);
+        assert_eq!(db.block(1).unwrap().as_deref(), Some(&b"one"[..]));
+
+        db.set_min_free(1);
+        assert!(db.batch().is_err(), "空きを調べられないなら書かない");
     }
 
     #[test]

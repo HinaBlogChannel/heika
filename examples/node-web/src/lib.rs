@@ -4,6 +4,9 @@
 //!   同期ハンドルは Dedicated Worker の中でしか作れないので、DB は Worker が持つ
 //! - [`hold_lock`]: Web Locks で、DB を持つ Worker をオリジンで1つにする。タブが閉じると放され、
 //!   待っていたほかのタブの Worker が引き継ぐ
+//! - [`rest`]: 公開されている REST からブロックを取って組み直す
+
+pub mod rest;
 
 use std::cell::Cell;
 use std::io;

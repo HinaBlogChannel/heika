@@ -642,6 +642,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-rest"
+version = "0.14.1"
+dependencies = [
+ "heika-block",
+ "heika-core",
+ "heika-transaction",
+ "serde",
+ "serde_json",
+ "sha3",
+]
+
+[[package]]
 name = "heika-state-transition"
 version = "0.14.1"
 dependencies = [
@@ -1067,10 +1079,15 @@ checksum = "60993920e071b0c9b66f14e2b32740a4e27ffc82854dcd72035887f336a09a28"
 name = "node-web"
 version = "0.1.0"
 dependencies = [
+ "futures",
+ "heika-chain",
  "heika-core",
+ "heika-rest",
+ "heika-state-transition",
  "heika-store-redb",
  "js-sys",
  "leptos",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

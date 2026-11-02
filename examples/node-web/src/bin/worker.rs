@@ -208,6 +208,7 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
             network.parameters,
             network.nemesis,
             Some(KEEP),
+            true,
         )
         .map_err(|error| error.to_string())
     };

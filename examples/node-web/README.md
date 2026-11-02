@@ -9,7 +9,7 @@
 - DB を持つのは Dedicated Worker で、Web Locks でこのサイトに1つだけにします。2つ目のタブは、1つ目が閉じるまで待ってから引き継ぎます
 - COOP や COEP のヘッダーは要りません。GitHub Pages のような、ヘッダーを変えられないところにも置けます
 
-今はメインネットとテストネットだけに対応しています。DB はライトのノードと同じく刈り込み、状態と木の差分は確定から 2 エポック分、ブロックとステートメントは再開に要る分だけを残します。状態はメモリにまるごと持ちます。
+今はメインネットとテストネットだけに対応しています。DB はライトのノードと同じく刈り込み、状態と木の差分は確定から 2 エポック分、ブロックとステートメントは再開に要る分だけを残します。アカウントなどの大きい状態の表も全部はメモリに持たず、ブロックごとに要る分だけを読みます。
 
 ## 動かす
 
@@ -26,7 +26,7 @@ trunk serve --release
 ### 渡されるもの
 
 - `heika_rest::block::BlockInfo::assemble`: `/blocks` の1件と、その高さを含む `/transactions/confirmed?embedded=true` の答えから、ブロック全体のバイト列（P2P の `Pull_Blocks` と同じ形）を組み直します。並べるだけで、中身は確かめません
-- `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします。残し方（`heika_chain::chain::Keep`）を渡すと、刈り込みながら進みます
+- `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします。残し方（`heika_chain::chain::Keep`）を渡すと、刈り込みながら進みます。`partial` なら、アカウントなどの大きい表を全部はメモリに持たず、ブロックごとに要る分だけを DB の書きかけから読みます
 - `heika_store_redb::Db::open_with_backend`: ファイルのパスの代わりに、redb の `StorageBackend` の上に DB を開きます。`StorageBackend` が求める5つは、OPFS の `FileSystemSyncAccessHandle` とそのまま対応します
 
 | `StorageBackend` | `FileSystemSyncAccessHandle` |
@@ -55,7 +55,7 @@ let network = Network::from_node_info(&rest::get_json(origin, "/node/info").awai
 let db = Db::open_with_backend(OpfsFile::open("heika.redb").await?, 64 << 20)?;
 
 let light = Keep { state: 2, trie: 2, history: true };
-let mut replay = Replay::open(&db, network.config.clone(), network.parameters, network.nemesis, Some(light))?;
+let mut replay = Replay::open(&db, network.config.clone(), network.parameters, network.nemesis, Some(light), true)?;
 let target = rest::finalized_height(origin).await?;
 replay.set_target(target)?;
 while replay.height() < target {

@@ -1080,6 +1080,7 @@ name = "node-web"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "heika-block",
  "heika-chain",
  "heika-core",
  "heika-rest",

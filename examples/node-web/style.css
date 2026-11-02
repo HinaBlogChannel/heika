@@ -308,3 +308,18 @@ progress {
 .warnings {
   margin-top: var(--space-4);
 }
+
+/* 手元の DB から始める。ふだんは畳んでおく */
+.import {
+  margin-top: var(--space-5);
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.import summary {
+  cursor: pointer;
+}
+
+.import .hint {
+  margin-top: var(--space-3);
+}

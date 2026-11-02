@@ -17,7 +17,7 @@ use js_sys::{Function, Promise, Reflect};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetFileOptions,
+    Blob, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetFileOptions,
     FileSystemReadWriteOptions, FileSystemSyncAccessHandle, WorkerGlobalScope,
 };
 
@@ -61,6 +61,70 @@ impl OpfsFile {
     pub fn size(&self) -> io::Result<u64> {
         StorageBackend::len(self)
     }
+
+    /// 閉じる。閉じたあとは読み書きできない。ほかで同じファイルを開く前に呼ぶ
+    pub fn close(&self) {
+        self.0.close();
+    }
+
+    /// `blob`（画面で選んだファイルなど）を、OPFS の `name` に丸ごと写す。前の中身は捨てる。
+    /// `progress` には、写したバイト数と全体のバイト数を渡す
+    pub async fn import(
+        blob: &Blob,
+        name: &str,
+        mut progress: impl FnMut(f64, f64),
+    ) -> Result<Self, JsValue> {
+        /// 1回に読む大きさ。大きいほど速いが、wasm のメモリに一度に置く
+        const CHUNK: f64 = 16.0 * 1024.0 * 1024.0;
+        let file = Self::open(name).await?;
+        file.0.truncate_with_f64(0.0)?;
+        let total = blob.size();
+        let mut offset = 0.0;
+        while offset < total {
+            let end = (offset + CHUNK).min(total);
+            let buffer =
+                JsFuture::from(blob.slice_with_f64_and_f64(offset, end)?.array_buffer()).await?;
+            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+            file.0
+                .write_with_u8_array_and_options(&bytes, &at(offset as u64))?;
+            offset = end;
+            progress(offset, total);
+        }
+        file.0.flush()?;
+        Ok(file)
+    }
+}
+
+async fn root() -> Result<FileSystemDirectoryHandle, JsValue> {
+    let scope: WorkerGlobalScope = js_sys::global().dyn_into()?;
+    JsFuture::from(scope.navigator().storage().get_directory())
+        .await?
+        .dyn_into()
+}
+
+/// OPFS の一番上の `name` を消す。なければ何もしない
+pub async fn remove(name: &str) -> Result<(), JsValue> {
+    match JsFuture::from(root().await?.remove_entry(name)).await {
+        Ok(_) => Ok(()),
+        Err(error)
+            if Reflect::get(&error, &"name".into())?.as_string().as_deref()
+                == Some("NotFoundError") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// OPFS の一番上の `from` の名前を `to` に変える。`to` は先に消しておく。どちらも閉じてから呼ぶ
+pub async fn rename(from: &str, to: &str) -> Result<(), JsValue> {
+    let file = JsFuture::from(root().await?.get_file_handle(from)).await?;
+    // web-sys にはまだ move がないので、JS のオブジェクトとして呼ぶ
+    let rename: Function = Reflect::get(&file, &"move".into())?
+        .dyn_into()
+        .map_err(|_| JsValue::from("このブラウザは OPFS のファイルの名前を変えられません"))?;
+    JsFuture::from(rename.call1(&file, &to.into())?.dyn_into::<Promise>()?).await?;
+    Ok(())
 }
 
 fn js_error(error: JsValue) -> io::Error {

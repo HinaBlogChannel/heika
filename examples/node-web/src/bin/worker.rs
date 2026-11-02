@@ -4,9 +4,11 @@
 //! DB を OPFS に開き、確定した高さまで、取る、確かめて実行する、書く、を繰り返す。追いついたら、少し待って続きを見る。
 //!
 //! 画面から受け取るもの:
-//! - `["sync", オリジンを改行で区切った文字列, ハーベスト]`: 同期を始める。ハーベストは、しないなら `null`、するなら
+//! - `["sync", オリジンを改行で区切った文字列, ハーベスト, 自分のネットワーク]`: 同期を始める。ハーベストは、しないなら `null`、するなら
 //!   `[署名の鍵, VRF の鍵, ブロックを出す REST のオリジンを改行で区切った文字列]`。鍵は16進の秘密鍵で、委任だけで
-//!   ハーベストするなら空にする
+//!   ハーベストするなら空にする。自分のネットワークは、メインネットとテストネットのほかを同期するなら
+//!   `[config-network.properties, config-inflation.properties, config-finalization.properties, Nemesis のハッシュ]`
+//!   （どれもテキスト）、なければ `null`。REST の generation hash seed がこれと合えば、この設定で確かめる
 //! - `["stop"]`: 今の区切りを書いてから止める
 //! - `["import", File]`: 手元のノードの DB（redb）を、そのネットワークの DB として OPFS に写す。同期していないときだけ
 //!
@@ -147,11 +149,18 @@ fn main() {
                         let text = |index| harvest.get(index).as_string().unwrap_or_default();
                         (text(0), text(1), text(2))
                     });
+                    let custom = message.get(3);
+                    let custom = (!custom.is_null() && !custom.is_undefined()).then(|| {
+                        let custom: Array = custom.unchecked_into();
+                        (0..4)
+                            .map(|index| custom.get(index).as_string().unwrap_or_default())
+                            .collect::<Vec<_>>()
+                    });
                     running.set(true);
                     stopping.set(false);
                     let (running, stopping) = (running.clone(), stopping.clone());
                     wasm_bindgen_futures::spawn_local(async move {
-                        match sync(&origins, harvest, &stopping).await {
+                        match sync(&origins, harvest, custom, &stopping).await {
                             Ok(()) => post(&["stopped".into()]),
                             Err(error) => post(&["error".into(), error.into()]),
                         }
@@ -340,12 +349,21 @@ fn harvest(signing: &str, vrf: &str, submit: &str) -> Result<Harvest, String> {
 async fn sync(
     text: &str,
     harvest_input: Option<(String, String, String)>,
+    custom: Option<Vec<String>>,
     stopping: &Cell<bool>,
 ) -> Result<(), String> {
     let origins = origins(text);
     if origins.is_empty() {
         return Err("REST のオリジンを1つ以上入れてください".into());
     }
+    let custom = custom
+        .map(|texts| match texts.as_slice() {
+            [network, inflation, finalization, nemesis] => {
+                Network::custom(network, inflation, finalization, nemesis)
+            }
+            _ => Err("自分のネットワークの設定が足りません".into()),
+        })
+        .transpose()?;
     let mut harvest = harvest_input
         .map(|(signing, vrf, submit)| self::harvest(&signing, &vrf, &submit))
         .transpose()?;
@@ -354,7 +372,7 @@ async fn sync(
     let mut usable = Vec::new();
     for origin in &origins {
         let found = match rest::get_json(origin, "/node/info").await {
-            Ok(info) => Network::from_node_info(&info),
+            Ok(info) => Network::from_node_info(&info, custom.as_ref()),
             Err(error) => Err(error.to_string()),
         };
         match found {
@@ -385,7 +403,7 @@ async fn sync(
         let mut checked = Vec::new();
         for origin in &harvest.submit {
             let found = match rest::get_json(origin, "/node/info").await {
-                Ok(info) => Network::from_node_info(&info).map(|found| found.name),
+                Ok(info) => Network::from_node_info(&info, custom.as_ref()).map(|found| found.name),
                 Err(error) => Err(error.to_string()),
             };
             match found {

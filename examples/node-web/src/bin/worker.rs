@@ -19,6 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use futures::channel::oneshot;
+use heika_chain::chain::Keep;
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
@@ -37,6 +38,12 @@ const COMMIT_EVERY_MS: f64 = 5_000.0;
 const IDLE_MS: i32 = 30_000;
 /// 取れなかったとき、次に取りに行くまで待つ時間（ミリ秒）
 const RETRY_MS: i32 = 3_000;
+/// ライトのノードと同じ残し方。状態と木の差分は確定から 2 エポック分、ブロックとステートメントは再開に要る分だけ残す
+const KEEP: Keep = Keep {
+    state: 2,
+    trie: 2,
+    history: true,
+};
 
 /// 開いた DB。ネットワークごとに別のファイルにする
 struct Opened {
@@ -200,6 +207,7 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
             network.config.clone(),
             network.parameters,
             network.nemesis,
+            Some(KEEP),
         )
         .map_err(|error| error.to_string())
     };
@@ -225,6 +233,9 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
                 continue;
             }
         };
+        replay
+            .set_target(target)
+            .map_err(|error| error.to_string())?;
         if replay.height() >= target {
             report(&network, &replay, target, &rate, &file);
             status("確定した高さに追いつきました。続きを待っています");

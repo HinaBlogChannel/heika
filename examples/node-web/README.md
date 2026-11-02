@@ -9,7 +9,7 @@
 - DB を持つのは Dedicated Worker で、Web Locks でこのサイトに1つだけにします。2つ目のタブは、1つ目が閉じるまで待ってから引き継ぎます
 - COOP や COEP のヘッダーは要りません。GitHub Pages のような、ヘッダーを変えられないところにも置けます
 
-今はメインネットとテストネットだけに対応しています。全部のブロックと状態の差分を書くので、DB はアーカイブのノードと同じくらい大きくなり、状態はメモリにまるごと持ちます。
+今はメインネットとテストネットだけに対応しています。DB はライトのノードと同じく刈り込み、状態と木の差分は確定から 2 エポック分、ブロックとステートメントは再開に要る分だけを残します。状態はメモリにまるごと持ちます。
 
 ## 動かす
 
@@ -26,7 +26,7 @@ trunk serve --release
 ### 渡されるもの
 
 - `heika_rest::block::BlockInfo::assemble`: `/blocks` の1件と、その高さを含む `/transactions/confirmed?embedded=true` の答えから、ブロック全体のバイト列（P2P の `Pull_Blocks` と同じ形）を組み直します。並べるだけで、中身は確かめません
-- `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします
+- `heika_store_redb::replay::Replay`: 組み直したブロックを、Nemesis から順に確かめて実行します。heika-node の追いつく段階と同じ確かめを、スレッドなしでします。残し方（`heika_chain::chain::Keep`）を渡すと、刈り込みながら進みます
 - `heika_store_redb::Db::open_with_backend`: ファイルのパスの代わりに、redb の `StorageBackend` の上に DB を開きます。`StorageBackend` が求める5つは、OPFS の `FileSystemSyncAccessHandle` とそのまま対応します
 
 | `StorageBackend` | `FileSystemSyncAccessHandle` |
@@ -44,6 +44,7 @@ trunk serve --release
 Dedicated Worker の中で書きます。
 
 ```rust
+use heika_chain::chain::Keep;
 use heika_store_redb::Db;
 use heika_store_redb::replay::Replay;
 use node_web::rest::{self, Network};
@@ -53,8 +54,10 @@ hold_lock("my-app/db", || { /* 待っていることを画面に知らせる */ 
 let network = Network::from_node_info(&rest::get_json(origin, "/node/info").await?)?;
 let db = Db::open_with_backend(OpfsFile::open("heika.redb").await?, 64 << 20)?;
 
-let mut replay = Replay::open(&db, network.config.clone(), network.parameters, network.nemesis)?;
+let light = Keep { state: 2, trie: 2, history: true };
+let mut replay = Replay::open(&db, network.config.clone(), network.parameters, network.nemesis, Some(light))?;
 let target = rest::finalized_height(origin).await?;
+replay.set_target(target)?;
 while replay.height() < target {
     let from = replay.height() + 1;
     for bytes in rest::fetch_blocks(origin, from, target).await? {
@@ -67,7 +70,8 @@ while replay.height() < target {
 ### 守ること
 
 - `Replay::push` で弾かれたら、その `Replay` は途中まで当たった状態なので捨て、`Replay::open` で最後のコミットから開き直します。続けて弾かれるなら、別の REST から取り直します
-- `Replay` は巻き戻せません。確定した高さより先は取らないでください
+- `Replay` は巻き戻せません。確定した高さより先は取らないでください。`set_target` に渡すのも確定した高さまでにします（そこから残す分より下の差分は、書かずに捨てます）
+- 刈り込むときは、コミットのたびに古いものを 1 回 2 秒まで消します。消しきれなかった分は、次のコミットで続けます。redb はファイルを縮めないので、消した分は次に書くときに使い回されます
 - `commit` するまで DB には残りません。間隔が長いと止めたときに失う分が増え、短いと書く回数が増えます。この例は 5 秒ごとです
 - `OpfsFile` は、スレッドを使わない wasm でだけ使えます。JS のものを `Send` と `Sync` にしているので、`atomics` を有効にしてビルドすると止まるようにしてあります
 - 同期ハンドルはファイルを1人占めします。開く前に `hold_lock` で順番を待ってください
@@ -82,6 +86,5 @@ while replay.height() < target {
 
 ## この先
 
-- ライトのノードのように、古いブロックと状態の差分を刈り込む
 - 状態を全部はメモリに持たない
 - 確定した先の先端を追い、ハーベストする

@@ -11,13 +11,18 @@
 //!
 //! [`Replay::push`] で当てたものは、[`Replay::commit`] するまで DB に残らない。途中で弾いたら、その [`Replay`] は
 //! 捨てて、[`Replay::open`] で最後のコミットから開き直す。
+//!
+//! 残し方（[`Keep`]）を渡せば、ノードの追いつく段階と同じく刈り込みながら進む。目標の高さ（[`Replay::set_target`]）から
+//! 残す分を引いたところより下では状態と木の差分を書かず、コミットのたびに、古いブロック、ステートメント、
+//! チェックポイント、差分を少しずつ（1回 2 秒まで）消す。
 
 use std::collections::VecDeque;
 use std::fmt;
 
 use heika_block::Block;
 use heika_block::scoring::{BlockStatistic, difficulty};
-use heika_chain::store::EXECUTOR_META;
+use heika_chain::chain::Keep;
+use heika_chain::store::{ChainStore, EXECUTOR_META, now_or_never};
 use heika_chain::verify::{Tip, verify_alone, verify_link};
 use heika_core::hash::Hash256;
 use heika_core::network::NetworkParameters;
@@ -72,6 +77,15 @@ pub struct Replay<'a> {
     batch: Option<Batch>,
     /// 最後にコミットした高さ
     committed: u64,
+    config: ChainConfig,
+    /// 刈り込むなら、残す分。`None` なら全部残す（アーカイブ）
+    keep: Option<Keep>,
+    /// 状態と木のそれぞれ、この高さ以下では差分を書かない
+    quiet_through: [Option<u64>; 2],
+    /// この高さ以下ではステートメントを書かない
+    statements_through: Option<u64>,
+    /// [`Replay::set_target`] で知らされた目標
+    target: u64,
 }
 
 impl<'a> Replay<'a> {
@@ -81,17 +95,22 @@ impl<'a> Replay<'a> {
         config: ChainConfig,
         parameters: &'static NetworkParameters,
         nemesis: Hash256,
+        keep: Option<Keep>,
     ) -> Result<Self, ReplayError> {
         let seed = parameters.generation_hash_seed;
         let lifetime = config
             .max_transaction_lifetime
             .max(config.max_bonded_transaction_lifetime);
         let mut executor = match db.meta(EXECUTOR_META)? {
-            Some(meta) => {
-                Executor::restore(config, parameters.identifier, seed, db.state_rows()?, &meta)
-                    .map_err(failed)?
-            }
-            None => Executor::new(config, parameters.identifier, seed),
+            Some(meta) => Executor::restore(
+                config.clone(),
+                parameters.identifier,
+                seed,
+                db.state_rows()?,
+                &meta,
+            )
+            .map_err(failed)?,
+            None => Executor::new(config.clone(), parameters.identifier, seed),
         };
         let start = executor.height();
         let stored = |height: u64| -> Result<Block, ReplayError> {
@@ -176,7 +195,44 @@ impl<'a> Replay<'a> {
             statistics,
             batch: None,
             committed: start,
+            config,
+            keep,
+            quiet_through: [None; 2],
+            statements_through: None,
+            target: 0,
         })
+    }
+
+    /// これから実行する目標の高さ（ふつうは確定した高さ）を知らせる。刈り込むなら、目標から残す分を引いたところより
+    /// 下では差分を書かないようにする。そこまでの差分は消す扱いにする（DB の差分の始まりを上げる）ので、目標は確定した
+    /// 高さより上にしない。書きかけがあれば、次のコミットのあとで当てる（redb は書く側が1つだけなので）
+    pub fn set_target(&mut self, target: u64) -> Result<(), ReplayError> {
+        self.target = self.target.max(target);
+        if self.batch.is_none() {
+            self.apply_target()?;
+        }
+        Ok(())
+    }
+
+    /// [`Replay::set_target`] の目標から、差分を書かない高さを決めて当てる。書きかけがないときに呼ぶ
+    fn apply_target(&mut self) -> Result<(), ReplayError> {
+        let Some(keep) = self.keep else {
+            return Ok(());
+        };
+        let grouping = self.parameters.voting_set_grouping;
+        let state = self.target.saturating_sub(keep.state * grouping);
+        let trie = self.target.saturating_sub(keep.trie * grouping);
+        if self.quiet_through == [Some(state), Some(trie)] {
+            return Ok(());
+        }
+        // 差分の始まりを上げてから、それより下を書かないようにする。残りの差分を消すのは commit のたびに少しずつ
+        self.db.prune_state_history(state, |_| false)?;
+        self.db.prune_trie_history(trie, |_| false)?;
+        self.quiet_through = [Some(state), Some(trie)];
+        if keep.history {
+            self.statements_through = Some(state.saturating_sub(self.config.blocks_for_restart()));
+        }
+        Ok(())
     }
 
     /// 実行した高さ（コミットしていない分も含む）
@@ -262,12 +318,21 @@ impl<'a> Replay<'a> {
         };
         let batch = match &mut self.batch {
             Some(batch) => batch,
-            None => self.batch.insert(self.db.batch()?),
+            None => {
+                let mut batch = self.db.batch()?;
+                batch.quiet_through = self.quiet_through;
+                self.batch.insert(batch)
+            }
         };
         batch.put_block(height, &bytes)?;
         batch.set_state_at(height, state)?;
         batch.set_trie_at(height, nodes)?;
-        batch.put_statement(height, &statement.to_bytes())?;
+        if self
+            .statements_through
+            .is_none_or(|through| height > through)
+        {
+            batch.put_statement(height, &statement.to_bytes())?;
+        }
         if let Some(epoch) = next_epoch {
             batch.put_voters(epoch, &self.executor.voting_set(epoch).encode())?;
         }
@@ -292,6 +357,9 @@ impl<'a> Replay<'a> {
         batch.put_checkpoint(height, &meta)?;
         batch.commit()?;
         self.committed = height;
-        Ok(())
+        // コミットした高さを確定とみなして、残す分より古いものを消す。消しきれなければ次のコミットで続ける
+        let plan = Keep::plan(self.keep, &self.config, self.parameters, height, height);
+        now_or_never(ChainStore::prune(self.db, plan)).map_err(failed)?;
+        self.apply_target()
     }
 }

@@ -3,10 +3,13 @@
 //! REST の答えは信じない。組み直したバイト列は、[`heika_store_redb::replay::Replay`] が署名、TransactionsHash、
 //! 難易度、VRF、StateHash まで確かめてから使う。REST が間違ったものを返しても、弾かれるだけになる。
 
+use heika_block::finalization::{FinalizationRound, FinalizedBlockHeader};
 use heika_chain::verify::nemesis_hash;
 use heika_core::hash::Hash256;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
+use heika_packet::ChainStatistics;
 use heika_rest::block::BlockInfo;
+use heika_rest::finalization::FinalizationProof;
 use heika_rest::transaction::TransactionInfo;
 use heika_state_transition::config::ChainConfig;
 use js_sys::Promise;
@@ -152,10 +155,11 @@ pub async fn fetch_blocks(origin: &str, from: u64, to: u64) -> Result<Vec<Vec<u8
     let blocks: Vec<BlockInfo> = serde_json::from_value(page["data"].clone())
         .map_err(|error| malformed(format!("/blocks: {error}")))?;
     let blocks: Vec<BlockInfo> = blocks.into_iter().take(count as usize).collect();
-    let last = from + blocks.len() as u64 - 1;
+    // 先端より先を頼まれたら、空で返す
     if blocks.is_empty() {
-        return Err(malformed(format!("高さ {from} からのブロックがありません")));
+        return Ok(Vec::new());
     }
+    let last = from + blocks.len() as u64 - 1;
 
     let mut found: Vec<TransactionInfo> = Vec::new();
     for number in 1.. {
@@ -191,4 +195,84 @@ pub async fn fetch_blocks(origin: &str, from: u64, to: u64) -> Result<Vec<Vec<u8
                 .map_err(|error| malformed(format!("高さ {height} を組み直せません: {error}")))
         })
         .collect()
+}
+
+/// `/chain/info` の、高さ、確定した高さ、スコアと、確定したブロック
+pub async fn chain_info(
+    origin: &str,
+) -> Result<(ChainStatistics, FinalizedBlockHeader), FetchError> {
+    let info = get_json(origin, "/chain/info").await?;
+    let malformed = || FetchError::Malformed("/chain/info が読めません".into());
+    let number = |value: &Value| value.as_str().and_then(|text| text.parse::<u64>().ok());
+    let finalized = &info["latestFinalizedBlock"];
+    let header = FinalizedBlockHeader {
+        round: FinalizationRound {
+            epoch: finalized["finalizationEpoch"]
+                .as_u64()
+                .and_then(|epoch| u32::try_from(epoch).ok())
+                .ok_or_else(malformed)?,
+            point: finalized["finalizationPoint"]
+                .as_u64()
+                .and_then(|point| u32::try_from(point).ok())
+                .ok_or_else(malformed)?,
+        },
+        height: number(&finalized["height"]).ok_or_else(malformed)?,
+        hash: finalized["hash"]
+            .as_str()
+            .and_then(|hash| hash.parse().ok())
+            .ok_or_else(malformed)?,
+    };
+    let statistics = ChainStatistics {
+        height: number(&info["height"]).ok_or_else(malformed)?,
+        finalized_height: header.height,
+        score: (u128::from(number(&info["scoreHigh"]).ok_or_else(malformed)?) << 64)
+            | u128::from(number(&info["scoreLow"]).ok_or_else(malformed)?),
+    };
+    Ok((statistics, header))
+}
+
+/// `from` から `count` 個（[`PAGE_SIZE`] まで）のブロックのハッシュ。先端より先は返らない
+pub async fn fetch_hashes(
+    origin: &str,
+    from: u64,
+    count: u32,
+) -> Result<Vec<[u8; 32]>, FetchError> {
+    let page = get_json(
+        origin,
+        &format!(
+            "/blocks?orderBy=height&order=asc&offset={}&pageSize={PAGE_SIZE}",
+            from - 1
+        ),
+    )
+    .await?;
+    let blocks: Vec<BlockInfo> = serde_json::from_value(page["data"].clone())
+        .map_err(|error| FetchError::Malformed(format!("/blocks: {error}")))?;
+    blocks
+        .iter()
+        .take(count as usize)
+        .map(|block| {
+            block
+                .meta
+                .hash
+                .parse::<Hash256>()
+                .map(|hash| hash.0)
+                .map_err(|_| FetchError::Malformed("/blocks のハッシュが読めません".into()))
+        })
+        .collect()
+}
+
+/// エポック `epoch` のファイナライズの証明を、ノードが返すバイナリの形で。まだなければ `None`
+pub async fn fetch_proof(origin: &str, epoch: u32) -> Result<Option<Vec<u8>>, FetchError> {
+    let path = format!("/finalization/proof/epoch/{epoch}");
+    let proof = match get_json(origin, &path).await {
+        Ok(proof) => proof,
+        Err(FetchError::Unavailable(reason)) if reason.ends_with("HTTP 404") => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let proof: FinalizationProof = serde_json::from_value(proof)
+        .map_err(|error| FetchError::Malformed(format!("{path}: {error}")))?;
+    proof
+        .to_bytes()
+        .map(Some)
+        .map_err(|error| FetchError::Malformed(format!("{path}: {error}")))
 }

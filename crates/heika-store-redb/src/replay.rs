@@ -24,6 +24,8 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use heika_block::Block;
+use heika_block::finalization::FinalizedBlockHeader;
+use heika_block::finalization::proof::{VotingSet, verify_proof};
 use heika_block::scoring::{BlockStatistic, difficulty};
 use heika_chain::chain::Keep;
 use heika_chain::store::{ChainStore, EXECUTOR_META, now_or_never};
@@ -267,6 +269,52 @@ impl<'a> Replay<'a> {
             self.statements_through = Some(state.saturating_sub(self.config.blocks_for_restart()));
         }
         Ok(())
+    }
+
+    /// エポック `epoch` のファイナライズの証明を、実行して求めた投票者で確かめ、指すブロックが実行したものと同じなら
+    /// しまう。しまった証明は、先端を追う `Chain` が、確かめた確定として読む。書きかけがあれば先にコミットする。
+    /// 指すブロックがまだ実行していない高さなら、しまわずに `Ok(None)` を返す（もっと進めてから呼び直す）
+    pub fn store_proof(
+        &mut self,
+        epoch: u32,
+        proof: &[u8],
+    ) -> Result<Option<FinalizedBlockHeader>, ReplayError> {
+        self.commit()?;
+        let voters = self
+            .db
+            .voters(epoch)?
+            .and_then(|voters| VotingSet::decode(&voters))
+            .ok_or_else(|| failed(format!("エポック {epoch} の投票者がありません")))?;
+        let invalid = |reason: String| ReplayError::Invalid {
+            height: self.committed,
+            reason,
+        };
+        let header = verify_proof(
+            proof,
+            epoch,
+            &voters,
+            &self.config.finalization.proof_parameters(),
+        )
+        .map_err(|error| invalid(format!("エポック {epoch} の証明が通りません: {error}")))?;
+        if header.height > self.committed {
+            return Ok(None);
+        }
+        let bytes = self.db.block(header.height)?.ok_or_else(|| {
+            failed(format!(
+                "証明が指す高さ {} のブロックがありません",
+                header.height
+            ))
+        })?;
+        if Block::from_bytes(&bytes).map_err(failed)?.hash() != header.hash {
+            return Err(invalid(format!(
+                "エポック {epoch} の証明が、実行したものと違う高さ {} のブロックを指しています",
+                header.height
+            )));
+        }
+        let mut batch = self.db.batch()?;
+        batch.put_proof(epoch, proof)?;
+        batch.commit()?;
+        Ok(Some(header))
     }
 
     /// 実行した高さ（コミットしていない分も含む）

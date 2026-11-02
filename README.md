@@ -133,7 +133,7 @@ heika の crate を wasm にして、ブラウザだけで動かす例を `examp
 
 - [web-vanitygen](https://hinablogchannel.github.io/heika/examples/web-vanitygen/): 決まった文字で始まるアドレスを探す。鍵はブラウザの中で作り、外に出さない
 - [すんぼる草不可避](https://hinablogchannel.github.io/heika/examples/sunboru-kusa/): 送金で、畑に草が生える。何が生えるかは送金のハッシュだけで決まる。送金は、ブラウザから公開ノードの REST に問い合わせて読む
-- [node-web](https://hinablogchannel.github.io/heika/examples/node-web/): 公開ノードの REST からブロックを取り、Nemesis から署名、難易度、VRF、状態のハッシュまで確かめながら、確定した高さまで同期する。REST の答えは信じない。DB はネイティブの heika と同じ redb をブラウザの中（OPFS）に置き、ライトのノードと同じく刈り込む。手元のノードの DB から続けることもできる
+- [node-web](https://hinablogchannel.github.io/heika/examples/node-web/): 公開ノードの REST からブロックを取り、Nemesis から署名、難易度、VRF、状態のハッシュまで確かめながら同期し、先端を追う。REST の答えは信じない。DB はネイティブの heika と同じ redb をブラウザの中（OPFS）に置き、ライトのノードと同じく刈り込む。手元のノードの DB から続けることもできる
 
 ## テスト
 

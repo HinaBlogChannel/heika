@@ -1083,6 +1083,7 @@ dependencies = [
  "heika-block",
  "heika-chain",
  "heika-core",
+ "heika-packet",
  "heika-rest",
  "heika-state-transition",
  "heika-store-redb",

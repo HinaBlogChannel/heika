@@ -34,6 +34,8 @@ struct Progress {
     rate: f64,
     state_hash: String,
     size: f64,
+    /// 確定した先の先端を追っている
+    tip: bool,
 }
 
 /// バイト数を、読みやすい単位にする
@@ -111,7 +113,19 @@ fn App() -> impl IntoView {
                     rate: number(4),
                     state_hash: text(5),
                     size: number(6),
+                    tip: false,
                 })),
+                "tip" => progress.update(|progress| {
+                    *progress = Some(Progress {
+                        network: text(1),
+                        height: number(2),
+                        target: Some(number(3)),
+                        rate: 0.0,
+                        size: number(4),
+                        state_hash: text(5),
+                        tip: true,
+                    });
+                }),
                 "warning" => warnings.update(|warnings| {
                     warnings.push(text(1));
                     if warnings.len() > WARNINGS {
@@ -239,21 +253,24 @@ fn App() -> impl IntoView {
                             <dl class="facts">
                                 <dt>"ネットワーク"</dt>
                                 <dd>{progress.network.clone()}</dd>
-                                <dt>"確かめて書いた高さ"</dt>
+                                <dt>{if progress.tip { "先端の高さ" } else { "確かめて書いた高さ" }}</dt>
                                 <dd>{match progress.target {
                                     Some(target) => format!("{} / {}", group(progress.height), group(target)),
                                     None => group(progress.height),
                                 }}</dd>
-                                <dt>"速さ"</dt>
-                                <dd>{format!("{:.0} ブロック/秒", progress.rate)}</dd>
+                                <Show when=move || !progress.tip>
+                                    <dt>"速さ"</dt>
+                                    <dd>{format!("{:.0} ブロック/秒", progress.rate)}</dd>
+                                </Show>
                                 <dt>"残り"</dt>
                                 <dd>{match remaining {
+                                    Some(blocks) if progress.tip => format!("先端を追っています（REST の先端まで {} ブロック）", group(blocks)),
                                     Some(0.0) => "追いつきました".to_owned(),
                                     Some(blocks) if progress.rate > 0.0 => format!("{} ブロック、およそ {}", group(blocks), duration(blocks / progress.rate)),
                                     Some(blocks) => format!("{} ブロック", group(blocks)),
                                     None => "—".to_owned(),
                                 }}</dd>
-                                <dt>"StateHash"</dt>
+                                <dt>{if progress.tip { "先端のブロック" } else { "StateHash" }}</dt>
                                 <dd class="hash">
                                     <span class="verified">"確かめた"</span>
                                     " "
@@ -282,7 +299,7 @@ fn App() -> impl IntoView {
             </Show>
 
             <ul class="notes">
-                <li>"同期するのは、確定した高さまでです。確定した先は巻き戻ることがあるので、まだ取りません。"</li>
+                <li>"確定した高さまではまとめて確かめながら進め、その先はネイティブの heika と同じ中核で、枝の取り替えもしながら先端を追います。"</li>
                 <li>"別のタブでこのページを開くと、こちらを閉じるまで待ちます。"</li>
                 <li>"DB はこのブラウザのこのサイトの中だけにあり、サイトのデータを消すと消えます。"</li>
             </ul>

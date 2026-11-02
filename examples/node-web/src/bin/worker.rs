@@ -16,14 +16,24 @@
 //! - `["warning", 文]`: 1つの REST が取れないか、正しくないものを返した。ほかの REST で続ける
 //! - `["stopped"]` と `["error", 理由]`: 同期が終わった
 //! - `["imported", ネットワーク, 先端の高さ]`: 写し終えた
+//! - `["tip", ネットワーク, 手元の先端の高さ, REST の言う先端の高さ, ファイルのバイト数, 先端のブロックのハッシュ]`:
+//!   確定した先の先端を追っている
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use futures::channel::oneshot;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
+
+use futures::StreamExt;
+use futures::channel::{mpsc, oneshot};
 use heika_block::Block;
 use heika_chain::chain::Keep;
+use heika_chain::chain::{Action, Chain, Outcome};
+use heika_chain::env::Env;
+use heika_chain::event::{ChainEvent, PeerCommand, PeerId};
 use heika_chain::store::EXECUTOR_META;
+use heika_chain::verify::{Tip, verify_alone};
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
@@ -38,8 +48,10 @@ const LOCK: &str = "heika-node-web/db";
 const CACHE_SIZE: usize = 64 << 20;
 /// 少なくともこの間隔（ミリ秒）でコミットする。短いほど止めたときに失うものが少ないが、書く回数が増える
 const COMMIT_EVERY_MS: f64 = 5_000.0;
-/// 追いついたあと、確定した高さを見直すまで待つ時間（ミリ秒）
-const IDLE_MS: i32 = 30_000;
+/// 先端を追うあいだ、中核に Tick を入れる間隔（ミリ秒）。ノードと同じ 5 秒
+const TICK_MS: i32 = 5_000;
+/// 中核が外した REST を、また使い始めるまでの時間（ミリ秒）
+const READD_MS: i32 = 60_000;
 /// 取れなかったとき、次に取りに行くまで待つ時間（ミリ秒）
 const RETRY_MS: i32 = 3_000;
 /// ライトのノードと同じ残し方。状態と木の差分は確定から 2 エポック分、ブロックとステートメントは再開に要る分だけ残す
@@ -282,10 +294,29 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
     let network = network.ok_or("使える REST がありません")?;
     let (db, file) = open(network.name).await?;
 
+    loop {
+        if !catch_up(&db, &file, &network, &usable, stopping).await? {
+            return Ok(());
+        }
+        match follow_tip(&db, &file, &network, &usable, stopping).await? {
+            TipEnd::Behind => continue,
+            TipEnd::Stopped => return Ok(()),
+        }
+    }
+}
+
+/// 確定した高さまで、取る、確かめて実行する、書くを繰り返し、確定の証明をしまう。止められたら偽
+async fn catch_up(
+    db: &Db,
+    file: &OpfsFile,
+    network: &Network,
+    usable: &[String],
+    stopping: &Cell<bool>,
+) -> Result<bool, String> {
     status("DB から続きを用意しています");
     let open_replay = || {
         Replay::open(
-            &db,
+            db,
             network.config.clone(),
             network.parameters,
             network.nemesis,
@@ -308,27 +339,42 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
 
     while !stopping.get() {
         let origin = pick();
-        let target = match rest::finalized_height(&origin).await {
-            Ok(target) => target,
+        let finalized = match rest::chain_info(&origin).await {
+            Ok((_, finalized)) => finalized,
             Err(error) => {
                 post(&["warning".into(), format!("{origin}: {error}").into()]);
                 rest::sleep(RETRY_MS).await;
                 continue;
             }
         };
+        let target = finalized.height;
         replay
             .set_target(target)
             .map_err(|error| error.to_string())?;
         if replay.height() >= target {
-            report(&network, &replay, target, &rate, &file);
-            status("確定した高さに追いつきました。続きを待っています");
-            for _ in 0..IDLE_MS / 1000 {
-                if stopping.get() {
-                    break;
+            // 確定したブロックの証明を、実行して求めた投票者で確かめてしまう。先端を追う Chain は、これを確定として読む
+            status("確定の証明を確かめています");
+            let epoch = finalized.round.epoch;
+            let stored = match rest::fetch_proof(&origin, epoch).await {
+                Ok(Some(proof)) => replay.store_proof(epoch, &proof),
+                Ok(None) => Err(ReplayError::Failed(format!(
+                    "エポック {epoch} の証明がまだありません"
+                ))),
+                Err(error) => Err(ReplayError::Failed(error.to_string())),
+            };
+            match stored {
+                Ok(Some(_)) => {
+                    report(network, &replay, target, &rate, file);
+                    return Ok(true);
                 }
-                rest::sleep(1000).await;
+                // 証明が、まだ実行していない高さを指している。もう少し進める
+                Ok(None) => continue,
+                Err(error) => {
+                    post(&["warning".into(), format!("{origin}: {error}").into()]);
+                    rest::sleep(RETRY_MS).await;
+                    continue;
+                }
             }
-            continue;
         }
         status("同期しています");
 
@@ -393,7 +439,7 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
                 replay.commit().map_err(|error| error.to_string())?;
                 last_commit = now();
                 rate.update(replay.committed(), last_commit);
-                report(&network, &replay, target, &rate, &file);
+                report(network, &replay, target, &rate, file);
             }
             match ahead {
                 Some((origin, receiver, next_to)) if !stopping.get() => {
@@ -405,8 +451,215 @@ async fn sync(text: &str, stopping: &Cell<bool>) -> Result<(), String> {
         }
     }
     replay.commit().map_err(|error| error.to_string())?;
-    report_final(&network, &replay, &file);
-    Ok(())
+    report_final(network, &replay, file);
+    Ok(false)
+}
+
+/// 先端を追う段階が終わったわけ
+enum TipEnd {
+    /// 確定が先に進みすぎた。追いつく段階に戻る
+    Behind,
+    Stopped,
+}
+
+/// ブラウザの時計
+struct BrowserEnv;
+
+impl Env for BrowserEnv {
+    fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs_f64(js_sys::Date::now() / 1000.0)
+    }
+}
+
+/// 確定した先の先端を、巻き戻しのある中核（[`Chain`]）で追う。中核がピアに頼むことに、REST で答える。
+/// REST の1つを1つのピアとして扱う
+async fn follow_tip(
+    db: &Db,
+    file: &OpfsFile,
+    network: &Network,
+    usable: &[String],
+    stopping: &Cell<bool>,
+) -> Result<TipEnd, String> {
+    status("先端を追う用意をしています");
+    let env = BrowserEnv;
+    let mut chain = Chain::new(db, &env, network.config.clone(), network.parameters, true)
+        .await
+        .map_err(|error| format!("先端の段階を始められません: {error}"))?;
+    chain.set_keep(KEEP);
+    let (sender, mut events) = mpsc::unbounded::<ChainEvent>();
+    // ピアの番号から REST へ。外したピアの番号は使い回さないので、入れ直すときは新しい番号にする
+    let mut peers: HashMap<usize, String> = HashMap::new();
+    let mut next_peer = 0;
+    for origin in usable {
+        peers.insert(next_peer, origin.clone());
+        let _ = sender.unbounded_send(ChainEvent::PeerAdded {
+            peer: PeerId(next_peer),
+        });
+        next_peer += 1;
+    }
+    {
+        let sender = sender.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                rest::sleep(TICK_MS).await;
+                if sender.unbounded_send(ChainEvent::Tick).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    status("先端を追っています");
+    let mut network_tip = 0;
+    loop {
+        for action in chain.take_actions() {
+            match action {
+                Action::Command(peer, command) => match peers.get(&peer.0) {
+                    Some(origin) => answer(network, origin.clone(), peer, command, sender.clone()),
+                    None => {
+                        let _ = sender.unbounded_send(ChainEvent::Failed {
+                            peer,
+                            error: "外した REST です".into(),
+                            malformed: false,
+                        });
+                    }
+                },
+                Action::Disconnect { peer, .. } => {
+                    // しばらく使わず、あとで新しい番号で入れ直す（REST は切れないので、頼まないことで外す）
+                    if let Some(origin) = peers.remove(&peer.0) {
+                        let _ = sender.unbounded_send(ChainEvent::PeerLost { peer });
+                        let (sender, id) = (sender.clone(), next_peer);
+                        next_peer += 1;
+                        peers.insert(id, origin);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            rest::sleep(READD_MS).await;
+                            let _ =
+                                sender.unbounded_send(ChainEvent::PeerAdded { peer: PeerId(id) });
+                        });
+                    }
+                }
+                Action::WakeAt(at) => {
+                    let wait = at
+                        .duration_since(env.now())
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(i32::MAX as u128) as i32;
+                    let sender = sender.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        rest::sleep(wait).await;
+                        let _ = sender.unbounded_send(ChainEvent::Wake);
+                    });
+                }
+                Action::Notify(notice) if notice.is_warning() => {
+                    post(&["warning".into(), notice.to_string().into()]);
+                }
+                _ => {}
+            }
+        }
+        report_tip(network, &chain.tip(), network_tip, file);
+        if stopping.get() {
+            return Ok(TipEnd::Stopped);
+        }
+        let Some(event) = events.next().await else {
+            return Ok(TipEnd::Stopped);
+        };
+        if let ChainEvent::Statistics { statistics, .. } = &event {
+            network_tip = network_tip.max(statistics.height);
+        }
+        match chain.handle(event).await {
+            Ok(None) => {}
+            Ok(Some(Outcome::Behind { .. })) => {
+                status("確定が先に進んだので、追いつく段階に戻ります");
+                return Ok(TipEnd::Behind);
+            }
+            Ok(Some(Outcome::Stopped)) => return Ok(TipEnd::Stopped),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+/// 中核がピア `peer`（REST の `origin`）に頼んだことを REST で取り、答えを `sender` に入れる
+fn answer(
+    network: &Network,
+    origin: String,
+    peer: PeerId,
+    command: PeerCommand,
+    sender: mpsc::UnboundedSender<ChainEvent>,
+) {
+    let parameters = network.parameters;
+    wasm_bindgen_futures::spawn_local(async move {
+        let failed = |error: FetchError| ChainEvent::Failed {
+            peer,
+            malformed: matches!(error, FetchError::Malformed(_)),
+            error: error.to_string(),
+        };
+        let event = match command {
+            PeerCommand::Statistics => match rest::chain_info(&origin).await {
+                Ok((statistics, _)) => ChainEvent::Statistics { peer, statistics },
+                Err(error) => failed(error),
+            },
+            PeerCommand::Finalized => match rest::chain_info(&origin).await {
+                Ok((_, header)) => ChainEvent::Finalized { peer, header },
+                Err(error) => failed(error),
+            },
+            PeerCommand::PullBlocks { from, count } => {
+                let to = from + u64::from(count.max(1)) - 1;
+                match rest::fetch_blocks(&origin, from, to).await {
+                    Ok(fetched) => {
+                        // 前後に依らない確かめは、中核に渡す前に済ませる
+                        let checked: Result<Vec<_>, String> = fetched
+                            .into_iter()
+                            .map(|bytes| {
+                                let block =
+                                    Block::from_bytes(&bytes).map_err(|error| error.to_string())?;
+                                verify_alone(parameters, &block)
+                                    .map_err(|error| error.to_string())?;
+                                Ok((block, bytes))
+                            })
+                            .collect();
+                        match checked {
+                            Ok(blocks) => ChainEvent::Blocks {
+                                peer,
+                                from,
+                                count,
+                                blocks,
+                            },
+                            Err(error) => failed(FetchError::Malformed(error)),
+                        }
+                    }
+                    Err(error) => failed(error),
+                }
+            }
+            PeerCommand::PullHashes { from, count } => {
+                match rest::fetch_hashes(&origin, from, count).await {
+                    Ok(hashes) => ChainEvent::Hashes {
+                        peer,
+                        from,
+                        count,
+                        hashes,
+                    },
+                    Err(error) => failed(error),
+                }
+            }
+            PeerCommand::PullProof { epoch } => match rest::fetch_proof(&origin, epoch).await {
+                Ok(proof) => ChainEvent::Proof { peer, epoch, proof },
+                Err(error) => failed(error),
+            },
+            // 作ったブロックを出すのは、まだしない（ハーベストしない）
+            PeerCommand::Push(_) => return,
+        };
+        let _ = sender.unbounded_send(event);
+    });
+}
+
+fn report_tip(network: &Network, tip: &Tip, network_tip: u64, file: &OpfsFile) {
+    post(&[
+        "tip".into(),
+        network.name.into(),
+        (tip.height as f64).into(),
+        (network_tip.max(tip.height) as f64).into(),
+        (file.size().unwrap_or(0) as f64).into(),
+        tip.hash.to_string().into(),
+    ]);
 }
 
 /// 書いた高さの伸びから求めた、1 秒あたりのブロック。直近の 30 秒ほどで均す

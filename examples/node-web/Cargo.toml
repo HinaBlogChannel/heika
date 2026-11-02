@@ -26,6 +26,7 @@ futures = { version = "0.3.34", default-features = false, features = ["std"] }
 heika-core = { path = "../../crates/heika-core", default-features = false, features = ["wasm_js"] }
 heika-block = { path = "../../crates/heika-block" }
 heika-chain = { path = "../../crates/heika-chain" }
+heika-packet = { path = "../../crates/heika-packet" }
 heika-rest = { path = "../../crates/heika-rest" }
 heika-state-transition = { path = "../../crates/heika-state-transition" }
 heika-store-redb = { path = "../../crates/heika-store-redb" }

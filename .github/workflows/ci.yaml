@@ -151,6 +151,10 @@ jobs:
   # 通ったら、crate の API の文書と合わせて、Pages に出すサイトの形に並べて Artifact に上げる
   examples:
     runs-on: ubuntu-24.04
+    # どの例もワークスペースの target を使い、同じ版に解決された heika の crate や依存を組み直さない。
+    # 版のずれた依存は別に組まれるだけで、取り違えはない
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     defaults:
       run:
         working-directory: examples/web-vanitygen
@@ -166,19 +170,19 @@ jobs:
         with:
           workspaces: |
             .
-            examples/web-vanitygen
-            examples/node-web
-            examples/sunboru-kusa
-            examples/sunboru-kusa/discover
-            examples/instant-rebate
-            examples/intent-dex
-            examples/adaptor-swap
-            examples/faucet
-            examples/roast
-            examples/vanitygen-nvptx
-            examples/evm-bridge
-            examples/evm-rollup
-            examples/dkg
+            examples/web-vanitygen -> ../../target
+            examples/node-web -> ../../target
+            examples/sunboru-kusa -> ../../target
+            examples/sunboru-kusa/discover -> ../../../target
+            examples/instant-rebate -> ../../target
+            examples/intent-dex -> ../../target
+            examples/adaptor-swap -> ../../target
+            examples/faucet -> ../../target
+            examples/roast -> ../../target
+            examples/vanitygen-nvptx -> ../../target
+            examples/evm-bridge -> ../../target
+            examples/evm-rollup -> ../../target
+            examples/dkg -> ../../target
       - name: web-vanitygen を確かめる
         run: |
           cargo fmt --check

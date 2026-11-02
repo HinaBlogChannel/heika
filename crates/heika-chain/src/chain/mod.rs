@@ -496,6 +496,8 @@ struct Planned {
 /// （[`crate::outlook`]）
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct HarvestOutlook {
+    /// 今の先端（作るブロックの親）の時刻（UTC）。当たりまでのメーターの始まり
+    pub parent: SystemTime,
     /// 自分の鍵の Importance の合計
     pub importance: u64,
     /// 直近のブロックから見積もった、ハーベストしている Importance の合計（自分を含む）
@@ -848,6 +850,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
             crate::outlook::none_before(elapsed, difficulty, others, self.parameters)
         });
         Some(HarvestOutlook {
+            parent: self.parameters.epoch() + Duration::from_millis(self.parent.timestamp),
             importance,
             active_importance: active,
             per_block: importance as f64 / active,

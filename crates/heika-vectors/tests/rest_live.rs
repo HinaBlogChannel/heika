@@ -180,7 +180,7 @@ fn rest_json_round_trips_with_binary_blocks_and_transactions() {
     };
     let mut checked = (0, 0, 0);
     for (name, start, count) in RANGES {
-        for (index, (_, block)) in pull(&mut node, name, start, count).iter().enumerate() {
+        for (index, (raw, block)) in pull(&mut node, name, start, count).iter().enumerate() {
             let height = start + index as u64;
 
             // ブロック：REST の値の確かめが通り、組み直したヘッダーが バイナリのものと同じハッシュになり、
@@ -197,6 +197,18 @@ fn rest_json_round_trips_with_binary_blocks_and_transactions() {
                 "{name}: 高さ {height} のブロックの JSON"
             );
             checked.0 += 1;
+
+            // ブロック全体：平たく並んだ検索の答えから組み直すと、ノードが返したバイト列と同じになる
+            let flattened: Vec<TransactionInfo> = transactions(&origin, height, true)
+                .into_iter()
+                .map(|entry| serde_json::from_value(entry).unwrap())
+                .collect();
+            assert_eq!(
+                info.assemble(&flattened)
+                    .unwrap_or_else(|error| panic!("{name}: 高さ {height} の組み直し: {error}")),
+                *raw,
+                "{name}: 高さ {height} のブロック全体"
+            );
 
             // トランザクション：ブロックの中の順に、1件ずつ突き合わせる
             let mut found = transactions(&origin, height, false);

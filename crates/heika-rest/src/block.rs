@@ -9,6 +9,7 @@ use heika_core::patricia;
 use heika_core::vrf::GenerationHash;
 use serde::{Deserialize, Serialize};
 
+use crate::transaction::TransactionInfo;
 use crate::{RestError, hex, hex_array, number};
 
 /// `BlockInfoDTO`。
@@ -169,6 +170,67 @@ impl BlockInfo {
             return Err(RestError::Mismatch { field: "stateHash" });
         }
         Ok(block)
+    }
+
+    /// ブロック全体のバイト列を組み直す。P2P の `Pull_Blocks` が返すものと同じ形になる。
+    ///
+    /// `found` は、このブロックの高さを含む `/transactions/confirmed?embedded=true` の検索の答え。外側と、アグリゲートの
+    /// 中のトランザクションが平たく並んだもので、ほかの高さのものが混じっていてもよい。外側のものを `meta.index` の順に、
+    /// アグリゲートは中のものを集めてから（[`TransactionInfo::with_embedded`]）組み直し、ヘッダーのあとに 8 バイト境界で
+    /// 並べる。外側の数が `meta.transactionsCount` と、全体の大きさが `block.size` と合わなければ弾く。
+    ///
+    /// ここではバイト列を並べるだけで、中身は確かめない。組み直したものは、署名と TransactionsHash を
+    /// （heika-chain の `verify_alone` などで）確かめてから使う
+    pub fn assemble(&self, found: &[TransactionInfo]) -> Result<Vec<u8>, RestError> {
+        let height = number(&self.block.height, "height")?;
+        let mut outer = Vec::new();
+        for entry in found {
+            if entry.meta.aggregate_hash.is_some() {
+                continue;
+            }
+            let at = entry.meta.height.as_deref().ok_or(RestError::Missing {
+                field: "meta.height",
+            })?;
+            if number(at, "meta.height")? == height {
+                outer.push(entry);
+            }
+        }
+        outer.sort_by_key(|entry| entry.meta.index);
+        if outer.len() != self.meta.transactions_count as usize
+            || outer
+                .iter()
+                .enumerate()
+                .any(|(index, entry)| entry.meta.index != Some(index as u32))
+        {
+            return Err(RestError::Mismatch {
+                field: "meta.transactionsCount",
+            });
+        }
+
+        let mut bytes = self.block.to_header_bytes()?;
+        for (index, entry) in outer.iter().enumerate() {
+            if index > 0 {
+                bytes.resize(bytes.len().next_multiple_of(8), 0);
+            }
+            let transaction = if matches!(entry.transaction.transaction_type, 0x4141 | 0x4241) {
+                entry.with_embedded(found)?.transaction.to_bytes()?
+            } else {
+                entry.transaction.to_bytes()?
+            };
+            bytes.extend_from_slice(&transaction);
+        }
+        // catapult は最後のトランザクションのあとも埋めることがある。埋めたかどうかは全体の大きさでわかる
+        let size = self.block.size as usize;
+        if bytes.len() < size && size - bytes.len() < 8 {
+            bytes.resize(size, 0);
+        }
+        if bytes.len() != size {
+            return Err(RestError::Mismatch {
+                field: "block.size",
+            });
+        }
+        bytes[..4].copy_from_slice(&self.block.size.to_le_bytes());
+        Ok(bytes)
     }
 
     /// 9本の根。状態のハッシュを使っていないノードなら空。

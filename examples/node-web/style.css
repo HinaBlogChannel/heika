@@ -1,0 +1,245 @@
+/*
+ * heika-gui（apps/heika-gui/style.css）と同じ見た目。そこから、この画面で使うものだけを持ってきた。
+ * 雪のような白と深い青。緑と赤は、開けた、開けなかった、という意味のあるところにだけ使う
+ */
+:root {
+  color-scheme: light;
+  --snow: #f6f9fc;
+  --stripe: #ecf2f8;
+  --ink: #142445;
+  --ink-soft: #5d6b85;
+  --blue: #1b3a7a;
+  --blue-hover: #24499a;
+  --blue-line: rgba(27, 58, 122, 0.2);
+  --blue-faint: rgba(27, 58, 122, 0.06);
+  --glass: rgba(255, 255, 255, 0.6);
+  --glass-hover: rgba(255, 255, 255, 0.85);
+  --danger: #b4475f;
+  /* 署名を承認する画面の地の色 */
+  --deep: #0f2350;
+  --serif: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif CJK JP", serif;
+  --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Noto Sans CJK JP", system-ui, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
+  /* 確かめられた、という印の色。エラーの赤系とは分ける */
+  --ok: #2e7d5b;
+  /* 余白は 4px（0.25rem）刻みの、この段からだけ選ぶ */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 50%),
+    repeating-linear-gradient(90deg, var(--snow) 0 6px, var(--stripe) 6px 12px);
+  background-attachment: fixed;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.8;
+  letter-spacing: 0.02em;
+}
+
+main {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: max(env(safe-area-inset-top), var(--space-10)) var(--space-5) var(--space-8);
+}
+
+h1 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-8);
+  font-family: var(--serif);
+  font-size: 1.9rem;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  color: var(--blue);
+}
+
+h1::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--blue-line), transparent);
+}
+
+.screen {
+  animation: appear 0.32s ease-out both;
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.lead {
+  margin: 0 0 var(--space-5);
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+.hint {
+  margin: 0 0 var(--space-4);
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.path {
+  overflow-wrap: anywhere;
+}
+
+.glass {
+  border: 1px solid var(--blue-line);
+  border-radius: 2px;
+  background:
+    linear-gradient(var(--blue), var(--blue)) left top / 10px 1px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) left top / 1px 10px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) right bottom / 10px 1px no-repeat border-box,
+    linear-gradient(var(--blue), var(--blue)) right bottom / 1px 10px no-repeat border-box,
+    var(--glass);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+
+button,
+select {
+  font: inherit;
+}
+
+button {
+  padding: var(--space-3) var(--space-6);
+  border: 1px solid var(--blue);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--blue);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+}
+
+button:hover {
+  background-color: var(--blue-faint);
+}
+
+button.primary {
+  background-color: var(--blue);
+  color: #fff;
+}
+
+button.primary:hover {
+  background-color: var(--blue-hover);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.notes li {
+  position: relative;
+  padding-left: var(--space-4);
+}
+
+.notes li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.9em;
+  width: 0.5rem;
+  height: 1px;
+  background: var(--blue);
+  opacity: 0.45;
+}
+
+.panel {
+  margin: 0 0 var(--space-6);
+  padding: var(--space-5) var(--space-6);
+}
+
+.panel .row {
+  margin-top: var(--space-4);
+}
+
+.state {
+  margin: 0 0 var(--space-3);
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  color: var(--blue);
+}
+
+.state.ok {
+  color: var(--ok);
+}
+
+.state.failed {
+  color: var(--danger);
+}
+
+/* 名前と値の組。狭い画面では縦に積む */
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-5);
+  margin: 0 0 var(--space-4);
+}
+
+.facts dt {
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.facts dd {
+  margin: 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .facts {
+    grid-template-columns: 1fr;
+  }
+
+  .facts dd {
+    margin-bottom: var(--space-2);
+  }
+}

@@ -376,6 +376,12 @@ impl Executor {
             Body::HashLock(lock) => {
                 wanted.hash_locks.insert(lock.hash.0);
             }
+            // 紐づける先のリモートのアカウント。空いているかを確かめ、リモートにする
+            Body::AccountKeyLink(link) => {
+                wanted
+                    .accounts
+                    .insert(self.address_of(&link.linked_public_key));
+            }
             Body::MultisigAccountModification(modification) => {
                 for address in modification
                     .address_additions
@@ -560,6 +566,33 @@ mod tests {
         let size = bytes.len() as u32;
         bytes[..4].copy_from_slice(&size.to_le_bytes());
         Block::from_bytes(&bytes).unwrap()
+    }
+
+    /// リモートの鍵の紐づけでは、紐づける先のアカウントも先に読む。読まずにいると、1ブロックに紐づけが
+    /// たくさんあるとき（メインネットの高さ 2905 には 10 件）、当てるたびに1つずつ見つかり、当て直しの上限を超える
+    #[test]
+    fn wants_the_remote_account_of_an_account_key_link() {
+        let parameters = NetworkParameters::MAINNET;
+        let main = PublicKey::from_private_key(&PrivateKey::from_bytes(&[1; 32]));
+        let remote = PublicKey::from_private_key(&PrivateKey::from_bytes(&[2; 32]));
+        let link = Transaction::new(
+            main,
+            parameters.identifier,
+            0,
+            1,
+            Body::AccountKeyLink(heika_transaction::KeyLink {
+                linked_public_key: remote,
+                link_action: heika_transaction::LinkAction::Link,
+            }),
+        );
+        let executor = Executor::new(
+            ChainConfig::mainnet(),
+            parameters.identifier,
+            parameters.generation_hash_seed,
+        );
+        let wanted = executor.wanted_for(&block(&parameters, &[link.to_bytes()]));
+        assert!(wanted.accounts.contains(&executor.address_of(&remote)));
+        assert!(wanted.accounts.contains(&executor.address_of(&main)));
     }
 
     /// 前のブロックで入ったトランザクションをもう一度入れようとして弾き、その実行を戻しても、前に覚えたハッシュは

@@ -1764,13 +1764,15 @@ impl Db {
 
     /// この DB の表を、新しく作った空の DB `target` に、キーの順に写す。新しいファイルには空いたページがないので、
     /// その場の [`Db::compact`] の代わりになる。`bounds` があれば刈り込みながら写す。差分は境より上だけを写し、
-    /// 索引は写さずに、写した差分から後で [`Db::build_history`] で作る。`progress` には、写している表と、
-    /// その表で写し終えた行の数を渡し、偽が返ったらそのコミットで止める（続けられないので、写し先を消して
-    /// やり直す）。写し終えたら真
+    /// 索引は写さずに、写した差分から後で [`Db::build_history`] で作る。検索表は、この DB が作っていて `searches`
+    /// にもある検索の分だけを写す（ライトにするときなどに、要らない検索を持っていかない）。足りない検索は、写し先で
+    /// [`Db::set_search`] すれば作る。`progress` には、写している表と、その表で写し終えた行の数を渡し、偽が返ったら
+    /// そのコミットで止める（続けられないので、写し先を消してやり直す）。写し終えたら真
     pub fn copy_to(
         &self,
         target: &Db,
         bounds: Option<CopyBounds>,
+        searches: Searches,
         mut progress: impl FnMut(&str, u64) -> bool,
     ) -> Result<bool, DbError> {
         let Handle::Write(database) = &target.handle else {
@@ -1791,13 +1793,11 @@ impl Db {
             copier.table(CHECKPOINTS, progress)?,
             copier.table(ORPHANS, progress)?,
             copier.table(PEERS, progress)?,
-            copier.table(SEARCH, progress)?,
-            copier.table(SEARCH_PAST, progress)?,
-            copier.table(NAMES, progress)?,
-            copier.table(TRANSACTION_HASHES, progress)?,
-            copier.table(ADDRESS_TRANSACTIONS, progress)?,
         ];
         if whole.contains(&false) {
+            return Ok(false);
+        }
+        if !self.copy_searches(&copier, searches, progress)? {
             return Ok(false);
         }
         match bounds.and_then(|bounds| bounds.blocks) {
@@ -2189,6 +2189,62 @@ fn open_if_exists<K: Key + 'static, V: Value + 'static>(
 }
 
 /// [`Db::copy_to`] で、読むトランザクションから、新しい DB に写す
+impl Db {
+    /// 検索表のうち、この DB が作っていて `searches` にもある検索の分を写し、写し先の検索の印を合わせる
+    fn copy_searches(
+        &self,
+        copier: &Copier<'_>,
+        searches: Searches,
+        progress: &mut impl FnMut(&str, u64) -> bool,
+    ) -> Result<bool, DbError> {
+        let kept = Searches::from_bits(self.search.bits() & searches.bits());
+        let source = copier.source;
+        let mut tables = vec![SEARCH];
+        if kept.contains(Searches::PAST) {
+            tables.push(SEARCH_PAST);
+        }
+        for definition in tables {
+            let Some(table) = open_if_exists(source, definition)? else {
+                continue;
+            };
+            for prefix in kept.prefixes() {
+                let rows = table
+                    .range(&[prefix][..]..&[prefix + 1][..])
+                    .map_err(db_error)?;
+                if !copier.rows(definition, rows, progress)? {
+                    return Ok(false);
+                }
+            }
+        }
+        if kept.contains(Searches::NAMESPACES) && !copier.table(NAMES, progress)? {
+            return Ok(false);
+        }
+        if kept.contains(Searches::TRANSACTIONS)
+            && (!copier.table(TRANSACTION_HASHES, progress)?
+                || !copier.table(ADDRESS_TRANSACTIONS, progress)?)
+        {
+            return Ok(false);
+        }
+        // meta はまるごと写したので、検索の印と、外した検索の作りかけの印を直す
+        let transaction = copier.database.begin_write().map_err(db_error)?;
+        {
+            let mut meta = transaction.open_table(META).map_err(db_error)?;
+            meta.insert(SEARCH_META, &[kept.bits()][..])
+                .map_err(db_error)?;
+            for (search, pending_key) in [
+                (Searches::NAMESPACES, NAMES_BACKFILL),
+                (Searches::TRANSACTIONS, TRANSACTIONS_BACKFILL),
+            ] {
+                if !kept.contains(search) {
+                    meta.remove(pending_key).map_err(db_error)?;
+                }
+            }
+        }
+        transaction.commit().map_err(db_error)?;
+        Ok(true)
+    }
+}
+
 struct Copier<'a> {
     source: &'a ReadTransaction,
     target: &'a Db,
@@ -3177,11 +3233,25 @@ mod tests {
         // 写しにも入り、外したら消える。開き直しても覚えている
         let copy = TempDir::new();
         let target = Db::open(&copy.0).unwrap();
-        assert!(db.copy_to(&target, None, |_, _| true).unwrap());
+        assert!(
+            db.copy_to(&target, None, Searches::ALL, |_, _| true)
+                .unwrap()
+        );
         drop(target);
         let target = Db::open_read_only(&copy.0).unwrap();
         assert_eq!(target.searches(), Searches::METADATA);
         assert_eq!(search_keys(&target, &[]).len(), 2);
+        // 写し先で要らない検索は持っていかない
+        let bare = TempDir::new();
+        let target = Db::open(&bare.0).unwrap();
+        assert!(
+            db.copy_to(&target, None, Searches::NONE, |_, _| true)
+                .unwrap()
+        );
+        drop(target);
+        let target = Db::open_read_only(&bare.0).unwrap();
+        assert_eq!(target.searches(), Searches::NONE);
+        assert!(search_keys(&target, &[]).is_empty());
         db.set_search(Searches::NONE).unwrap();
         assert!(search_keys(&db, &[]).is_empty());
         drop(db);
@@ -3868,7 +3938,10 @@ mod tests {
         let (dir, copy) = (TempDir::new(), TempDir::new());
         let db = pruning_fixture(&dir.0);
         let target = Db::open(&copy.0).unwrap();
-        assert!(db.copy_to(&target, None, |_, _| true).unwrap());
+        assert!(
+            db.copy_to(&target, None, Searches::ALL, |_, _| true)
+                .unwrap()
+        );
         assert_same(&db, &target);
         assert_eq!(
             target.state_at(b"a", 1).unwrap().as_deref(),
@@ -3889,7 +3962,7 @@ mod tests {
         };
         let mut tables = Vec::new();
         assert!(
-            db.copy_to(&target, Some(bounds), |name, _| {
+            db.copy_to(&target, Some(bounds), Searches::ALL, |name, _| {
                 tables.push(name.to_owned());
                 true
             })
@@ -3943,7 +4016,10 @@ mod tests {
             statements: Some(3),
             blocks: Some((3, 2)),
         };
-        assert!(db.copy_to(&target, Some(bounds), |_, _| true).unwrap());
+        assert!(
+            db.copy_to(&target, Some(bounds), Searches::ALL, |_, _| true)
+                .unwrap()
+        );
         assert!(target.build_history(|_, _| true).unwrap());
 
         db.prune_state_history(2, |_| true).unwrap();

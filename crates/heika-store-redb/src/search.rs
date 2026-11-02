@@ -44,6 +44,8 @@ impl Searches {
     pub const TRANSACTIONS: Self = Self(4);
     /// 作る検索を、昔の高さでも引けるようにする。状態の差分を全部残すアーカイブのためのもの
     pub const PAST: Self = Self(0x80);
+    /// 全部（[`crate::Db::copy_to`] で、作っている検索を全部写すとき）
+    pub const ALL: Self = Self(0x80 | 1 | 2 | 4);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

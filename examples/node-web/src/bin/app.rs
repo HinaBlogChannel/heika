@@ -60,7 +60,7 @@ struct Meter {
     parent: f64,
     /// 次の当たりの時刻。1時間先までになければ `None`
     hit: Option<f64>,
-    /// 次の当たりで、ほかのだれもそれより先に当たらない見込み
+    /// 次の当たりで、ほかのだれにも先を越されない見込み（同じ秒に並ぶものは半々）
     next: Option<f64>,
     per_block: f64,
     block_seconds: f64,
@@ -575,7 +575,7 @@ fn App() -> impl IntoView {
                                         <progress max=span.to_string() value=(now - meter.parent).clamp(0.0, span).to_string()></progress>
                                         <p class="hint">
                                             {format!(
-                                                "この当たりで作れる見込み: {}（ほかのだれもこれより先に当たらない見込み）",
+                                                "この当たりで作れる見込み: {}（ほかのだれにも先を越されない見込み。同じ秒に並べば半々）",
                                                 percent(meter.next.unwrap_or(0.0))
                                             )}
                                         </p>

@@ -816,9 +816,12 @@ version = "0.14.1"
 dependencies = [
  "heika-block",
  "heika-cert",
+ "heika-chain",
  "heika-core",
  "heika-peer-protocol",
  "heika-rest",
+ "heika-state-transition",
+ "heika-store-redb",
  "heika-tls",
  "heika-transaction",
  "heika-wallet",

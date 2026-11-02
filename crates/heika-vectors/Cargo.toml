@@ -15,9 +15,12 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 [dev-dependencies]
 heika-block = { path = "../heika-block" }
 heika-cert = { path = "../heika-cert" }
+heika-chain = { path = "../heika-chain" }
 heika-core = { path = "../heika-core" }
 heika-peer-protocol = { path = "../heika-peer-protocol" }
 heika-rest = { path = "../heika-rest" }
+heika-state-transition = { path = "../heika-state-transition" }
+heika-store-redb = { path = "../heika-store-redb" }
 heika-tls = { path = "../heika-tls" }
 heika-transaction = { path = "../heika-transaction" }
 heika-wallet = { path = "../heika-wallet" }

@@ -11,6 +11,19 @@ const WORKER_SCRIPT: &str = concat!("./worker_loader.js?v=", env!("NODE_WEB_BUIL
 const ORIGINS_KEY: &str = "node-web/origins";
 /// ブロックを出す REST を覚えておく localStorage のキー。鍵は覚えない
 const SUBMIT_KEY: &str = "node-web/submit";
+/// 自分のネットワークの設定を覚えておく localStorage のキー。並びは Worker に渡す順
+const CUSTOM_KEYS: [&str; 4] = [
+    "node-web/custom/config-network",
+    "node-web/custom/config-inflation",
+    "node-web/custom/config-finalization",
+    "node-web/custom/nemesis",
+];
+/// 自分のネットワークの設定ファイルの名前。並びは [`CUSTOM_KEYS`] の頭の3つと同じ
+const CUSTOM_FILES: [&str; 3] = [
+    "config-network.properties",
+    "config-inflation.properties",
+    "config-finalization.properties",
+];
 /// 画面に残す注意の数
 const WARNINGS: usize = 5;
 
@@ -131,6 +144,8 @@ fn App() -> impl IntoView {
     let signing = RwSignal::new(String::new());
     let vrf = RwSignal::new(String::new());
     let submit = RwSignal::new(remembered(SUBMIT_KEY));
+    // 自分のネットワーク。設定ファイルの中身3つと Nemesis のハッシュ。秘密ではないので覚えておく
+    let custom = CUSTOM_KEYS.map(|key| RwSignal::new(remembered(key)));
     let plan = RwSignal::new(None::<String>);
     let node_key = RwSignal::new(String::new());
     let delegations = RwSignal::new(Vec::<Delegation>::new());
@@ -280,8 +295,23 @@ fn App() -> impl IntoView {
         } else {
             JsValue::NULL
         };
+        let texts = custom.map(|text| text.get_untracked());
+        if let Some(storage) = storage() {
+            for (key, text) in CUSTOM_KEYS.iter().zip(&texts) {
+                let _ = storage.set_item(key, text);
+            }
+        }
+        let custom = if texts.iter().all(|text| text.trim().is_empty()) {
+            JsValue::NULL
+        } else {
+            texts
+                .into_iter()
+                .map(JsValue::from)
+                .collect::<Array>()
+                .into()
+        };
         running.set(true);
-        send(&["sync".into(), text.into(), harvest]);
+        send(&["sync".into(), text.into(), harvest, custom]);
     };
     let import = move |event: web_sys::Event| {
         let input: web_sys::HtmlInputElement = event_target(&event);
@@ -294,6 +324,37 @@ fn App() -> impl IntoView {
         status.set("DB を読み込んでいます".into());
         send(&["import".into(), file.into()]);
         input.set_value("");
+    };
+    // 選んだファイルを、名前で3つの設定に振り分けて読む
+    let load_custom = move |event: web_sys::Event| {
+        let input: web_sys::HtmlInputElement = event_target(&event);
+        let Some(files) = input.files() else {
+            return;
+        };
+        for file in (0..files.length()).filter_map(|index| files.get(index)) {
+            let Some(index) = CUSTOM_FILES.iter().position(|name| file.name() == *name) else {
+                failure.set(Some(format!(
+                    "{} は使いません。{} を選んでください",
+                    file.name(),
+                    CUSTOM_FILES.join("、")
+                )));
+                continue;
+            };
+            wasm_bindgen_futures::spawn_local(async move {
+                match wasm_bindgen_futures::JsFuture::from(file.text()).await {
+                    Ok(text) => custom[index].set(text.as_string().unwrap_or_default()),
+                    Err(error) => {
+                        failure.set(Some(format!("{} を読めません: {error:?}", file.name())))
+                    }
+                }
+            });
+        }
+        input.set_value("");
+    };
+    let clear_custom = move |_| {
+        for text in custom {
+            text.set(String::new());
+        }
     };
     let stop = move |_| {
         status.set("今の区切りを書いてから止めます…".into());
@@ -400,6 +461,40 @@ fn App() -> impl IntoView {
                                     disabled=move || running.get() || !harvesting.get()
                                 ></textarea>
                             </label>
+                        </details>
+                        <details class="import">
+                            <summary>"自分のネットワーク"</summary>
+                            <p class="hint">
+                                "メインネットとテストネットのほか（プライベートなネットワークなど）を同期するときに入れます。"
+                                "ノードの resources フォルダーにある3つの設定ファイルと、Nemesis のブロックのハッシュです。"
+                                "何で確かめるかを REST に決めさせないため、ルールは REST からもらわず、ここで入れたものを使います。"
+                            </p>
+                            <input
+                                type="file"
+                                multiple
+                                accept=".properties"
+                                on:change=load_custom
+                                disabled=move || running.get()
+                            />
+                            <dl class="facts">
+                                {CUSTOM_FILES.iter().enumerate().map(|(index, name)| view! {
+                                    <dt>{*name}</dt>
+                                    <dd>{move || if custom[index].get().trim().is_empty() { "まだです" } else { "読み込みました" }}</dd>
+                                }).collect_view()}
+                            </dl>
+                            <label class="field">
+                                "Nemesis のブロックのハッシュ（16 進）"
+                                <input
+                                    type="text"
+                                    spellcheck="false"
+                                    prop:value=move || custom[3].get()
+                                    on:input=move |event| custom[3].set(event_target_value(&event))
+                                    disabled=move || running.get()
+                                />
+                            </label>
+                            <div class="row">
+                                <button on:click=clear_custom disabled=move || running.get()>"外す"</button>
+                            </div>
                         </details>
                         <details class="import">
                             <summary>"手元のノードの DB から始める"</summary>

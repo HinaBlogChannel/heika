@@ -11,7 +11,7 @@ use heika_packet::ChainStatistics;
 use heika_rest::block::BlockInfo;
 use heika_rest::finalization::FinalizationProof;
 use heika_rest::transaction::TransactionInfo;
-use heika_state_transition::config::ChainConfig;
+use heika_state_transition::config::{ChainConfig, network_parameters};
 use js_sys::Promise;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
@@ -21,7 +21,9 @@ use web_sys::{Response, WorkerGlobalScope};
 /// REST の1ページの件数の上限（catapult の REST の既定）
 pub const PAGE_SIZE: u64 = 100;
 
-/// 同期するネットワーク。今はメインネットとテストネットだけ
+/// 同期するネットワーク。メインネットとテストネットは決め打ちで、ほか（プライベートなネットワークなど）は、
+/// 画面で入れた設定と Nemesis のハッシュから作る（[`Network::custom`]）
+#[derive(Clone)]
 pub struct Network {
     pub name: &'static str,
     pub parameters: &'static NetworkParameters,
@@ -31,13 +33,55 @@ pub struct Network {
 }
 
 impl Network {
-    /// REST の `/node/info` の答えから決める。generation hash seed まで合わなければ、知らないネットワークにする
-    pub fn from_node_info(info: &Value) -> Result<Self, String> {
+    /// `config-network.properties`、`config-inflation.properties`、`config-finalization.properties` のテキストと、
+    /// Nemesis のブロックのハッシュ（16進）から作る。名前は generation hash seed の頭で、DB のファイルもこれで分ける。
+    ///
+    /// ルールは REST からもらわない。REST の答えを信じないのと同じく、何で確かめるかも REST に決めさせない
+    pub fn custom(
+        network: &str,
+        inflation: &str,
+        finalization: &str,
+        nemesis: &str,
+    ) -> Result<Self, String> {
+        let parameters = network_parameters(network)
+            .map_err(|error| format!("config-network.properties を読めません: {error}"))?;
+        let config = ChainConfig::parse(network, inflation, finalization)
+            .map_err(|error| format!("ネットワークの設定を読めません: {error}"))?;
+        let nemesis = nemesis
+            .trim()
+            .parse()
+            .map_err(|_| "Nemesis のハッシュは 64 桁の16進で入れてください")?;
+        let seed = parameters.generation_hash_seed.to_string();
+        Ok(Self {
+            name: Box::leak(format!("private-{}", &seed[..8]).into_boxed_str()),
+            parameters: Box::leak(Box::new(parameters)),
+            config,
+            nemesis,
+        })
+    }
+
+    /// REST の `/node/info` の答えから決める。generation hash seed まで合わなければ、知らないネットワークにする。
+    /// `custom` があれば、メインネットやテストネットより先に、それと合うかを見る
+    pub fn from_node_info(info: &Value, custom: Option<&Network>) -> Result<Self, String> {
         let identifier = info["networkIdentifier"]
             .as_u64()
             .and_then(|value| u8::try_from(value).ok())
             .map(NetworkIdentifier)
             .ok_or("/node/info に networkIdentifier がありません")?;
+        let seed = info["networkGenerationHashSeed"]
+            .as_str()
+            .unwrap_or_default();
+        let matches = |parameters: &NetworkParameters| {
+            parameters.identifier == identifier
+                && seed.eq_ignore_ascii_case(&parameters.generation_hash_seed.to_string())
+        };
+        if let Some(custom) = custom.filter(|custom| matches(custom.parameters)) {
+            return Ok(custom.clone());
+        }
+        let hint = match custom {
+            Some(custom) => format!("入れた自分のネットワーク（{}）とも合いません", custom.name),
+            None => "プライベートなネットワークなら、その設定を入れてください".to_owned(),
+        };
         let (name, parameters, config) = match identifier {
             NetworkIdentifier::MAINNET => (
                 "mainnet",
@@ -49,14 +93,15 @@ impl Network {
                 &NetworkParameters::TESTNET,
                 ChainConfig::testnet(),
             ),
-            _ => return Err("メインネットとテストネットのほかには、まだ対応していません".into()),
+            _ => {
+                return Err(format!(
+                    "メインネットでもテストネットでもありません。{hint}"
+                ));
+            }
         };
-        let seed = info["networkGenerationHashSeed"]
-            .as_str()
-            .unwrap_or_default();
-        if !seed.eq_ignore_ascii_case(&parameters.generation_hash_seed.to_string()) {
+        if !matches(parameters) {
             return Err(format!(
-                "{name} とは generation hash seed が違うネットワークです"
+                "{name} とは generation hash seed が違うネットワークです。{hint}"
             ));
         }
         Ok(Self {

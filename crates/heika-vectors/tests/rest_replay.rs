@@ -7,9 +7,12 @@
 //! ```sh
 //! HEIKA_TEST_REST=http://127.0.0.1:13001 \
 //! HEIKA_TEST_RESOURCES=~/privnet-a/heika1/resources \
-//! HEIKA_TEST_REPLAY_TO=300 \
+//! HEIKA_TEST_REPLAY_TO=300 HEIKA_TEST_REPLAY_PARTIAL=true \
 //! cargo test -p heika-vectors --test rest_replay -- --include-ignored --nocapture
 //! ```
+//!
+//! `HEIKA_TEST_REPLAY_DIR` を渡すと、DB をそこに置いて残す。次に同じフォルダーで動かすと、残した高さの続きから
+//! 実行するので、ある高さのブロックだけを繰り返し試せる。
 //!
 //! HEIKA_TEST_REST がなければ、何もせずに成功する（CI ではそうなる）。
 
@@ -152,8 +155,15 @@ fn replays_blocks_fetched_from_rest_from_the_nemesis() {
         .unwrap_or(300)
         .min(tip);
 
-    let dir = TempDir(env::temp_dir().join(format!("heika-rest-replay-{}", std::process::id())));
-    let db = Db::open(&dir.0).unwrap();
+    // HEIKA_TEST_REPLAY_DIR があれば、そこに DB を置いて残す（続きから試せる）
+    let kept_dir = env::var("HEIKA_TEST_REPLAY_DIR").ok().map(PathBuf::from);
+    let _cleanup = kept_dir.is_none().then(|| {
+        TempDir(env::temp_dir().join(format!("heika-rest-replay-{}", std::process::id())))
+    });
+    let dir = kept_dir.unwrap_or_else(|| _cleanup.as_ref().unwrap().0.clone());
+    let db = Db::open(&dir).unwrap();
+    // 大きい状態の表を全部はメモリに持たずに（HEIKA_TEST_REPLAY_PARTIAL=false なら全部持って）実行する
+    let partial = env::var("HEIKA_TEST_REPLAY_PARTIAL").map_or(true, |value| value != "false");
     // ライトのノードと同じく刈り込みながら進める
     let keep = Some(Keep {
         state: 2,
@@ -161,9 +171,10 @@ fn replays_blocks_fetched_from_rest_from_the_nemesis() {
         history: true,
     });
     // 半分まで進めたら、開き直して続きから実行する
-    let half = to / 2;
+    let half = (to / 2).max(db.blocks_tip().unwrap());
     for stop in [half, to] {
-        let mut replay = Replay::open(&db, config.clone(), parameters, nemesis, keep).unwrap();
+        let mut replay =
+            Replay::open(&db, config.clone(), parameters, nemesis, keep, partial).unwrap();
         replay.set_target(stop).unwrap();
         while replay.height() < stop {
             let from = replay.height() + 1;
@@ -182,7 +193,7 @@ fn replays_blocks_fetched_from_rest_from_the_nemesis() {
     let last: BlockInfo = serde_json::from_value(rest(&origin, &format!("/blocks/{to}"))).unwrap();
     assert_eq!(db.blocks_tip().unwrap(), to);
     assert_eq!(
-        Replay::open(&db, config.clone(), parameters, nemesis, keep)
+        Replay::open(&db, config.clone(), parameters, nemesis, keep, partial)
             .unwrap()
             .state_hash(),
         Some(last.verify().unwrap().state_hash)

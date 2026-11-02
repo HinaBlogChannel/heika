@@ -15,6 +15,10 @@
 //! 残し方（[`Keep`]）を渡せば、ノードの追いつく段階と同じく刈り込みながら進む。目標の高さ（[`Replay::set_target`]）から
 //! 残す分を引いたところより下では状態と木の差分を書かず、コミットのたびに、古いブロック、ステートメント、
 //! チェックポイント、差分を少しずつ（1回 2 秒まで）消す。
+//!
+//! `partial` なら、大きい状態の表（アカウントなど）を全部はメモリに持たず、ブロックごとに要る行と木のノードだけを読む
+//! （tip の段階の `Chain` と同じ）。読むのは書きかけの中からなので、まだコミットしていないブロックの変化も見える。
+//! 足りないものを引いたら、当てる前に戻して読み足し、当て直す。
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -29,6 +33,7 @@ use heika_core::network::NetworkParameters;
 use heika_core::vrf;
 use heika_state_transition::config::ChainConfig;
 use heika_state_transition::executor::Executor;
+use heika_state_transition::executor::source::StateSource;
 
 use crate::{Batch, Db, DbError};
 
@@ -62,6 +67,9 @@ fn failed(error: impl fmt::Display) -> ReplayError {
     ReplayError::Failed(error.to_string())
 }
 
+/// 足りない状態を読み足して当て直す回数の上限
+const MAX_RETRIES: usize = 8;
+
 /// 順に実行していくもの。DB の実行した高さから始まる
 pub struct Replay<'a> {
     db: &'a Db,
@@ -86,6 +94,8 @@ pub struct Replay<'a> {
     statements_through: Option<u64>,
     /// [`Replay::set_target`] で知らされた目標
     target: u64,
+    /// 大きい状態の表を全部はメモリに持たない
+    partial: bool,
 }
 
 impl<'a> Replay<'a> {
@@ -96,12 +106,30 @@ impl<'a> Replay<'a> {
         parameters: &'static NetworkParameters,
         nemesis: Hash256,
         keep: Option<Keep>,
+        partial: bool,
     ) -> Result<Self, ReplayError> {
         let seed = parameters.generation_hash_seed;
         let lifetime = config
             .max_transaction_lifetime
             .max(config.max_bonded_transaction_lifetime);
+        // まだ何も実行していなければ、全部をメモリに持って Nemesis から始める（最初のコミットで、要るものだけを読む形に
+        // 開き直す）
         let mut executor = match db.meta(EXECUTOR_META)? {
+            Some(_) if partial => {
+                let (meta, rows, nodes) =
+                    now_or_never(ChainStore::load_partial_state(db)).map_err(failed)?;
+                let mut executor = Executor::restore_partial(
+                    config.clone(),
+                    parameters.identifier,
+                    seed,
+                    rows,
+                    &meta,
+                )
+                .map_err(failed)?;
+                executor.restore_trees(nodes).map_err(failed)?;
+                executor.load_tree_roots(db).map_err(failed)?;
+                executor
+            }
             Some(meta) => Executor::restore(
                 config.clone(),
                 parameters.identifier,
@@ -166,9 +194,14 @@ impl<'a> Replay<'a> {
         let mut batch = db.batch()?;
         batch.start_history(start)?;
         let trie_started = db.trie_started()?;
-        if trie_started && start > 0 {
+        let expected = parent.as_ref().map(|block| block.state_hash);
+        if executor.is_partial() {
+            // 行から木を組み直すには、アカウントが全部要る
+            if Some(executor.state_hash()) != expected {
+                return Err(failed("しまった木の根が StateHash と合いません"));
+            }
+        } else if trie_started && start > 0 {
             executor.restore_trees(db.trie_nodes()?).map_err(failed)?;
-            let expected = parent.as_ref().map(|block| block.state_hash);
             if Some(executor.state_hash()) != expected {
                 executor.rebuild_trees();
             }
@@ -200,6 +233,7 @@ impl<'a> Replay<'a> {
             quiet_through: [None; 2],
             statements_through: None,
             target: 0,
+            partial,
         })
     }
 
@@ -266,6 +300,19 @@ impl<'a> Replay<'a> {
             return Err(invalid("決めた Nemesis と違います".into()));
         }
 
+        if self.batch.is_none() {
+            let mut batch = self.db.batch()?;
+            batch.quiet_through = self.quiet_through;
+            self.batch = Some(batch);
+        }
+        // 読むのは書きかけの中から。まだコミットしていない、前のブロックの変化も見える
+        let source: &dyn StateSource = self.batch.as_ref().expect("作った");
+        let read = |error| ReplayError::Failed(format!("状態を読めません: {error}"));
+        if self.executor.is_partial() {
+            let wanted = self.executor.wanted_for(&block);
+            self.executor.load_wanted(source, &wanted).map_err(read)?;
+        }
+
         // 実行する前に、1つ前のブロックのあとの状態で、難易度とブロックを出した人を確かめる。Nemesis は信じる
         if let Some(parent) = &self.parent {
             let expected = difficulty(self.statistics.make_contiguous(), self.parameters);
@@ -275,20 +322,41 @@ impl<'a> Replay<'a> {
                     block.difficulty
                 )));
             }
-            let key = self
-                .executor
-                .check_hit(parent, &block, self.parameters)
-                .map_err(|error| invalid(error.to_string()))?;
+            let key = loop {
+                let checked = self.executor.check_hit(parent, &block, self.parameters);
+                let missed = self.executor.take_missed();
+                if missed.is_empty() {
+                    break checked.map_err(|error| invalid(error.to_string()))?;
+                }
+                self.executor.load_wanted(source, &missed).map_err(read)?;
+            };
             let alpha = parent.generation_hash();
             if vrf::verify(&key, &alpha.0, &block.generation_hash_proof).is_none() {
                 return Err(invalid("ブロックを出した人: VRF の証明が通りません".into()));
             }
         }
 
-        self.executor
-            .apply(&block)
-            .map_err(|error| invalid(error.to_string()))?;
-        let state_hash = self.executor.state_hash();
+        // まだ読んでいないものを引いたら、当てる前に戻して読み足し、当て直す
+        let before = self.executor.encode_meta();
+        let mut retries = 0;
+        let state_hash = loop {
+            let applied = self.executor.apply(&block);
+            let state_hash = self.executor.state_hash();
+            let missed = self.executor.take_missed();
+            if missed.is_empty() {
+                applied.map_err(|error| invalid(error.to_string()))?;
+                break state_hash;
+            }
+            if retries == MAX_RETRIES {
+                return Err(ReplayError::Failed(format!(
+                    "高さ {height}: {MAX_RETRIES} 回読み足しても、読んでいない状態が {} 個あります",
+                    missed.len()
+                )));
+            }
+            retries += 1;
+            self.executor.undo_attempt(source, &before).map_err(read)?;
+            self.executor.load_wanted(source, &missed).map_err(read)?;
+        };
         if state_hash != block.state_hash {
             return Err(invalid(format!(
                 "StateHash が {state_hash} で、ブロックの {} と合いません",
@@ -316,14 +384,7 @@ impl<'a> Replay<'a> {
         } else {
             None
         };
-        let batch = match &mut self.batch {
-            Some(batch) => batch,
-            None => {
-                let mut batch = self.db.batch()?;
-                batch.quiet_through = self.quiet_through;
-                self.batch.insert(batch)
-            }
-        };
+        let batch = self.batch.as_mut().expect("作った");
         batch.put_block(height, &bytes)?;
         batch.set_state_at(height, state)?;
         batch.set_trie_at(height, nodes)?;
@@ -343,6 +404,8 @@ impl<'a> Replay<'a> {
         }
         self.tip = Some(tip);
         self.parent = Some(block);
+        // 変化は書きかけに書いたので、読み込んだ行と木のノードを手放す。次に要れば書きかけから読む
+        self.executor.release_loaded();
         Ok(())
     }
 
@@ -360,6 +423,19 @@ impl<'a> Replay<'a> {
         // コミットした高さを確定とみなして、残す分より古いものを消す。消しきれなければ次のコミットで続ける
         let plan = Keep::plan(self.keep, &self.config, self.parameters, height, height);
         now_or_never(ChainStore::prune(self.db, plan)).map_err(failed)?;
+        // Nemesis から全部をメモリに持って始めたなら、ここで要るものだけを読む形に開き直す
+        if self.partial && !self.executor.is_partial() {
+            let target = self.target;
+            *self = Self::open(
+                self.db,
+                self.config.clone(),
+                self.parameters,
+                self.nemesis,
+                self.keep,
+                true,
+            )?;
+            self.target = target;
+        }
         self.apply_target()
     }
 }

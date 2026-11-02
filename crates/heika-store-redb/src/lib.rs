@@ -2859,6 +2859,51 @@ impl StateSource for Db {
     }
 }
 
+/// 書きかけの中から読む。まだコミットしていない、この書きかけで書いたものも見える。何ブロックかをまとめてコミットしながら、
+/// 状態を全部はメモリに持たずに実行するとき（[`replay::Replay`]）の読み口
+impl StateSource for Batch {
+    fn row(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+        self.current(STATE, key).map_err(read_error)
+    }
+
+    fn node(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ExecError> {
+        self.current(TRIE_TABLES.current, key).map_err(read_error)
+    }
+
+    fn for_each_row(
+        &self,
+        prefix: &[u8],
+        visit: &mut dyn FnMut(&[u8], &[u8]),
+    ) -> Result<(), ExecError> {
+        let mut read = || -> Result<(), DbError> {
+            let table = self.transaction.open_table(STATE).map_err(db_error)?;
+            for row in table.range(prefix..).map_err(db_error)? {
+                let (key, value) = row.map_err(db_error)?;
+                if !key.value().starts_with(prefix) {
+                    break;
+                }
+                visit(key.value(), value.value());
+            }
+            Ok(())
+        };
+        read().map_err(read_error)
+    }
+}
+
+impl Batch {
+    fn current(
+        &self,
+        table: TableDefinition<&[u8], &[u8]>,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        let table = self.transaction.open_table(table).map_err(db_error)?;
+        Ok(table
+            .get(key)
+            .map_err(db_error)?
+            .map(|value| value.value().to_vec()))
+    }
+}
+
 fn read_error(error: DbError) -> ExecError {
     ExecError::Source(error.to_string())
 }

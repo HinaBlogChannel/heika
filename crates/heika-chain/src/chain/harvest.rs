@@ -46,10 +46,11 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
             .as_ref()
             .is_none_or(|planned| planned.parent != self.tip.hash)
         {
-            let slot = self.plan_harvest(harvesters)?;
+            let (slot, importance) = self.plan_harvest(harvesters)?;
             self.planned = Some(Planned {
                 parent: self.tip.hash,
                 slot,
+                importance,
             });
             if let Some((timestamp, _)) = slot {
                 let seconds = (timestamp - self.parent.timestamp) / 1000;
@@ -91,16 +92,17 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         }
     }
 
-    /// 先端の上で、`harvesters` のうち当たりが一番早い時刻と鍵の番号。[`HARVEST_HORIZON`] までになければ `None`。
-    /// 求められない鍵は、わけが変わったときだけ知らせる
+    /// 先端の上で、`harvesters` のうち当たりが一番早い時刻と鍵の番号（[`HARVEST_HORIZON`] までになければ `None`）と、
+    /// 当たりを求められた鍵の Importance の合計。求められない鍵は、わけが変わったときだけ知らせる
     pub(super) fn plan_harvest(
         &mut self,
         harvesters: &[(PrivateKey, PrivateKey)],
-    ) -> Result<Option<(u64, usize)>, ChainError> {
+    ) -> Result<(Option<(u64, usize)>, u64), ChainError> {
         let parent = self.harvest_parent();
         let context = parent.context();
         let until = parent.block.timestamp + HARVEST_HORIZON;
         let mut best: Option<(u64, usize)> = None;
+        let mut importance = 0u64;
         for (index, (signing, vrf_key)) in harvesters.iter().enumerate() {
             // アカウントを全部はメモリに持たないなら、引いたアカウントを読んで求め直す
             let mut retries = 0;
@@ -128,6 +130,17 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 retries += 1;
                 self.executor.load_wanted(self.store, &missed)?;
             };
+            if found.is_ok() {
+                // 当たりを求められたなら、Importance はもう読んである
+                importance = importance.saturating_add(
+                    self.executor
+                        .signer_importance(
+                            &PublicKey::from_private_key(signing),
+                            self.tip.height + 1,
+                        )
+                        .unwrap_or(0),
+                );
+            }
             match found {
                 Ok(Some(timestamp)) => {
                     if best.is_none_or(|(earliest, _)| timestamp < earliest) {
@@ -147,7 +160,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
                 }
             }
         }
-        Ok(best)
+        Ok((best, importance))
     }
 
     /// 先端の上に、時刻 `timestamp` のトランザクションのないブロックを作って先端に足し、つないでいるピアに配る。

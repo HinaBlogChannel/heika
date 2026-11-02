@@ -210,4 +210,19 @@ fn plans_a_hit_and_produces_when_the_clock_reaches_it() {
     );
     // 先端が変わったので、次に求めるまでは予定がない
     assert_eq!(chain.harvest_plan(), HarvestPlan::NotPlanned);
+    assert_eq!(chain.harvest_outlook(), None);
+
+    // 求め直すと、直近のブロックが2つになったので、見込みも出る。作ったのは自分だけなので、自分で全部を作る見込み
+    run(&mut chain, ChainEvent::Tick);
+    assert!(matches!(
+        chain.harvest_plan(),
+        HarvestPlan::Hit { height: 3, .. }
+    ));
+    let outlook = chain.harvest_outlook().unwrap();
+    assert_eq!(outlook.importance, STAKE);
+    assert!(outlook.active_importance >= STAKE as f64);
+    assert!(outlook.per_block > 0.0 && outlook.per_block <= 1.0);
+    assert!(outlook.block_seconds > 0.0);
+    let next = outlook.next.unwrap();
+    assert!(next > 0.0 && next <= 1.0, "{next}");
 }

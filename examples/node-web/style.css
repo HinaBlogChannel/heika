@@ -254,7 +254,8 @@ button:disabled {
   letter-spacing: 0.1em;
 }
 
-textarea {
+textarea,
+input[type="password"] {
   width: 100%;
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--blue-line);
@@ -266,11 +267,13 @@ textarea {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-textarea:focus {
+textarea:focus,
+input[type="password"]:focus {
   border-color: var(--blue);
 }
 
-textarea:focus-visible {
+textarea:focus-visible,
+input[type="password"]:focus-visible {
   outline: none;
 }
 
@@ -282,7 +285,8 @@ progress {
   accent-color: var(--blue);
 }
 
-.field textarea {
+.field textarea,
+.field input[type="password"] {
   margin-top: var(--space-2);
   font-family: var(--mono);
   font-size: 0.85rem;
@@ -309,7 +313,7 @@ progress {
   margin-top: var(--space-4);
 }
 
-/* 手元の DB から始める。ふだんは畳んでおく */
+/* ハーベストと、手元の DB から始める。ふだんは畳んでおく */
 .import {
   margin-top: var(--space-5);
   color: var(--ink-soft);
@@ -322,4 +326,22 @@ progress {
 
 .import .hint {
   margin-top: var(--space-3);
+}
+
+/* 畳んだ中の欄 */
+.import .field,
+.import .check {
+  display: flex;
+  margin-top: var(--space-4);
+}
+
+.import .check {
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink);
+}
+
+.field input:disabled,
+.field textarea:disabled {
+  opacity: 0.5;
 }

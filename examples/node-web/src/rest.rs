@@ -276,3 +276,50 @@ pub async fn fetch_proof(origin: &str, epoch: u32) -> Result<Option<Vec<u8>>, Fe
         .map(Some)
         .map_err(|error| FetchError::Malformed(format!("{path}: {error}")))
 }
+
+/// 作ったブロックを、heika のノードの REST（`PUT /blocks`）に出す。catapult の REST には、この口はない。
+/// 受け取られても、足すかはそのノードのチェーンがあとで決める
+pub async fn put_block(origin: &str, block: &[u8]) -> Result<(), FetchError> {
+    let unavailable = |reason: String| FetchError::Unavailable(format!("PUT /blocks: {reason}"));
+    let js = |error: JsValue| {
+        error
+            .as_string()
+            .or_else(|| js_sys::Error::from(error).message().as_string())
+            .unwrap_or_default()
+    };
+    let headers = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &headers,
+        &"Content-Type".into(),
+        &"application/octet-stream".into(),
+    );
+    let init = web_sys::RequestInit::new();
+    init.set_method("PUT");
+    init.set_headers(&headers);
+    init.set_body(&js_sys::Uint8Array::from(block));
+    let response: Response =
+        JsFuture::from(scope().fetch_with_str_and_init(&format!("{origin}/blocks"), &init))
+            .await
+            .map_err(|error| unavailable(js(error)))?
+            .unchecked_into();
+    if response.ok() {
+        return Ok(());
+    }
+    // heika は断ったわけを JSON の message に入れる
+    let status = response.status();
+    let text = match response.text() {
+        Ok(promise) => JsFuture::from(promise)
+            .await
+            .ok()
+            .and_then(|text| text.as_string())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    let message = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|body| body["message"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    Err(unavailable(
+        format!("HTTP {status} {message}").trim_end().to_owned(),
+    ))
+}

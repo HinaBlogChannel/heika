@@ -9,6 +9,8 @@ use web_sys::{MessageEvent, Worker};
 const WORKER_SCRIPT: &str = concat!("./worker_loader.js?v=", env!("NODE_WEB_BUILD"));
 /// 入れたオリジンを覚えておく localStorage のキー
 const ORIGINS_KEY: &str = "node-web/origins";
+/// ブロックを出す REST を覚えておく localStorage のキー。鍵は覚えない
+const SUBMIT_KEY: &str = "node-web/submit";
 /// 画面に残す注意の数
 const WARNINGS: usize = 5;
 
@@ -84,11 +86,19 @@ fn App() -> impl IntoView {
     let progress = RwSignal::new(None::<Progress>);
     let warnings = RwSignal::new(Vec::<String>::new());
     let failure = RwSignal::new(None::<String>);
-    let origins = RwSignal::new(
+    let remembered = |key| {
         storage()
-            .and_then(|storage| storage.get_item(ORIGINS_KEY).ok().flatten())
-            .unwrap_or_default(),
-    );
+            .and_then(|storage| storage.get_item(key).ok().flatten())
+            .unwrap_or_default()
+    };
+    let origins = RwSignal::new(remembered(ORIGINS_KEY));
+    // ハーベスト。鍵はこのページのメモリにだけ置き、Worker に渡すだけ
+    let harvesting = RwSignal::new(false);
+    let signing = RwSignal::new(String::new());
+    let vrf = RwSignal::new(String::new());
+    let submit = RwSignal::new(remembered(SUBMIT_KEY));
+    let plan = RwSignal::new(None::<String>);
+    let harvested = RwSignal::new(Vec::<String>::new());
 
     let worker = match Worker::new(WORKER_SCRIPT) {
         Ok(worker) => Some(worker),
@@ -125,6 +135,13 @@ fn App() -> impl IntoView {
                         state_hash: text(5),
                         tip: true,
                     });
+                }),
+                "plan" => plan.set(Some(text(1))),
+                "harvested" => harvested.update(|harvested| {
+                    harvested.push(text(1));
+                    if harvested.len() > WARNINGS {
+                        harvested.remove(0);
+                    }
                 }),
                 "warning" => warnings.update(|warnings| {
                     warnings.push(text(1));
@@ -171,8 +188,23 @@ fn App() -> impl IntoView {
         }
         failure.set(None);
         warnings.set(Vec::new());
+        plan.set(None);
+        harvested.set(Vec::new());
+        let harvest = if harvesting.get_untracked() {
+            let targets = submit.get_untracked();
+            if let Some(storage) = storage() {
+                let _ = storage.set_item(SUBMIT_KEY, &targets);
+            }
+            [signing.get_untracked(), vrf.get_untracked(), targets]
+                .into_iter()
+                .map(JsValue::from)
+                .collect::<Array>()
+                .into()
+        } else {
+            JsValue::NULL
+        };
         running.set(true);
-        send(&["sync".into(), text.into()]);
+        send(&["sync".into(), text.into(), harvest]);
     };
     let import = move |event: web_sys::Event| {
         let input: web_sys::HtmlInputElement = event_target(&event);
@@ -231,6 +263,55 @@ fn App() -> impl IntoView {
                             </Show>
                         </div>
                         <details class="import">
+                            <summary>"ハーベストする"</summary>
+                            <p class="hint">
+                                "先端を追うあいだ、当たりの時刻が来たらブロックを作り、heika のノードの REST（PUT /blocks）に出します。catapult の REST には出せません。"
+                                "使うのは、ハーベストに紐づけた署名の鍵（リモートの鍵）と VRF の鍵です。鍵はこのページのメモリにだけ置き、保存しません。読み込み直したら、入れ直してください。"
+                            </p>
+                            <label class="check">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=move || harvesting.get()
+                                    on:change=move |event| harvesting.set(event_target_checked(&event))
+                                    disabled=move || running.get()
+                                />
+                                " ハーベストする"
+                            </label>
+                            <label class="field">
+                                "署名の鍵（16 進の秘密鍵）"
+                                <input
+                                    type="password"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || signing.get()
+                                    on:input=move |event| signing.set(event_target_value(&event))
+                                    disabled=move || running.get() || !harvesting.get()
+                                />
+                            </label>
+                            <label class="field">
+                                "VRF の鍵（16 進の秘密鍵）"
+                                <input
+                                    type="password"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || vrf.get()
+                                    on:input=move |event| vrf.set(event_target_value(&event))
+                                    disabled=move || running.get() || !harvesting.get()
+                                />
+                            </label>
+                            <label class="field">
+                                "ブロックを出す heika の REST（1 行に 1 つ）"
+                                <textarea
+                                    rows="2"
+                                    spellcheck="false"
+                                    placeholder="https://example.com:3001"
+                                    prop:value=move || submit.get()
+                                    on:input=move |event| submit.set(event_target_value(&event))
+                                    disabled=move || running.get() || !harvesting.get()
+                                ></textarea>
+                            </label>
+                        </details>
+                        <details class="import">
                             <summary>"手元のノードの DB から始める"</summary>
                             <p class="hint">
                                 "heika のノードの DB（データのフォルダーの heika.redb）を読み込み、その先端から同期を続けます。"
@@ -284,6 +365,19 @@ fn App() -> impl IntoView {
                             })}
                         }
                     })}
+                    {move || plan.get().map(|plan| view! {
+                        <dl class="facts">
+                            <dt>"ハーベスト"</dt>
+                            <dd>{plan}</dd>
+                        </dl>
+                    })}
+                    <Show when=move || !harvested.get().is_empty()>
+                        <ul class="notes">
+                            <For each=move || harvested.get() key=|line| line.clone() let:line>
+                                <li class="path">{line}</li>
+                            </For>
+                        </ul>
+                    </Show>
                     {move || failure.get().map(|reason| view! {
                         <p class="state failed">"止まりました"</p>
                         <p class="hint path">{reason}</p>

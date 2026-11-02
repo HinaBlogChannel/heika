@@ -471,6 +471,19 @@ const HARVEST_HORIZON: u64 = 60 * 60 * 1000;
 /// 当たりがこれより近ければ（秒）、求めたことを知らせる
 const HARVEST_ANNOUNCE: u64 = 120;
 
+/// [`Chain::harvest_plan`] が返す、今の先端の上でのハーベストの当たり
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HarvestPlan {
+    /// 求めていない。ハーベストしないか、先端が変わってまだ求め直していないか、ピアの高さを聞けていないか、
+    /// ほかのピアが先にいて追いつくのを待っている
+    NotPlanned,
+    /// 親から1時間先までに当たりがない（作ったあと、次の先端を待つあいだも、これになる）
+    NoHit,
+    /// 高さ `height` のブロックを、時刻 `timestamp`（UTC）で作れる。作るのは、その時刻の
+    /// `maxBlockFutureTime` 前から
+    Hit { height: u64, timestamp: SystemTime },
+}
+
 /// ハーベストの予定。先端 `parent` の上で求めた、当たりの一番早い時刻と鍵の番号（なければ `None`）
 struct Planned {
     parent: Hash256,
@@ -783,6 +796,20 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
     /// 実行した先端
     pub fn tip(&self) -> Tip {
         self.tip
+    }
+
+    /// 今の先端の上で求めた、ハーベストの当たり。画面に「次の当たり」を出すときに読む
+    pub fn harvest_plan(&self) -> HarvestPlan {
+        match &self.planned {
+            Some(planned) if planned.parent == self.tip.hash => match planned.slot {
+                Some((timestamp, _)) => HarvestPlan::Hit {
+                    height: self.tip.height + 1,
+                    timestamp: self.parameters.epoch() + Duration::from_millis(timestamp),
+                },
+                None => HarvestPlan::NoHit,
+            },
+            _ => HarvestPlan::NotPlanned,
+        }
     }
 
     /// 接続してきたピアに答えるときの様子

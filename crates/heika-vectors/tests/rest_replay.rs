@@ -17,6 +17,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use heika_chain::chain::Keep;
 use heika_chain::verify::nemesis_hash;
 use heika_core::hash::Hash256;
 use heika_core::network::{NetworkIdentifier, NetworkParameters};
@@ -153,10 +154,17 @@ fn replays_blocks_fetched_from_rest_from_the_nemesis() {
 
     let dir = TempDir(env::temp_dir().join(format!("heika-rest-replay-{}", std::process::id())));
     let db = Db::open(&dir.0).unwrap();
+    // ライトのノードと同じく刈り込みながら進める
+    let keep = Some(Keep {
+        state: 2,
+        trie: 2,
+        history: true,
+    });
     // 半分まで進めたら、開き直して続きから実行する
     let half = to / 2;
     for stop in [half, to] {
-        let mut replay = Replay::open(&db, config.clone(), parameters, nemesis).unwrap();
+        let mut replay = Replay::open(&db, config.clone(), parameters, nemesis, keep).unwrap();
+        replay.set_target(stop).unwrap();
         while replay.height() < stop {
             let from = replay.height() + 1;
             let upto = (from + PAGE_SIZE as u64 - 1).min(stop);
@@ -174,9 +182,21 @@ fn replays_blocks_fetched_from_rest_from_the_nemesis() {
     let last: BlockInfo = serde_json::from_value(rest(&origin, &format!("/blocks/{to}"))).unwrap();
     assert_eq!(db.blocks_tip().unwrap(), to);
     assert_eq!(
-        Replay::open(&db, config, parameters, nemesis)
+        Replay::open(&db, config.clone(), parameters, nemesis, keep)
             .unwrap()
             .state_hash(),
         Some(last.verify().unwrap().state_hash)
     );
+    // 残す分（差分の 2 エポックと、再開に要るブロック）より古いブロックは消えている
+    let kept = 2 * parameters.voting_set_grouping + config.blocks_for_restart();
+    if let Some(through) = to.checked_sub(kept + 1)
+        && through > 1
+    {
+        assert_eq!(
+            db.block(through).unwrap(),
+            None,
+            "高さ {through} が残っています"
+        );
+        eprintln!("高さ {through} 以下のブロックを消しました");
+    }
 }

@@ -1356,6 +1356,82 @@ fn block_height(height: &str) -> Option<u64> {
     height.parse::<u64>().ok().filter(|&height| height > 0)
 }
 
+/// `/blocks` のクエリ文字列。heika がまだ扱わない絞り込みは、あれば 501 にするために読む
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockQuery {
+    page_size: Option<usize>,
+    page_number: Option<usize>,
+    order: Option<String>,
+    order_by: Option<String>,
+    offset: Option<String>,
+    signer_public_key: Option<String>,
+    beneficiary_address: Option<String>,
+    from_timestamp: Option<String>,
+    to_timestamp: Option<String>,
+}
+
+/// ブロックの一覧。catapult の REST と同じく、高さの順（`orderBy` は `id` か `height`。どちらも高さの順）にページで返す。
+/// `offset` は高さで、昇順ならそれより上、降順ならそれより下から始める。刈り込んで持っていない高さは飛ばす。
+/// 署名者、受取先、時刻での絞り込みはまだ扱わない
+async fn search_blocks(State(api): State<Api>, Query(query): Query<BlockQuery>) -> Response {
+    if query.signer_public_key.is_some()
+        || query.beneficiary_address.is_some()
+        || query.from_timestamp.is_some()
+        || query.to_timestamp.is_some()
+    {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            "NotImplemented",
+            "this node does not filter blocks yet (only paging by height)".to_owned(),
+        );
+    }
+    if let Some(field) = query
+        .order_by
+        .as_deref()
+        .filter(|field| !matches!(*field, "id" | "height"))
+    {
+        return invalid(format!("sorting by {field} is not allowed"));
+    }
+    let page = match page_request(query.order.as_deref(), query.page_size, query.page_number) {
+        Ok(page) => page,
+        Err(message) => return invalid(message),
+    };
+    let offset = match query.offset.as_deref().map(str::parse::<u64>) {
+        None => None,
+        Some(Ok(offset)) => Some(offset),
+        Some(Err(_)) => return invalid("offset has an invalid format".to_owned()),
+    };
+    let tip = read(&api).chain.height.parse::<u64>().unwrap_or(0);
+    let skip = ((page.number - 1) * page.size) as u64;
+    let heights: Vec<u64> = if page.descending {
+        let below = offset.map_or(tip, |offset| offset.saturating_sub(1).min(tip));
+        (1..=below.saturating_sub(skip))
+            .rev()
+            .take(page.size)
+            .collect()
+    } else {
+        let above = offset.unwrap_or(0).saturating_add(1).saturating_add(skip);
+        (above..=tip).take(page.size).collect()
+    };
+    let mut data = Vec::with_capacity(heights.len());
+    for height in heights {
+        match api.node.reader.block(height) {
+            Ok(Some(block)) => data.push(block),
+            Ok(None) => {}
+            Err(message) => return error(StatusCode::INTERNAL_SERVER_ERROR, "Internal", message),
+        }
+    }
+    Json(Page {
+        data,
+        pagination: Pagination {
+            page_number: page.number,
+            page_size: page.size,
+        },
+    })
+    .into_response()
+}
+
 async fn block(State(api): State<Api>, Path(height): Path<String>) -> Response {
     let Some(number) = block_height(&height) else {
         return invalid("height has an invalid format".to_owned());
@@ -1890,7 +1966,8 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/transactions", put(announce).options(preflight))
         .route(
             "/blocks",
-            put(announce_block)
+            get(search_blocks)
+                .put(announce_block)
                 .options(preflight)
                 // 16進の JSON は倍になる。JSON の囲みの分だけ少し足す
                 .layer(DefaultBodyLimit::max(2 * MAX_BLOCK_BYTES + 1024)),
@@ -2466,8 +2543,29 @@ mod tests {
             })
         }
 
-        fn block(&self, _height: u64) -> Result<Option<BlockInfo>, String> {
-            Ok(None)
+        /// 高さ 1 から 10 のうち、5 は刈り込んで持っていない
+        fn block(&self, height: u64) -> Result<Option<BlockInfo>, String> {
+            if !(1..=10).contains(&height) || height == 5 {
+                return Ok(None);
+            }
+            Ok(Some(
+                serde_json::from_value(serde_json::json!({
+                    "meta": {
+                        "hash": "00", "generationHash": "00", "totalFee": "0",
+                        "stateHashSubCacheMerkleRoots": [], "totalTransactionsCount": 0,
+                        "transactionsCount": 0, "statementsCount": 0,
+                    },
+                    "block": {
+                        "size": 376, "signature": "00", "signerPublicKey": "00", "version": 1,
+                        "network": 152, "type": 33091, "height": height.to_string(), "timestamp": "0",
+                        "difficulty": "0", "proofGamma": "00", "proofVerificationHash": "00",
+                        "proofScalar": "00", "previousBlockHash": "00", "transactionsHash": "00",
+                        "receiptsHash": "00", "stateHash": "00", "beneficiaryAddress": "00",
+                        "feeMultiplier": 0,
+                    },
+                }))
+                .unwrap(),
+            ))
         }
 
         fn transaction_status(&self, hash: &Hash256) -> Result<Option<TransactionStatus>, String> {
@@ -3351,6 +3449,35 @@ mod tests {
         );
 
         assert_eq!(get_status("/blocks/5").await.0, StatusCode::NOT_FOUND);
+
+        // ブロックの一覧は高さの順で、offset の高さの次から。持っていない高さは飛ばす
+        let heights = |body: &serde_json::Value| -> Vec<String> {
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block["block"]["height"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let (status, body) = get_status("/blocks?orderBy=height&offset=3&pageSize=10").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(heights(&body), ["4", "6", "7", "8", "9", "10"]);
+        let (_, body) = get_status("/blocks").await;
+        assert_eq!(heights(&body).len(), 9);
+        let (_, body) = get_status("/blocks?order=desc&offset=8").await;
+        assert_eq!(heights(&body), ["7", "6", "4", "3", "2", "1"]);
+        let (_, body) = get_status("/blocks?order=desc").await;
+        assert_eq!(heights(&body)[0], "10");
+        let (_, body) = get_status("/blocks?pageNumber=2").await;
+        assert!(heights(&body).is_empty());
+        assert_eq!(
+            get_status("/blocks?orderBy=size").await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            get_status("/blocks?signerPublicKey=00").await.0,
+            StatusCode::NOT_IMPLEMENTED
+        );
 
         // 連署を待つものの一覧は、絞り込みとページを読む
         let (status, body) = get_status("/transactions/partial").await;

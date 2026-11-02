@@ -6,6 +6,7 @@
 //! 画面から受け取るもの:
 //! - `["sync", オリジンを改行で区切った文字列]`: 同期を始める
 //! - `["stop"]`: 今の区切りを書いてから止める
+//! - `["import", File]`: 手元のノードの DB（redb）を、そのネットワークの DB として OPFS に写す。同期していないときだけ
 //!
 //! 画面に送るもの:
 //! - `["waiting"]`: ほかのタブの Worker が DB を持っている。そのタブが閉じるまで待つ
@@ -14,19 +15,22 @@
 //! - `["progress", ネットワーク, 書いた高さ, 確定した高さ, 1 秒あたりのブロック, StateHash, ファイルのバイト数]`
 //! - `["warning", 文]`: 1つの REST が取れないか、正しくないものを返した。ほかの REST で続ける
 //! - `["stopped"]` と `["error", 理由]`: 同期が終わった
+//! - `["imported", ネットワーク, 先端の高さ]`: 写し終えた
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use futures::channel::oneshot;
+use heika_block::Block;
 use heika_chain::chain::Keep;
+use heika_chain::store::EXECUTOR_META;
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
 use node_web::rest::{self, FetchError, Network, PAGE_SIZE};
-use node_web::{OpfsFile, hold_lock};
+use node_web::{OpfsFile, hold_lock, remove, rename};
 use wasm_bindgen::prelude::*;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
 /// DB を持つ Worker を1つにするロックの名前
 const LOCK: &str = "heika-node-web/db";
@@ -100,6 +104,17 @@ fn main() {
                     });
                 }
                 Some("stop") => stopping.set(true),
+                Some("import") if !running.get() => {
+                    let blob: Blob = message.get(1).unchecked_into();
+                    running.set(true);
+                    let running = running.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(error) = import(&blob).await {
+                            post(&["error".into(), error.into()]);
+                        }
+                        running.set(false);
+                    });
+                }
                 _ => {}
             }
         });
@@ -146,6 +161,73 @@ async fn open(network: &'static str) -> Result<(Rc<Db>, OpfsFile), String> {
         });
     });
     Ok((db, file))
+}
+
+/// 読み込みの途中のファイルの名前。確かめてから、ネットワークの DB の名前に変える
+const IMPORTING: &str = "heika-import.redb";
+
+/// 手元のノードの DB を、そのネットワークの DB として写す。開いている DB は閉じる。
+///
+/// ここで確かめるのは、redb として開けて、実行した状態と先端のブロックがあり、ネットワークがわかることまで。
+/// 本物のチェーンのものかは、同期を続けたときに、REST から取った次のブロックが先端につながるかで確かめる
+async fn import(blob: &Blob) -> Result<(), String> {
+    let js = |error: JsValue| format!("{error:?}");
+    if let Some(opened) = OPENED.take() {
+        drop(opened.db);
+        opened.file.close();
+    }
+    let mut shown = -1.0;
+    let file = OpfsFile::import(blob, IMPORTING, |done, total| {
+        let percent = (done / total * 100.0).floor();
+        if percent > shown {
+            shown = percent;
+            status(&format!("DB を写しています（{percent:.0}%）"));
+        }
+    })
+    .await
+    .map_err(js)?;
+
+    status("写した DB を確かめています");
+    let checked = (|| -> Result<(&'static str, u64), String> {
+        let db =
+            Db::open_with_backend(file.clone(), CACHE_SIZE).map_err(|error| error.to_string())?;
+        if db
+            .meta(EXECUTOR_META)
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Err("実行した状態がない DB です".into());
+        }
+        let tip = db.blocks_tip().map_err(|error| error.to_string())?;
+        let bytes = db
+            .block(tip)
+            .map_err(|error| error.to_string())?
+            .ok_or("先端のブロックがありません")?;
+        let block = Block::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        let network = match block.network {
+            heika_core::network::NetworkIdentifier::MAINNET => "mainnet",
+            heika_core::network::NetworkIdentifier::TESTNET => "testnet",
+            _ => {
+                return Err(
+                    "メインネットとテストネットのほかの DB には、まだ対応していません".into(),
+                );
+            }
+        };
+        Ok((network, tip))
+    })();
+    file.close();
+    let (network, tip) = match checked {
+        Ok(checked) => checked,
+        Err(error) => {
+            let _ = remove(IMPORTING).await;
+            return Err(format!("写した DB を使えません: {error}"));
+        }
+    };
+    let target = format!("heika-{network}.redb");
+    remove(&target).await.map_err(js)?;
+    rename(IMPORTING, &target).await.map_err(js)?;
+    post(&["imported".into(), network.into(), (tip as f64).into()]);
+    Ok(())
 }
 
 /// 1つの区切りを取る。すぐに取りに行き、結果は受け取り口で待つ（取っているあいだに、前の区切りを実行できる）

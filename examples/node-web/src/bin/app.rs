@@ -118,6 +118,15 @@ fn App() -> impl IntoView {
                         warnings.remove(0);
                     }
                 }),
+                "imported" => {
+                    running.set(false);
+                    progress.set(None);
+                    status.set(format!(
+                        "{} の DB を読み込みました（先端の高さ {}）。「同期する」で、ここから続けます",
+                        text(1),
+                        group(number(2))
+                    ));
+                }
                 "stopped" => {
                     running.set(false);
                     status.set("止めました".into());
@@ -150,6 +159,18 @@ fn App() -> impl IntoView {
         warnings.set(Vec::new());
         running.set(true);
         send(&["sync".into(), text.into()]);
+    };
+    let import = move |event: web_sys::Event| {
+        let input: web_sys::HtmlInputElement = event_target(&event);
+        let Some(file) = input.files().and_then(|files| files.get(0)) else {
+            return;
+        };
+        failure.set(None);
+        warnings.set(Vec::new());
+        running.set(true);
+        status.set("DB を読み込んでいます".into());
+        send(&["import".into(), file.into()]);
+        input.set_value("");
     };
     let stop = move |_| {
         status.set("今の区切りを書いてから止めます…".into());
@@ -195,11 +216,21 @@ fn App() -> impl IntoView {
                                 <button on:click=stop>"止める"</button>
                             </Show>
                         </div>
+                        <details class="import">
+                            <summary>"手元のノードの DB から始める"</summary>
+                            <p class="hint">
+                                "heika のノードの DB（データのフォルダーの heika.redb）を読み込み、その先端から同期を続けます。"
+                                "ライトの残し方の写し（heika experimental peer copy）が小さくて向いています。"
+                                "読み込んだところまでの履歴は確かめずに信じるので、自分のノードの DB を使ってください。"
+                                "続きのブロックが先端につながらなければ、同期で弾かれます。"
+                            </p>
+                            <input type="file" on:change=import disabled=move || running.get() />
+                        </details>
                     </section>
                 }.into_any(),
             }}
 
-            <Show when=move || progress.get().is_some() || running.get() || failure.get().is_some()>
+            <Show when=move || progress.get().is_some() || running.get() || failure.get().is_some() || !status.get().is_empty()>
                 <section class="glass panel">
                     <p class="state">{move || status.get()}</p>
                     {move || progress.get().map(|progress| {

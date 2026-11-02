@@ -41,6 +41,7 @@ use heika_chain::event::{ChainEvent, PeerCommand, PeerId};
 use heika_chain::store::EXECUTOR_META;
 use heika_chain::verify::{Tip, verify_alone};
 use heika_core::key::PrivateKey;
+use heika_mempool::{Config as MempoolConfig, Mempool, SharedMempool};
 use heika_store_redb::Db;
 use heika_store_redb::replay::{Replay, ReplayError};
 use js_sys::Array;
@@ -54,6 +55,12 @@ use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 const LOCK: &str = "heika-node-web/db";
 /// redb のキャッシュの上限
 const CACHE_SIZE: usize = 64 << 20;
+/// 当たりがこれより近ければ（ミリ秒）、未承認のトランザクションを取りに行く。遠いうちは REST に頼まない
+const PENDING_AHEAD_MS: u128 = 60_000;
+/// 当たりが近いあいだ、未承認のトランザクションを取り直す間隔（ミリ秒）
+const PENDING_EVERY_MS: f64 = 5_000.0;
+/// 未承認のトランザクションを取るページの数の上限（1 ページ 100 件）
+const PENDING_PAGES: u32 = 10;
 /// 委任の要求を REST で探し直し、状態で確かめ直す間隔（ミリ秒）
 const DELEGATION_MS: f64 = 60_000.0;
 /// 少なくともこの間隔（ミリ秒）でコミットする。短いほど止めたときに失うものが少ないが、書く回数が増える
@@ -595,6 +602,21 @@ async fn follow_tip(
     let mut delegations = Delegations::default();
     let mut last_scan = f64::NEG_INFINITY;
     let mut scan_turn = 0;
+    // 未承認のトランザクションの置き場。受け付けるときに署名と規則を確かめ、状態に依ることは作るときに確かめる
+    let mempool = Arc::new(SharedMempool::new(Mempool::new(
+        network.parameters,
+        MempoolConfig::default(),
+    )));
+    if harvest.is_some() {
+        chain.set_pending(mempool.clone());
+    }
+    let mut last_pending = f64::NEG_INFINITY;
+    let pending_running = Rc::new(Cell::new(false));
+    let network_now = |env: &BrowserEnv| {
+        env.now()
+            .duration_since(network.parameters.epoch())
+            .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    };
     let (sender, mut events) = mpsc::unbounded::<ChainEvent>();
     // ピアの番号から REST へ。外したピアの番号は使い回さないので、入れ直すときは新しい番号にする
     let mut peers: HashMap<usize, String> = HashMap::new();
@@ -678,6 +700,21 @@ async fn follow_tip(
                 Action::Notify(notice @ Notice::Produced { .. }) => {
                     post(&["harvested".into(), notice.to_string().into()]);
                 }
+                Action::Included(hashes) => mempool.lock().tip_changed(
+                    &hashes,
+                    Vec::new(),
+                    network_now(&env),
+                    chain.height() + 1,
+                ),
+                Action::Restored(transactions) => mempool.lock().tip_changed(
+                    &[],
+                    transactions,
+                    network_now(&env),
+                    chain.height() + 1,
+                ),
+                Action::Dropped(hash) => {
+                    mempool.lock().reject(&hash);
+                }
                 _ => {}
             }
         }
@@ -742,8 +779,47 @@ async fn follow_tip(
                 chain.set_harvesters(Arc::new(keys));
             }
         }
+        // 当たりが近づいたら、未承認のトランザクションを取って置き場に入れる。取るのは裏で、待たない
+        if let HarvestPlan::Hit { timestamp, .. } = chain.harvest_plan()
+            && !harvesting.is_empty()
+            && timestamp
+                .duration_since(env.now())
+                .map_or(0, |left| left.as_millis())
+                <= PENDING_AHEAD_MS
+            && now() - last_pending >= PENDING_EVERY_MS
+            && !pending_running.get()
+        {
+            last_pending = now();
+            pending_running.set(true);
+            scan_turn += 1;
+            let origin = usable[scan_turn % usable.len()].clone();
+            let (mempool, running) = (mempool.clone(), pending_running.clone());
+            let (at, height) = (network_now(&env), chain.height() + 1);
+            wasm_bindgen_futures::spawn_local(async move {
+                match rest::fetch_unconfirmed(&origin, PENDING_PAGES).await {
+                    Ok(transactions) => {
+                        let mut mempool = mempool.lock();
+                        mempool.prune(at);
+                        for bytes in transactions {
+                            let _ = mempool.add(bytes, at, height);
+                        }
+                    }
+                    Err(error) => post(&[
+                        "warning".into(),
+                        format!("{origin} で未承認のトランザクションを取れません: {error}").into(),
+                    ]),
+                }
+                running.set(false);
+            });
+        }
         if harvest.is_some() {
-            let plan = plan_text(chain.harvest_plan(), !harvesting.is_empty());
+            let mut plan = plan_text(chain.harvest_plan(), !harvesting.is_empty());
+            let pending = mempool.lock().len();
+            if pending > 0 {
+                plan.push_str(&format!(
+                    "。未承認のトランザクション {pending} 件が候補です"
+                ));
+            }
             if plan != shown_plan {
                 post(&["plan".into(), plan.as_str().into()]);
                 shown_plan = plan;
@@ -872,12 +948,15 @@ fn plan_text(plan: HarvestPlan, has_keys: bool) -> String {
 
 /// 作ったブロックを、ブロックを出す REST のすべてに出し、結果を画面に知らせる
 fn submit(origins: &[String], bytes: Arc<Vec<u8>>) {
-    let height = Block::from_bytes(&bytes).map_or(0, |block| block.height);
+    let (height, count) = Block::from_bytes(&bytes)
+        .map_or((0, 0), |block| (block.height, block.transactions().count()));
     for origin in origins {
         let (origin, bytes) = (origin.clone(), bytes.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let text = match rest::put_block(&origin, &bytes).await {
-                Ok(()) => format!("高さ {height} を {origin} に出しました"),
+                Ok(()) => {
+                    format!("高さ {height}（トランザクション {count} 件）を {origin} に出しました")
+                }
                 Err(error) => format!("高さ {height} を {origin} に出せませんでした: {error}"),
             };
             post(&["harvested".into(), text.into()]);

@@ -373,6 +373,20 @@ impl Mempool {
             .collect()
     }
 
+    /// 持っているものを、受け付けた順に（REST の `/transactions/unconfirmed`）
+    pub fn transactions(&self) -> impl Iterator<Item = (&Hash256, &[u8])> {
+        self.by_order
+            .values()
+            .map(|hash| (hash, self.entries[hash].candidate.bytes.as_slice()))
+    }
+
+    /// 持っていれば、そのバイト列
+    pub fn get(&self, hash: &Hash256) -> Option<&[u8]> {
+        self.entries
+            .get(hash)
+            .map(|entry| entry.candidate.bytes.as_slice())
+    }
+
     /// `Pull_Transactions` への答え（catapult の `unknownTransactions`）。期限が `min_deadline` 以上で、手数料の倍率が
     /// `min_fee_multiplier` 以上で、短いハッシュが `known` にないものを、受け付けた順に。合わせて
     /// `max_response_bytes` を超えるところで打ち切る
@@ -468,6 +482,19 @@ mod tests {
         assert!(!pool.remove(&hash));
         assert!(pool.is_empty());
         assert_eq!(pool.bytes(), 0);
+    }
+
+    #[test]
+    fn lists_in_the_order_accepted() {
+        let mut pool = mempool(Config::default());
+        let hashes: Vec<Hash256> = (1..=3)
+            .map(|key| pool.add(transfer(key, 0, NOW + HOUR, b""), NOW, 2).unwrap())
+            .collect();
+        pool.remove(&hashes[1]);
+        let listed: Vec<Hash256> = pool.transactions().map(|(hash, _)| *hash).collect();
+        assert_eq!(listed, [hashes[0], hashes[2]]);
+        assert!(pool.get(&hashes[0]).is_some());
+        assert!(pool.get(&hashes[1]).is_none());
     }
 
     #[test]

@@ -188,6 +188,7 @@ heika は、TLS のハンドシェイクで ALPN に `heika-symbol/0` を出し�
 | `/blocks/{height}/transactions/{hash}/merkle` | そのブロックの TransactionsHash への Merkle の経路 |
 | `PUT /transactions/partial`、`PUT /transactions/cosignature` | 連署を待つアグリゲートボンデッドと、その連署（catapult の `CosignatureDTO`）を受け付ける。受け付けたら 202。ハッシュロックや連署できる人かは、そのあとノードで確かめる。連署を待っているものは、行方（`/transactionStatus`）で `partial` になる |
 | `/transactions/partial/{hash}`、`/transactions/partial` | 連署を待っているもの（集まった連署付き、高さは "0"）と、その一覧。一覧は `address`（外側の署名者、中のトランザクションの署名者、連署者、送金の宛先のどれか）と `signerPublicKey`（外側の署名者）で絞り、`pageSize`（10 から 100）と `pageNumber` でページを送る |
+| `/transactions/unconfirmed/{hash}`、`/transactions/unconfirmed` | 未承認のもの（ブロックに入るのを待っているもの、高さは "0"）と、その一覧。一覧は受け付けた順で、絞り込みとページは `/transactions/partial` と同じ。`embedded=true` なら、アグリゲートのすぐあとに中のものを1件ずつ（`meta.aggregateHash` と `meta.index` 付きで）続ける。`address` で絞るときは、catapult と同じく中のものは返さない。ブラウザのノード（examples/node-web）は、ここからブロックに入れる候補を取る |
 | `PUT /transactions` | 署名したトランザクション（`{"payload":"16進"}`）を受け付けて、つないでいるピアに流す。catapult の REST と同じく、受け付けたら 202。heika は先にメモリプールで確かめるので、受け付けなかったら 409 で `message` にわけを返す |
 | `PUT /blocks` | 外で組んで署名したブロックを受け取る。本文は、`Content-Type: application/json` なら `{"payload":"16進"}`、`application/octet-stream` ならブロックのバイト列そのまま（ほかは 415）。ブロックは P2P の `Push_Block` と同じく 32 MiB まで（JSON は16進なのでおよそ 64 MiB まで。超えたら 413）。heika だけの口。P2P の `Push_Block` と同じく、形と署名を確かめて 202 を返し（読めなければ 409）、先端の次につながるか、先端と同じ親の上でスコアが高ければ足して、つないでいるピアに流す。足したかはノードのログか `/chain/info` で見る。規則に合わなくても、P2P と違って締め出す相手はいない |
 

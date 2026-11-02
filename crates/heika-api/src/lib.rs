@@ -10,6 +10,8 @@
 //!   先端につながれば足し、ネットワークに流す（heika だけ）
 //! - `PUT /transactions/partial`、`PUT /transactions/cosignature`: 連署を待つアグリゲートボンデッドと、その連署
 //! - `/transactions/partial/{hash}`、`/transactions/partial`: 連署を待っているもの（集まった連署付き）と、その一覧
+//! - `/transactions/unconfirmed/{hash}`、`/transactions/unconfirmed`: 未承認のもの（ブロックに入るのを待っているもの）と、
+//!   その一覧。`embedded=true` なら、アグリゲートの中のものも1件ずつ返す
 //! - `/accounts/{accountId}`、`/mosaics/{mosaicId}`、`/namespaces/{namespaceId}`、`/metadata/{compositeHash}` と、
 //!   それぞれの `/merkle`: 今の状態と、状態の木の道。`?height=` を付ければ、その高さの状態（heika だけ）
 //! - `POST /accounts`、`POST /mosaics`: ID を並べて、まとめて引く。これも `?height=` を受ける
@@ -231,6 +233,15 @@ pub trait Reader: Send + Sync {
     fn partial_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
     /// 連署を待つものの一覧。`filter` に合うものを、期限の早い順に
     fn partial_transactions(&self, filter: &PartialFilter) -> Result<Vec<TransactionInfo>, String>;
+    /// 未承認のもの。知らなければ `None`
+    fn unconfirmed_transaction(&self, hash: &Hash256) -> Result<Option<TransactionInfo>, String>;
+    /// 未承認のものの一覧。`filter` に合うものを、受け付けた順に。`embedded` なら、アグリゲートのすぐあとに、中のものを
+    /// 1件ずつ続ける（catapult と同じく、`address` で絞るときは中のものは返さない）
+    fn unconfirmed_transactions(
+        &self,
+        filter: &PartialFilter,
+        embedded: bool,
+    ) -> Result<Vec<TransactionInfo>, String>;
     /// 公開鍵からアドレスを出すときのネットワーク
     fn network(&self) -> NetworkIdentifier;
 }
@@ -410,6 +421,8 @@ struct PartialQuery {
     signer_public_key: Option<String>,
     page_size: Option<usize>,
     page_number: Option<usize>,
+    /// `/transactions/unconfirmed` だけが読む
+    embedded: Option<String>,
 }
 
 /// 一覧の1ページ（catapult の REST の `data` と `pagination`）
@@ -1456,6 +1469,13 @@ async fn partial_transaction(State(api): State<Api>, Path(hash): Path<String>) -
     found(&hash, api.node.reader.partial_transaction(&key))
 }
 
+async fn unconfirmed_transaction(State(api): State<Api>, Path(hash): Path<String>) -> Response {
+    let Some(key) = hash256(&hash) else {
+        return invalid("transactionId has an invalid format".to_owned());
+    };
+    found(&hash, api.node.reader.unconfirmed_transaction(&key))
+}
+
 /// 連署を待つものの一覧。ページの大きさは catapult と同じく 10 から 100（既定 10）、ページは 1 から
 /// アドレス（Base32 か16進）。公開鍵は受け付けない（catapult の REST の検索と同じ）
 fn address_only(id: &str, network: NetworkIdentifier) -> Option<Address> {
@@ -1841,6 +1861,32 @@ async fn partial_transactions(
     State(api): State<Api>,
     Query(query): Query<PartialQuery>,
 ) -> Response {
+    list_pool(&api, &query, |filter| {
+        api.node.reader.partial_transactions(filter)
+    })
+}
+
+/// 未承認のものの一覧。絞り込みとページは [`partial_transactions`] と同じ
+async fn unconfirmed_transactions(
+    State(api): State<Api>,
+    Query(query): Query<PartialQuery>,
+) -> Response {
+    let embedded = match query.embedded.as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return invalid("embedded has an invalid format".to_owned()),
+    };
+    list_pool(&api, &query, |filter| {
+        api.node.reader.unconfirmed_transactions(filter, embedded)
+    })
+}
+
+/// 置き場の一覧を、クエリの絞り込みで `read` から読み、ページに切って返す
+fn list_pool(
+    api: &Api,
+    query: &PartialQuery,
+    read: impl FnOnce(&PartialFilter) -> Result<Vec<TransactionInfo>, String>,
+) -> Response {
     let network = api.node.reader.network();
     let address = match query
         .address
@@ -1862,11 +1908,7 @@ async fn partial_transactions(
     };
     let page_size = query.page_size.unwrap_or(10).clamp(10, 100);
     let page_number = query.page_number.unwrap_or(1).max(1);
-    match api
-        .node
-        .reader
-        .partial_transactions(&PartialFilter { address, signer })
-    {
+    match read(&PartialFilter { address, signer }) {
         Ok(all) => Json(Page {
             data: all
                 .into_iter()
@@ -1979,6 +2021,11 @@ pub fn router(shared: Shared, node: Node) -> Router {
                 .options(preflight),
         )
         .route("/transactions/partial/{hash}", get(partial_transaction))
+        .route("/transactions/unconfirmed", get(unconfirmed_transactions))
+        .route(
+            "/transactions/unconfirmed/{hash}",
+            get(unconfirmed_transaction),
+        )
         .route(
             "/transactions/cosignature",
             put(announce_cosignature).options(preflight),
@@ -2670,6 +2717,38 @@ mod tests {
 
         fn partial_transaction(&self, _hash: &Hash256) -> Result<Option<TransactionInfo>, String> {
             Ok(None)
+        }
+
+        fn unconfirmed_transaction(
+            &self,
+            hash: &Hash256,
+        ) -> Result<Option<TransactionInfo>, String> {
+            Ok((hash.0 == [0xAA; 32]).then(|| {
+                serde_json::from_value(serde_json::json!({
+                    "meta": {"height": "0"},
+                    "transaction": {"signerPublicKey": "AA", "version": 1, "network": 152, "type": 16724}
+                }))
+                .unwrap()
+            }))
+        }
+
+        fn unconfirmed_transactions(
+            &self,
+            filter: &PartialFilter,
+            embedded: bool,
+        ) -> Result<Vec<TransactionInfo>, String> {
+            // 絞り込みが届いたことを、件数で返す（embedded なら 12 件、宛先なら 1 件、なしなら 2 件）
+            let count = match (embedded, filter.address) {
+                (true, _) => 12,
+                (false, Some(_)) => 1,
+                (false, None) => 2,
+            };
+            let info: TransactionInfo = serde_json::from_value(serde_json::json!({
+                "meta": {"height": "0"},
+                "transaction": {"signerPublicKey": "AA", "version": 1, "network": 152, "type": 16724}
+            }))
+            .unwrap();
+            Ok(vec![info; count])
         }
 
         fn partial_transactions(
@@ -3503,6 +3582,31 @@ mod tests {
         );
         assert_eq!(
             get_status(&format!("/transactions/partial/{}", "AA".repeat(32)))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // 未承認のものの一覧は、embedded と絞り込みとページを読む
+        let (status, body) = get_status("/transactions/unconfirmed").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        let (_, body) =
+            get_status("/transactions/unconfirmed?embedded=true&pageSize=10&pageNumber=2").await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        let (_, body) =
+            get_status(&format!("/transactions/unconfirmed?address={}", known())).await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            get_status("/transactions/unconfirmed?embedded=yes").await.0,
+            StatusCode::CONFLICT
+        );
+        let (status, body) =
+            get_status(&format!("/transactions/unconfirmed/{}", "AA".repeat(32))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["transaction"]["type"], 16724);
+        assert_eq!(
+            get_status(&format!("/transactions/unconfirmed/{}", "BB".repeat(32)))
                 .await
                 .0,
             StatusCode::NOT_FOUND

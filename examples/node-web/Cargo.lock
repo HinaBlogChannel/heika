@@ -764,6 +764,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "heika-mempool"
+version = "0.14.1"
+dependencies = [
+ "heika-chain",
+ "heika-core",
+ "heika-packet",
+ "heika-transaction",
+ "sha3",
+]
+
+[[package]]
 name = "heika-packet"
 version = "0.14.1"
 dependencies = [
@@ -1249,6 +1260,7 @@ dependencies = [
  "heika-chain",
  "heika-core",
  "heika-harvesting",
+ "heika-mempool",
  "heika-packet",
  "heika-rest",
  "heika-state-transition",

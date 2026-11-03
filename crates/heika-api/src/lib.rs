@@ -3,6 +3,8 @@
 //! - `/node/info`: ノードの身元と、委任の鍵（`nodePublicKey`）
 //! - `/node/peers`: 知っているピア。GUI のノードは、ここから最初のつなぎ先を選ぶ
 //! - `/chain/info`: 高さ、スコア、確定したブロック
+//! - `/node/time`: ノードの時計の、ネットワーク時刻。どれだけ合っているかはノードの時計しだいなので、期限を決める側は
+//!   自分の時計で決める
 //! - `/node/unlockedaccount`: ハーベストしている、委任されたリモートの鍵
 //! - `/heika/delegations`: 届いた委任の要求ごとに、引き受けたか、待っているか、なぜ引き受けなかったか
 //! - `PUT /transactions`: 署名したトランザクションを受け付けて、ネットワークに流す
@@ -39,7 +41,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::body::Bytes;
 use axum::extract::Request;
@@ -62,10 +64,10 @@ use heika_rest::block::BlockInfo;
 use heika_rest::finalization::FinalizationProof;
 use heika_rest::merkle::{MerkleProofInfo, MerkleStateInfo};
 use heika_rest::node::{
-    AnnounceJson, AnnounceResultJson, ChainInfoJson, CosignatureJson, DelegationJson,
-    DeploymentJson, ErrorJson, HealthStatusJson, NetworkJson, NetworkPropertiesJson,
-    NodeHealthJson, NodeInfoJson, ServerInfoJson, ServerJson, TransactionFeesJson,
-    UnlockedAccountJson,
+    AnnounceJson, AnnounceResultJson, ChainInfoJson, CommunicationTimestampsJson, CosignatureJson,
+    DelegationJson, DeploymentJson, ErrorJson, HealthStatusJson, NetworkJson,
+    NetworkPropertiesJson, NodeHealthJson, NodeInfoJson, NodeTimeJson, ServerInfoJson, ServerJson,
+    TransactionFeesJson, UnlockedAccountJson,
 };
 use heika_rest::send::TransactionStatus;
 use heika_rest::state::{
@@ -457,6 +459,8 @@ pub struct Node {
     pub reader: Arc<dyn Reader>,
     /// `/network/properties` で返す、ネットワークの設定。動いている間は変わらない
     pub network_properties: Arc<NetworkPropertiesJson>,
+    /// Nemesis の時刻（`epochAdjustment`）。`/node/time` で、ここからのミリ秒を返す
+    pub epoch: SystemTime,
 }
 
 /// バイナリに埋め込んだソースの ZIP。`GET /heika/sourcecode.zip` で返す
@@ -528,6 +532,24 @@ async fn node_server() -> Json<ServerInfoJson> {
             },
         },
     })
+}
+
+/// ノードの時計の、ネットワーク時刻。catapult の REST はノードに時刻を問い合わせて、受け取った時刻と返した時刻を
+/// 返す。heika は REST とノードが同じプロセスで同じ時計を読むので、両方に同じ時刻を入れる
+async fn node_time(State(api): State<Api>) -> Json<NodeTimeJson> {
+    let now = network_millis(api.node.epoch, SystemTime::now()).to_string();
+    Json(NodeTimeJson {
+        communication_timestamps: CommunicationTimestampsJson {
+            send_timestamp: now.clone(),
+            receive_timestamp: now,
+        },
+    })
+}
+
+/// `epoch` から `now` までのミリ秒。`now` が `epoch` より前（時計が大きくずれている）なら 0
+fn network_millis(epoch: SystemTime, now: SystemTime) -> u64 {
+    let elapsed = now.duration_since(epoch).unwrap_or_default().as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
 }
 
 /// REST はノードと同じプロセスにいるので、答えられればノードも DB も動いている
@@ -2031,6 +2053,7 @@ pub fn router(shared: Shared, node: Node) -> Router {
         .route("/network/properties", get(network_properties))
         .route("/node/server", get(node_server))
         .route("/node/health", get(node_health))
+        .route("/node/time", get(node_time))
         .route("/node/unlockedaccount", get(unlocked))
         .route("/heika/delegations", get(delegations))
         .route("/heika/sourcecode.zip", get(source_code))
@@ -2834,6 +2857,7 @@ mod tests {
             submit,
             reader: Arc::new(FakeReader),
             network_properties: Arc::new(NetworkPropertiesJson::default()),
+            epoch: testnet_epoch(),
         }
     }
 
@@ -2869,6 +2893,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"]["apiNode"], "up");
         assert_eq!(body["status"]["db"], "up");
+    }
+
+    /// テストネットの Nemesis の時刻
+    fn testnet_epoch() -> SystemTime {
+        heika_core::network::NetworkParameters::TESTNET.epoch()
+    }
+
+    #[tokio::test]
+    async fn answers_node_time_in_network_milliseconds_like_catapult() {
+        let before = network_millis(testnet_epoch(), SystemTime::now());
+        let (status, body) = get_status("/node/time").await;
+        let after = network_millis(testnet_epoch(), SystemTime::now());
+        assert_eq!(status, StatusCode::OK);
+        let timestamps = &body["communicationTimestamps"];
+        let millis = |name: &str| timestamps[name].as_str().unwrap().parse::<u64>().unwrap();
+        let (receive, send) = (millis("receiveTimestamp"), millis("sendTimestamp"));
+        assert!(before <= receive && receive <= send && send <= after);
+    }
+
+    #[test]
+    fn network_millis_counts_from_the_epoch_and_never_goes_below_zero() {
+        let later = testnet_epoch() + Duration::from_micros(1_500_999);
+        assert_eq!(network_millis(testnet_epoch(), later), 1_500);
+        let earlier = testnet_epoch() - Duration::from_secs(1);
+        assert_eq!(network_millis(testnet_epoch(), earlier), 0);
     }
 
     #[tokio::test]

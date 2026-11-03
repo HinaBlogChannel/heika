@@ -217,6 +217,21 @@ pub struct DeploymentJson {
     pub last_updated_date: String,
 }
 
+/// `NodeTimeDTO`（`/node/time`）。ノードの時計の、ネットワーク時刻（Nemesis からのミリ秒）
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeTimeJson {
+    pub communication_timestamps: CommunicationTimestampsJson,
+}
+
+/// 要求を受け取った時刻と、答えを返した時刻。catapult の REST と同じく、10進の文字列
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunicationTimestampsJson {
+    pub send_timestamp: String,
+    pub receive_timestamp: String,
+}
+
 /// `NodeHealthDTO`（`/node/health`）
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct NodeHealthJson {

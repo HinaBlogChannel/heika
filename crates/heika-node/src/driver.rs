@@ -658,6 +658,7 @@ fn follow(setup: &Setup<'_>, stopping: &(dyn Fn() -> bool + Sync)) -> Result<Out
                     parameters,
                     &setup.config,
                 )),
+                epoch: parameters.epoch(),
             };
             let (shared, stop) = (Arc::clone(shared), Arc::clone(&api_stop));
             scope.spawn(move || {

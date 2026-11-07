@@ -1,6 +1,6 @@
-# 試験的なノード
+# ノード
 
-`heika experimental peer start` は、heika をピアとしてネットワークに入れる。試験的なので、コマンドの形も設定の中身も、断りなく変わる。
+`heika peer start` は、heika をピアとしてネットワークに入れる。
 
 ## できること
 
@@ -20,14 +20,14 @@
 ## コマンドの例
 
 ```sh
-heika experimental peer start --config peer.yaml
+heika peer start --config peer.yaml
 ```
 
 ```sh
 heika harvesting --network mainnet --link-derived main --out link.bin
 heika tx sign --network mainnet --wallet-account main --out link.signed.bin link.bin
 heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-cert node.full.crt.pem link.signed.bin < node.key.pem
-heika experimental peer start --config peer.yaml --harvest main
+heika peer start --config peer.yaml --harvest main
 ```
 
 `--harvest <ラベル>` を付けると、起動するときにキーストアのパスフレーズを聞き、そのアカウントのリモートと VRF の鍵を導出して、ノードのメモリにだけ渡す。鍵はディスクに書かないので、止めて起動し直すたびにパスフレーズを聞く。先に `heika harvesting --link-derived` で、同じ鍵をチェーンに紐づけておく。`--keystore`、`--passphrase-file`、`--expert` は `heika wallet` と同じ。
@@ -92,7 +92,7 @@ spec:
 軽くするとき、その場で刈り込むと、消すものが多くて時間がかかり、DB のファイルも縮まない。止めたノードから、残すものだけを写した新しい DB を作れる。
 
 ```sh
-heika experimental peer copy --config light.yaml --to <新しいフォルダー>
+heika peer copy --config light.yaml --to <新しいフォルダー>
 ```
 
 `--config` の `dataDirectory` の DB を、その設定の `storage.mode` の残し方で刈り込んで、`--to` のフォルダーに写す。たとえばアーカイブのデータを指し、`storage.mode` だけを `Light` にした設定を渡すと、ライトの写しができる。`Archive` なら全部写すので、詰め直しになる。ノードを止めてから使い（動いていれば DB を開けずに止まる）、`--to` に DB がもうあれば写さない。できた写しを `dataDirectory` に置き換えて起動する。

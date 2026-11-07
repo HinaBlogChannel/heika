@@ -26,7 +26,7 @@ Nemesis から全部を確かめると、メインネットでは半日ほどか
 
 ```sh
 # 止めたノードの DB を、ライトの残し方で写す（設定の storage.mode を Light にしたもの。メインネットで 2 GB ほど）
-heika experimental peer copy --config light.yaml --to ./light
+heika peer copy --config light.yaml --to ./light
 ```
 
 画面の「手元のノードの DB から始める」で `light/heika.redb` を選ぶと、OPFS に写して、その先端から同期を続けます。

@@ -13,7 +13,7 @@ cargo build --release
 ./target/release/roast peer.yaml <受取人のアドレス> 1000000
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
+- `peer.yaml` は `heika peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
 - 量は XYM の最小単位で書きます（1000000 で 1 XYM）
 
 起動すると、400 人で持つアカウントのアドレスを出して、XYM が届くのを待ちます。[蛇口](../faucet) などから送ってください。届いたら署名して出し、承認を待ちます。

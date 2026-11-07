@@ -4,7 +4,7 @@
 //! faucet <ノードの設定> <蛇口の設定>
 //! ```
 //!
-//! ノードの設定は `heika experimental peer start` と同じもので、ネットワークと REST（最初の `rest` の口）を決める。
+//! ノードの設定は `heika peer start` と同じもので、ネットワークと REST（最初の `rest` の口）を決める。
 //!
 //! - `GET /`: ページ
 //! - `GET /api/info`: 1 回に配る量と待ち時間

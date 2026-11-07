@@ -16,7 +16,7 @@ $B $NET/heika3/peer.yaml $NET/keys/faucet.key $NET/keys/main1.key 1000000000 ref
 $B $NET/heika3/peer.yaml $NET/keys/faucet.key $NET/keys/main1.key 1000000000 both
 ```
 
-- 1 つめの引数は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
+- 1 つめの引数は `heika peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
 - 2 つめが Alice（XYM を出す人）、3 つめが Bob（XYM を受け取る人）の鍵のファイルです。PEM、DER、16進のどれでも読みます。Alice には額と手数料の XYM が要ります。Bob には前もって XYM は要りません（受け取りの手数料は、受け取った額から払います）
 - 量は XYM の最小単位で書きます（1000000000 は 1,000 XYM）
 - `redeem`: Bob が受け取ります。Bob が出した連署から、Alice が `b` を取り出します（約 30 秒）

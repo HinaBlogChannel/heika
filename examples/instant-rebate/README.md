@@ -13,7 +13,7 @@ cargo build --release
 ./target/release/instant-rebate peer.yaml beneficiary.key 500
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。`beneficiary` を、受取先の鍵のアドレスにします
+- `peer.yaml` は `heika peer start` と同じ設定です。`beneficiary` を、受取先の鍵のアドレスにします
 - `beneficiary.key` は受取先の秘密鍵のファイルです（PEM、DER、16進のどれでも）。ノードに置きっぱなしになるので、置いておく残高は少しにしてください
 - `500` は返す千分率です（500 なら受取先の分の半分）
 
@@ -77,7 +77,7 @@ impl Assemble for Prepend {
 heika_node::driver::run_with_assemble(&manifest, &stopping, &memory, Arc::new(Prepend))?;
 ```
 
-- 設定の読み方とシグナルの受け方は、`src/main.rs` を見てください。`heika experimental peer start` と同じことをしています
+- 設定の読み方とシグナルの受け方は、`src/main.rs` を見てください。`heika peer start` と同じことをしています
 - 署名に要るネットワークの定数（generation hash seed など）は、`heika_node::driver::network_parameters(&manifest.spec)` で引けます。プライベートなネットワークなら、設定の `network.resources` から読みます
 - heika は crates.io に出していません。リポジトリの外から使うなら、リリースのタグで git に依存します。`Assemble` は v0.11.0 から入っています。そのタグの API の文書は、[Pages](https://hinablogchannel.github.io/heika/crates/) にあります
 

@@ -1,4 +1,5 @@
-//! 試験的な機能。コマンドの形も、設定の中身も、断りなく変わる。
+//! ノードを動かすコマンド。ピアとしてのノード（heika peer）と、Nemesis を作るもの（heika nemgen）。前の名前の
+//! heika experimental … も、隠した別名として残す。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,25 +16,28 @@ use heika_state_transition::config::{ChainConfig, load_network_parameters};
 use crate::read_secret;
 use crate::wallet::HarvestKeystoreArgs;
 
+/// 前の名前（heika experimental …）。今は heika peer と heika nemgen
 #[derive(Subcommand)]
 pub enum ExperimentalCommand {
-    /// ピアとしてネットワークに入るノード
     #[command(subcommand)]
     Peer(PeerCommand),
-    /// Nemesis のブロックを作り、ノードが最初に読む seed フォルダーを書く。入力は catapult の
-    /// catapult.tools.nemgen と同じ nemesis.properties で、同じブロックができる。ただし Nemesis の秘密鍵は
-    /// properties に書かず、標準入力で渡す
-    Nemgen {
-        /// ネットワークの設定（config-network.properties など）のある resources フォルダー
-        #[arg(long)]
-        resources: PathBuf,
-        /// nemesis.properties。transactionsDirectory は、今いるフォルダーから数える
-        #[arg(long)]
-        nemesis: PathBuf,
-        /// seed を書くフォルダー。もうあれば書かない
-        #[arg(long)]
-        out: PathBuf,
-    },
+    Nemgen(NemgenArgs),
+}
+
+/// Nemesis のブロックを作り、ノードが最初に読む seed フォルダーを書く。入力は catapult の
+/// catapult.tools.nemgen と同じ nemesis.properties で、同じブロックができる。ただし Nemesis の秘密鍵は
+/// properties に書かず、標準入力で渡す
+#[derive(clap::Args)]
+pub struct NemgenArgs {
+    /// ネットワークの設定（config-network.properties など）のある resources フォルダー
+    #[arg(long)]
+    resources: PathBuf,
+    /// nemesis.properties。transactionsDirectory は、今いるフォルダーから数える
+    #[arg(long)]
+    nemesis: PathBuf,
+    /// seed を書くフォルダー。もうあれば書かない
+    #[arg(long)]
+    out: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -64,13 +68,24 @@ pub enum PeerCommand {
 /// 止める合図を受けた
 static STOP: AtomicBool = AtomicBool::new(false);
 
-pub fn run(command: ExperimentalCommand) -> Result<(), String> {
+pub fn run_experimental(command: ExperimentalCommand) -> Result<(), String> {
     match command {
-        ExperimentalCommand::Peer(PeerCommand::Start {
+        ExperimentalCommand::Peer(command) => run(command),
+        ExperimentalCommand::Nemgen(args) => run_nemgen(args),
+    }
+}
+
+pub fn run_nemgen(args: NemgenArgs) -> Result<(), String> {
+    nemgen(&args.resources, &args.nemesis, &args.out)
+}
+
+pub fn run(command: PeerCommand) -> Result<(), String> {
+    match command {
+        PeerCommand::Start {
             config,
             harvest,
             keystore,
-        }) => {
+        } => {
             let manifest = Manifest::load(&config).map_err(|error| error.to_string())?;
             let memory = MemoryHarvesters::new();
             if let Some(label) = &harvest {
@@ -96,15 +111,10 @@ pub fn run(command: ExperimentalCommand) -> Result<(), String> {
             heika_node::driver::run_with(&manifest, &|| STOP.load(Ordering::Relaxed), &memory)
                 .map_err(|error| error.to_string())
         }
-        ExperimentalCommand::Peer(PeerCommand::Copy { config, to }) => {
+        PeerCommand::Copy { config, to } => {
             let manifest = Manifest::load(&config).map_err(|error| error.to_string())?;
             heika_node::copy::copy_pruned(&manifest, &to).map_err(|error| error.to_string())
         }
-        ExperimentalCommand::Nemgen {
-            resources,
-            nemesis,
-            out,
-        } => nemgen(&resources, &nemesis, &out),
     }
 }
 

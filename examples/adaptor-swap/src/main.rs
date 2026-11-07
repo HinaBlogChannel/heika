@@ -8,7 +8,7 @@
 //! - `refund`: Bob が受け取らず、Alice が返金の窓が開くのを待って取り返す。Alice が出した連署から、Bob が `a` を取り出す
 //! - `both`: `redeem` のあと、返金の窓が開くのを待って返金も出し、残高がなくて弾かれることを確かめる
 //!
-//! ノードの設定は `heika experimental peer start` と同じもので、ネットワークと REST（最初の `rest` の口）を決める。
+//! ノードの設定は `heika peer start` と同じもので、ネットワークと REST（最初の `rest` の口）を決める。
 
 use std::path::Path;
 use std::process::ExitCode;

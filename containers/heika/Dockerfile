@@ -6,7 +6,7 @@
 # ノードは、設定を /etc/heika/peer.yaml に、データを /data に置いて動かす:
 #
 #   docker run -v ./peer.yaml:/etc/heika/peer.yaml:ro -v heika-data:/data -p 7900:7900 <イメージ> \
-#     experimental peer start --config /etc/heika/peer.yaml
+#     peer start --config /etc/heika/peer.yaml
 #
 # 止めるときは SIGTERM で、今のブロックを書き終えてから止まる。待たずに SIGKILL すると、次に開くときに
 # DB の長い修復が走るので、猶予は長めにする（docker stop -t、Kubernetes の terminationGracePeriodSeconds）
@@ -22,7 +22,7 @@ FROM scratch
 ARG TARGETARCH
 LABEL org.opencontainers.image.source=https://github.com/hinablogchannel/heika \
       org.opencontainers.image.licenses="AGPL-3.0-only AND MPL-2.0" \
-      org.opencontainers.image.description="Symbol のノード運営のための、鍵と証明書のコマンドラインツール"
+      org.opencontainers.image.description="Symbol のノードと、ノード運営のための鍵と証明書のコマンドラインツール"
 COPY --from=base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 # 証明書の束（Mozilla の一覧から作ったもの、MPL-2.0）のライセンスと出どころ
 COPY --from=base /usr/share/doc/ca-certificates/copyright /usr/share/doc/ca-certificates/copyright

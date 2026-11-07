@@ -18,7 +18,7 @@ use heika_wallet::bip39::{Mnemonic, WordCount};
 use heika_wallet::slip10::{self, ExtendedKey};
 use zeroize::Zeroizing;
 
-/// Symbol のノード運営のための、鍵と証明書のツールキット。
+/// Symbol のノードと、ノード運営のための鍵と証明書のコマンドラインツール。
 #[derive(Parser)]
 #[command(name = "heika", version, about)]
 struct Cli {
@@ -56,9 +56,13 @@ enum Command {
     /// heika と依存のライセンスと、このバイナリのソース
     #[command(subcommand)]
     Legal(legal::LegalCommand),
-    /// 試験的な機能。コマンドの形も、設定の中身も、断りなく変わる
+    /// ピアとしてネットワークに入るノード
     #[command(subcommand)]
-    Experimental(experimental::ExperimentalCommand),
+    Peer(peer::PeerCommand),
+    Nemgen(peer::NemgenArgs),
+    /// 前の名前。今は heika peer と heika nemgen
+    #[command(subcommand, hide = true)]
+    Experimental(peer::ExperimentalCommand),
     /// 使い方を誤ると資産を失う、上級者向けの道具
     #[command(subcommand)]
     Expert(expert::ExpertCommand),
@@ -224,12 +228,12 @@ macro_rules! outln {
 mod account;
 mod cert;
 mod delegations;
-mod experimental;
 mod expert;
 mod harvesting;
 mod json;
 mod legal;
 mod node;
+mod peer;
 mod rest;
 mod show;
 mod terminal;
@@ -243,7 +247,9 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Cert(command) => cert::run(command)?,
         Command::Harvesting(args) => harvesting::run(*args)?,
         Command::Legal(command) => legal::run(command)?,
-        Command::Experimental(command) => experimental::run(command)?,
+        Command::Peer(command) => peer::run(command)?,
+        Command::Nemgen(args) => peer::run_nemgen(args)?,
+        Command::Experimental(command) => peer::run_experimental(command)?,
         Command::Expert(command) => expert::run(command)?,
         Command::Node(command) => node::run(command)?,
         Command::Wallet(command) => wallet::run(command)?,

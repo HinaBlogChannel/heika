@@ -45,7 +45,7 @@ cargo build --release
 ./target/release/evm-rollup run peer.yaml genesis.json 127.0.0.1:8545 relay.key
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
+- `peer.yaml` は `heika peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
 - `127.0.0.1:8545` で、JSON-RPC を受けます
 - `relay.key` はリレーの秘密鍵のファイルです（PEM、DER、16 進のどれでも）。`eth_sendRawTransaction` で受け取ったものを、この鍵で Symbol に載せ、手数料も払います。なければ、読むだけのノードになります
 

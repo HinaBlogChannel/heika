@@ -28,7 +28,7 @@ tauri = { version = "2.12.4", features = ["tray-icon"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 zeroize = "1.9.1"
 
-# ノード（試験的）は、デスクトップと Android で動かす
+# ノードは、デスクトップと Android で動かす
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 heika-node = { path = "../../../crates/heika-node" }
 heika-state-transition = { path = "../../../crates/heika-state-transition" }

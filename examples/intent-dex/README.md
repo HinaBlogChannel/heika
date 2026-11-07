@@ -17,7 +17,7 @@ $B order peer.yaml maker.key 0D7D188F015BEBB2:50 xym:1000000000 100000
 $B solve peer.yaml desk.key 0D7D188F015BEBB2 xym 1/20000000 10000000000
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。どのサブコマンドも、ここからネットワークと REST（最初の `rest` の口）を決めます。`solve` は、このノードそのものとして動きます。掲示板を読むので、`storage.search` に `transactions` を入れてください
+- `peer.yaml` は `heika peer start` と同じ設定です。どのサブコマンドも、ここからネットワークと REST（最初の `rest` の口）を決めます。`solve` は、このノードそのものとして動きます。掲示板を読むので、`storage.search` に `transactions` を入れてください
 - 鍵のファイルは PEM、DER、16進のどれでも読みます
 - モザイクは 16 進の ID か `xym` で、量は最小単位で書きます
 - `order`: `maker.key` の人が、TOKEN を 50 出して 1000 XYM を受け取り、約定させた人に 0.1 XYM 払う注文を出します。期限は 2 時間です

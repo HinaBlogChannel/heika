@@ -340,7 +340,7 @@ enum Screen {
     /// アカウントの一覧から開く
     AddAccount,
     EditAccount(AccountView),
-    /// ノード（試験的）。デスクトップだけ
+    /// ノード。デスクトップだけ
     Node,
     Settings,
     /// 設定の下から開く
@@ -1764,7 +1764,7 @@ const NODE_MODES: [(&str, &str, &str); 3] = [
     ),
 ];
 
-/// ノード（試験的）。設定した REST のネットワークに、選んだ残し方で入る。様子は1秒ごとに聞き直す
+/// ノード。設定した REST のネットワークに、選んだ残し方で入る。様子は1秒ごとに聞き直す
 fn node_view(ctx: Ctx) -> impl IntoView {
     let status = RwSignal::new(None::<NodeStatus>);
     let refresh = move || {
@@ -1819,7 +1819,6 @@ fn node_view(ctx: Ctx) -> impl IntoView {
     };
     view! {
         <p class="lead">"ノード"</p>
-        <p class="hint">"※一応建前上は試験的な機能です。中身も見た目も、断りなく変わることがあります。"</p>
         {move || {
             let current = status.get().unwrap_or_default();
             match current.state.as_str() {

@@ -2,7 +2,7 @@
 
 **Symbol のノードを、アプリの部品にする。**
 
-heika は、Symbol（XYM。NEM の後継のブロックチェーン）のノードを、Rust の部品に分けて作り直したものだ。ブロックの確かめ、状態遷移、チェーンを追う中核、ピアとのやりとり、ハーベスト、ファイナライズの投票まで、どれも crate として取り出して、自分のアプリに組み込める。部品を組み上げたノードも動き、catapult と並んでメインネットに入って先端を追い、ハーベストし、投票する（ノードは試験的）。
+heika は、Symbol（XYM。NEM の後継のブロックチェーン）のノードを、Rust の部品に分けて作り直したものだ。ブロックの確かめ、状態遷移、チェーンを追う中核、ピアとのやりとり、ハーベスト、ファイナライズの投票まで、どれも crate として取り出して、自分のアプリに組み込める。部品を組み上げたノードも動き、catapult と並んでメインネットに入って先端を追い、ハーベストし、投票する。
 
 ## なぜ部品にするのか
 
@@ -20,7 +20,7 @@ heika は、Symbol（XYM。NEM の後継のブロックチェーン）のノー�
 
 ### アプリ
 
-- **`heika`**: コマンドラインツール。ノードの証明書の発行と更新、ハーベストのリンクと委任、投票鍵、トランザクションの組み立て、確かめ、署名、送信。それに、ノードそのもの（`heika experimental peer start`）。下の[コマンドラインツール](#コマンドラインツール)と[使い方](#使い方)
+- **`heika`**: コマンドラインツール。ノードの証明書の発行と更新、ハーベストのリンクと委任、投票鍵、トランザクションの組み立て、確かめ、署名、送信。それに、ノードそのもの（`heika peer start`）。下の[コマンドラインツール](#コマンドラインツール)と[使い方](#使い方)
 - **heika GUI**（[apps/heika-gui](apps/heika-gui)）: ウォレットとノード。iOS のほかでは、「ノード」のタブのボタン1つでノードが動き、Android でも裏で動き続ける
 - **ノード**: ブロックの署名、VRF の証明、StateHash、ファイナライズの証明まで自分で確かめながら追いつき、先端を追う。残し方はアーカイブ、フル、ライトから選べる。ハーベストし、ほかの人の委任を引き受け、ファイナライズに投票し、catapult の REST の一部と同じ形で答える口も立てる。[docs/peer.md](docs/peer.md)
 
@@ -124,7 +124,7 @@ macOS のバイナリは Apple の公証を受けていない。ブラウザー�
 
 Windows でも、標準入力から読んだ秘密鍵を std のバッファに残さず、コンソールから打った文字は画面に出さない。ただし、書き出す秘密鍵のファイルは、Unix のように自分だけが読めるようにはできず、置いたフォルダーの権限を引き継ぐ。自分のユーザーのフォルダーの中に置く。
 
-ウォレットの GUI（`heika-gui-v…`）も、同じ Release に置いている。どれも上と同じように確かめられる。iOS のほかでは、試験的なノードも「ノード」のタブから動かせる。
+ウォレットの GUI（`heika-gui-v…`）も、同じ Release に置いている。どれも上と同じように確かめられる。iOS のほかでは、ノードも「ノード」のタブから動かせる。
 
 - Linux の x86_64: `.deb`、`.rpm`、`.AppImage`
 - macOS: `.dmg`。`-macos-universal` は Apple Silicon と Intel のどちらでも動く。迷ったらこれを使う。`-macos-aarch64`（Apple Silicon）と `-macos-x86_64`（Intel）は、そのチップの分だけが入った小さいもの。公証を受けていないので、上の `xattr` で印を外してから開く
@@ -173,8 +173,8 @@ heika tx announce --network mainnet --connect <ホスト>:<ポート> --client-c
 - [docs/cert.md](docs/cert.md): 証明書の発行、更新、確認（`heika cert`）
 - [docs/harvesting.md](docs/harvesting.md): 投票鍵、ハーベストのリンクと委任、トランザクションの表示、署名、送信（`heika key voting`、`heika harvesting`、`heika tx`）
 - [docs/node.md](docs/node.md): 速いノードを探す、ノードあての委任の一覧、投票するノードが集めている投票のメッセージ（`heika node`）
-- [docs/peer.md](docs/peer.md): 試験的なノードと、その DB を刈り込んだ写し（`heika experimental peer start`、`heika experimental peer copy`）
-- [docs/nemesis.md](docs/nemesis.md): 新しいネットワークの Nemesis のブロックと seed フォルダーを作る（`heika experimental nemgen`）
+- [docs/peer.md](docs/peer.md): ノードと、その DB を刈り込んだ写し（`heika peer start`、`heika peer copy`）
+- [docs/nemesis.md](docs/nemesis.md): 新しいネットワークの Nemesis のブロックと seed フォルダーを作る（`heika nemgen`）
 - [docs/deploy.md](docs/deploy.md): systemd と Caddy で、ノードを P2P と REST で外に出す
 - `heika legal`: heika と依存のライセンス、ビルドしたときのソース（下の「ライセンス」）
 

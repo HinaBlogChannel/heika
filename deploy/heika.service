@@ -12,7 +12,7 @@ Wants=network-online.target
 [Service]
 User=heika
 WorkingDirectory=/home/heika/heika-mainnet
-ExecStart=/home/heika/heika-mainnet/bin/heika experimental peer start --config /home/heika/heika-mainnet/peer.yaml
+ExecStart=/home/heika/heika-mainnet/bin/heika peer start --config /home/heika/heika-mainnet/peer.yaml
 KillSignal=SIGTERM
 TimeoutStopSec=infinity
 Restart=on-failure

@@ -11,7 +11,7 @@ cargo build --release
 ./target/release/faucet peer.yaml faucet.yaml
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
+- `peer.yaml` は `heika peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
 - `faucet.yaml` は蛇口の設定です（下）。書いた `listen` の口でページを開きます
 
 ```yaml

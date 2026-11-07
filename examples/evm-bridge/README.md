@@ -25,7 +25,7 @@ anvil --port 18545 &
 ./target/release/evm-bridge run peer.yaml http://127.0.0.1:18545
 ```
 
-- `peer.yaml` は `heika experimental peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
+- `peer.yaml` は `heika peer start` と同じ設定です。ここからネットワークと REST（最初の `rest` の口）を決めます
 - 量は XYM の最小単位で書きます（1000000 で 1 XYM）
 
 起動すると、見張り役に鍵を配り、預かり口座のアドレスを出して、手数料の予算（20 XYM）が届くのを待ちます。届いたら預かり口座をマルチシグにして、anvil に wXYM を置きます。

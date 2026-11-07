@@ -79,7 +79,7 @@ pub struct Network {
     /// `type: Custom` のときだけ。Nemesis のブロックのハッシュ（16進）。`nemesisSeed` を書けば省ける
     #[serde(default)]
     pub nemesis_hash: Option<String>,
-    /// `type: Custom` のときだけ。Nemesis の seed フォルダー（`heika experimental nemgen` か catapult の nemgen で
+    /// `type: Custom` のときだけ。Nemesis の seed フォルダー（`heika nemgen` か catapult の nemgen で
     /// 作ったもの）。DB が空なら、ピアから取らずにここの Nemesis から始め、ピアにつながらなくても先端の段階に
     /// 進む（新しいネットワークの最初のノード）。`nemesisHash` も書けば、合うかを確かめる
     #[serde(default)]

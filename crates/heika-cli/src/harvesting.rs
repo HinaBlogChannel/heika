@@ -55,7 +55,7 @@ pub struct HarvestingArgs {
         conflicts_with_all = ["link_remote", "link_vrf", "link_node"]
     )]
     delegate: Option<PublicKey>,
-    /// キーストアのこのアカウントから導出したリモートと VRF の鍵を紐づける。heika experimental peer start --harvest
+    /// キーストアのこのアカウントから導出したリモートと VRF の鍵を紐づける。heika peer start --harvest
     /// で同じ鍵を導出してハーベストするので、鍵のファイルは要らない
     #[arg(
         long,

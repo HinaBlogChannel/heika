@@ -245,7 +245,7 @@ struct Page {
 }
 
 impl Chain {
-    /// `heika experimental peer start` と同じ設定から、ネットワークと REST（最初の `rest` の口）を決める
+    /// `heika peer start` と同じ設定から、ネットワークと REST（最初の `rest` の口）を決める
     pub fn load(config: &Path) -> Result<Self, String> {
         let manifest = Manifest::load(config).map_err(|error| error.to_string())?;
         let parameters =

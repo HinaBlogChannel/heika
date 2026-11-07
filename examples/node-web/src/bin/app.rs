@@ -500,7 +500,7 @@ fn App() -> impl IntoView {
                             <summary>"手元のノードの DB から始める"</summary>
                             <p class="hint">
                                 "heika のノードの DB（データのフォルダーの heika.redb）を読み込み、その先端から同期を続けます。"
-                                "ライトの残し方の写し（heika experimental peer copy）が小さくて向いています。"
+                                "ライトの残し方の写し（heika peer copy）が小さくて向いています。"
                                 "読み込んだところまでの履歴は確かめずに信じるので、自分のノードの DB を使ってください。"
                                 "続きのブロックが先端につながらなければ、同期で弾かれます。"
                             </p>

@@ -1,11 +1,11 @@
 # Nemesis のブロック
 
-`heika experimental nemgen` は、新しいネットワークの最初のブロック（Nemesis）を作り、ノードが最初に読む `seed` フォルダーを書く。入力は catapult の `catapult.tools.nemgen` と同じ `nemesis.properties` で、同じ入力からは同じバイト列のブロックができる。試験的なので、コマンドの形は断りなく変わる。
+`heika nemgen` は、新しいネットワークの最初のブロック（Nemesis）を作り、ノードが最初に読む `seed` フォルダーを書く。入力は catapult の `catapult.tools.nemgen` と同じ `nemesis.properties` で、同じ入力からは同じバイト列のブロックができる。
 
 ## コマンドの例
 
 ```sh
-heika experimental nemgen --resources resources --nemesis nemesis.properties --out seed < nemesis.key
+heika nemgen --resources resources --nemesis nemesis.properties --out seed < nemesis.key
 ```
 
 - `--resources`: そのネットワークの `config-network.properties` などのあるフォルダー。`nemesisSignerPublicKey`、`generationHashSeed`、`identifier`、`currencyMosaicId`、`harvestingMosaicId`、`totalChainImportance` が、`nemesis.properties` と標準入力の鍵に合っていること

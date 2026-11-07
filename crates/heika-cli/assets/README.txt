@@ -1,6 +1,6 @@
 heika {{VERSION}}
 
-Symbol（XYM）のノード運営のための、鍵と証明書のコマンドラインツールです。
+Symbol（XYM）のノードと、ノード運営のための鍵と証明書のコマンドラインツールです。
 ダブルクリックでは動きません。ターミナル（Windows では PowerShell）から使います。
 
 https://github.com/{{REPOSITORY}}

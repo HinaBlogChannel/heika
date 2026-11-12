@@ -379,7 +379,14 @@ impl<'a> Replay<'a> {
                 self.executor.load_wanted(source, &missed).map_err(read)?;
             };
             let alpha = parent.generation_hash();
-            if vrf::verify(&key, &alpha.0, &block.generation_hash_proof).is_none() {
+            if vrf::verify_with(
+                &key,
+                &alpha.0,
+                &block.generation_hash_proof,
+                self.parameters.vrf_key_check(block.height),
+            )
+            .is_none()
+            {
                 return Err(invalid("ブロックを出した人: VRF の証明が通りません".into()));
             }
         }

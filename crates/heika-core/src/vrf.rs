@@ -117,8 +117,28 @@ pub fn gamma(private_key: &PrivateKey, alpha: &[u8]) -> Option<[u8; 32]> {
     (gamma != EdwardsPoint::default().compress().to_bytes()).then_some(gamma)
 }
 
-/// 証明を検証して、通れば証明のハッシュを返す。catapult の `crypto::VerifyVrfProof`。
+/// 公開鍵を確かめるか。catapult の `crypto::VrfProofOptions`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyCheck {
+    /// 点に戻せない公開鍵（正規形でない、曲線上にない、素数位数の部分群に入っていない）の証明は通さない
+    Strict,
+    /// 公開鍵を確かめない。フォーク（`strictVrfPublicKeyCheck`）より前のブロックを、catapult と同じに確かめるためだけに使う
+    SkipBeforeFork,
+}
+
+/// 証明を検証して、通れば証明のハッシュを返す。catapult の `crypto::VerifyVrfProof` で、公開鍵も確かめる。
 pub fn verify(public_key: &PublicKey, alpha: &[u8], proof: &VrfProof) -> Option<ProofHash> {
+    verify_with(public_key, alpha, proof, KeyCheck::Strict)
+}
+
+/// [`verify`] の、公開鍵を確かめるかを選べるもの。ブロックの高さで選ぶなら
+/// [`NetworkParameters::vrf_key_check`](crate::network::NetworkParameters::vrf_key_check)。
+pub fn verify_with(
+    public_key: &PublicKey,
+    alpha: &[u8],
+    proof: &VrfProof,
+    key_check: KeyCheck,
+) -> Option<ProofHash> {
     // gamma は正規形で、曲線上になければならない。部分群に入っているかはここでは見ない
     if !ed25519::is_canonical(&proof.gamma) || decompress(&proof.gamma).is_none() {
         return None;
@@ -127,11 +147,13 @@ pub fn verify(public_key: &PublicKey, alpha: &[u8], proof: &VrfProof) -> Option<
     // s は群の位数より小さくなければならない
     let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(proof.scalar))?;
     let c = widen(&proof.verification_hash);
-    // u = s * B - c * Y。catapult は公開鍵を点に戻せなくても止めずに、全部 0 を u にして続ける
+    // u = s * B - c * Y。公開鍵を点に戻せなければ、catapult は u を全部 0 にする。フォークのあとはそこで通さず、
+    // 前は止めずに続ける
     let u = match ed25519::decode(&public_key.0) {
         Some(y) => EdwardsPoint::vartime_double_scalar_mul_basepoint(&c, &-y, &s)
             .compress()
             .to_bytes(),
+        None if key_check == KeyCheck::Strict => return None,
         None => [0; 32],
     };
     // v = s * h - c * gamma。catapult は一度圧縮したものを戻して足すので、それに合わせる。
@@ -273,6 +295,11 @@ mod tests {
             );
             let beta = ProofHash(bytes(beta));
             assert_eq!(verify(&public_key, &input, &proof), Some(beta), "{secret}");
+            assert_eq!(
+                verify_with(&public_key, &input, &proof, KeyCheck::SkipBeforeFork),
+                Some(beta),
+                "{secret}"
+            );
             assert_eq!(proof_hash(&proof.gamma), beta, "{secret}");
         }
     }
@@ -371,5 +398,25 @@ mod tests {
     fn round_trips_a_generation_hash_through_hex() {
         let hash = GenerationHash([0xAB; 32]);
         assert_eq!(hash.to_string().parse(), Ok(hash));
+    }
+
+    #[test]
+    fn strict_check_rejects_keys_that_are_not_points() {
+        let private_key = PrivateKey::from_bytes(&[7; 32]);
+        let alpha = [0x5A; 32];
+        let proof = prove(&private_key, &alpha).unwrap();
+        // 全部 0（VRF の鍵をリンクしていないアカウント）、正規形でないもの、曲線上にないものは、どれも通さない
+        let not_on_curve = (0u8..=255)
+            .map(|byte| [byte; 32])
+            .find(|bytes| ed25519::is_canonical(bytes) && decompress(bytes).is_none())
+            .unwrap();
+        for key in [[0; 32], [0xFF; 32], not_on_curve] {
+            assert!(ed25519::decode(&key).is_none());
+            assert_eq!(
+                verify_with(&PublicKey(key), &alpha, &proof, KeyCheck::Strict),
+                None
+            );
+            assert_eq!(verify(&PublicKey(key), &alpha, &proof), None);
+        }
     }
 }

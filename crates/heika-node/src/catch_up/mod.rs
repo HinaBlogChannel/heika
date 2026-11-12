@@ -297,8 +297,9 @@ pub fn execute(
                                 key,
                                 alpha,
                                 proof,
+                                key_check,
                             } => {
-                                if vrf::verify(&key, &alpha.0, &proof).is_none() {
+                                if vrf::verify_with(&key, &alpha.0, &proof, key_check).is_none() {
                                     vrf_failure.lock().expect("not poisoned").get_or_insert(format!(
                                     "高さ {height}: ブロックを出した人: VRF の証明が通りません"
                                 ));
@@ -455,6 +456,7 @@ pub fn execute(
                                     key,
                                     alpha: parent_generation_hash,
                                     proof: block.generation_hash_proof.clone(),
+                                    key_check: context.parameters.vrf_key_check(height),
                                 };
                                 if vrf_sender.send(job).is_err() {
                                     failure = Some(
@@ -651,6 +653,8 @@ enum VrfJob {
         key: PublicKey,
         alpha: GenerationHash,
         proof: VrfProof,
+        /// その高さで、公開鍵も確かめるか
+        key_check: vrf::KeyCheck,
     },
     /// ここまでに頼んだものを確かめ終えたら返す
     Flush(mpsc::SyncSender<()>),

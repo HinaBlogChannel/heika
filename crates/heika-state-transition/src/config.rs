@@ -96,6 +96,18 @@ impl Properties {
         parsed.map_err(|_| ConfigError(format!("[{section}] {key} が数ではありません: {value}")))
     }
 
+    /// 無ければ `None` の [`Properties::number`]
+    fn optional_number(&self, section: &str, key: &str) -> Result<Option<u64>, ConfigError> {
+        if self
+            .values
+            .contains_key(&(section.to_owned(), key.to_owned()))
+        {
+            self.number(section, key).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// `,` で区切った数の並び。空なら空の並び（テストネットの `skipSecretLockExpirations =` など）
     fn numbers(&self, section: &str, key: &str) -> Result<Vec<u64>, ConfigError> {
         let value = self.get(section, key)?;
@@ -623,6 +635,10 @@ pub fn network_parameters(network: &str) -> Result<NetworkParameters, ConfigErro
                 .number("fork_heights", "strictAggregateTransactionHash")?,
             unique_aggregate_transaction_hash: network
                 .number("fork_heights", "uniqueAggregateTransactionHash")?,
+            // catapult 1.0.3.10 から。前の設定ファイルには無いので、無ければフォークしない
+            strict_vrf_public_key_check: network
+                .optional_number("fork_heights", "strictVrfPublicKeyCheck")?
+                .unwrap_or(u64::MAX),
         },
         corrupt_aggregate_transaction_hashes: Vec::leak(corrupt),
     })
@@ -660,6 +676,16 @@ mod tests {
             [1, 2]
         );
         assert!(properties.number("chain", "missing").is_err());
+        assert_eq!(
+            properties
+                .optional_number("chain", "maxDifficultyBlocks")
+                .unwrap(),
+            Some(60)
+        );
+        assert_eq!(
+            properties.optional_number("chain", "missing").unwrap(),
+            None
+        );
     }
 
     #[test]

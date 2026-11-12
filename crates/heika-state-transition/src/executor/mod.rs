@@ -713,10 +713,11 @@ impl Executor {
         parameters: &heika_core::network::NetworkParameters,
     ) -> Result<GenerationHash, ExecError> {
         let vrf_key = self.check_hit(parent, block, parameters)?;
-        let proof_hash = heika_core::vrf::verify(
+        let proof_hash = heika_core::vrf::verify_with(
             &vrf_key,
             &parent_generation_hash.0,
             &block.generation_hash_proof,
+            parameters.vrf_key_check(block.height),
         )
         .ok_or_else(|| harvester_error("VRF の証明が通りません"))?;
         Ok(proof_hash.generation_hash())

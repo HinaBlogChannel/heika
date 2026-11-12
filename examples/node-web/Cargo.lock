@@ -722,7 +722,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heika-block"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "heika-chain"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "heika-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "base16ct",
  "curve25519-dalek",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "heika-harvesting"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-core",
  "heika-transaction",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "heika-mempool"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-chain",
  "heika-core",
@@ -776,14 +776,14 @@ dependencies = [
 
 [[package]]
 name = "heika-packet"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-core",
 ]
 
 [[package]]
 name = "heika-rest"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "heika-state-transition"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-block",
  "heika-core",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "heika-store-redb"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-block",
  "heika-chain",
@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "heika-transaction"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "heika-core",
  "ripemd",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "heika-wallet"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes-gcm",
  "base64ct",

@@ -148,6 +148,8 @@ pub struct ForkHeights {
     pub strict_aggregate_transaction_hash: u64,
     /// `uniqueAggregateTransactionHash`。この高さから、アグリゲートはバージョン 3 だけになる
     pub unique_aggregate_transaction_hash: u64,
+    /// `strictVrfPublicKeyCheck`。この高さから、点に戻せない VRF の公開鍵の証明は通らない（catapult 1.0.3.10 から）
+    pub strict_vrf_public_key_check: u64,
 }
 
 /// 1日の秒数。設定の `2d` のような期間を書くのに使う。
@@ -184,6 +186,7 @@ impl NetworkParameters {
         fork_heights: ForkHeights {
             strict_aggregate_transaction_hash: 1_690_500,
             unique_aggregate_transaction_hash: 4_759_100,
+            strict_vrf_public_key_check: 5_952_255,
         },
         corrupt_aggregate_transaction_hashes: &MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES,
     };
@@ -218,6 +221,7 @@ impl NetworkParameters {
         fork_heights: ForkHeights {
             strict_aggregate_transaction_hash: 0,
             unique_aggregate_transaction_hash: 2_742_000,
+            strict_vrf_public_key_check: 3_888_648,
         },
         corrupt_aggregate_transaction_hashes: &[],
     };
@@ -265,6 +269,15 @@ impl NetworkParameters {
         }
         let adjustment = u64::from(!height.is_multiple_of(self.voting_set_grouping));
         1 + adjustment + height / self.voting_set_grouping
+    }
+
+    /// その高さのブロックの VRF の証明で、公開鍵を確かめるか。catapult の `BlockchainProcessor` の `CheckGenerationHash`。
+    pub fn vrf_key_check(&self, height: u64) -> crate::vrf::KeyCheck {
+        if height >= self.fork_heights.strict_vrf_public_key_check {
+            crate::vrf::KeyCheck::Strict
+        } else {
+            crate::vrf::KeyCheck::SkipBeforeFork
+        }
     }
 
     /// その高さのブロックに入れられるアグリゲートのバージョン。
@@ -458,6 +471,7 @@ const MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES: [(Hash256, Hash256); 20] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vrf::KeyCheck;
 
     #[cfg(feature = "std")]
     #[test]
@@ -556,6 +570,16 @@ mod tests {
         assert_eq!(mainnet.aggregate_version(4_759_100), 3);
         // テストネットは最初からバージョン 2
         assert_eq!(NetworkParameters::TESTNET.aggregate_version(1), 2);
+    }
+
+    #[test]
+    fn checks_vrf_public_keys_from_the_fork() {
+        let mainnet = NetworkParameters::MAINNET;
+        assert_eq!(mainnet.vrf_key_check(5_952_254), KeyCheck::SkipBeforeFork);
+        assert_eq!(mainnet.vrf_key_check(5_952_255), KeyCheck::Strict);
+        let testnet = NetworkParameters::TESTNET;
+        assert_eq!(testnet.vrf_key_check(3_888_647), KeyCheck::SkipBeforeFork);
+        assert_eq!(testnet.vrf_key_check(3_888_648), KeyCheck::Strict);
     }
 
     #[test]

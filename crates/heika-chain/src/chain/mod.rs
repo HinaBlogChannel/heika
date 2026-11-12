@@ -8,8 +8,12 @@
 //! Tick ごとにピアの最新のファイナライズも聞き、自分の確かめたものより新しければ、そのエポックの証明を取って、
 //! 実行して求めた投票者で確かめる。通れば、指すブロックが手元にあればハッシュを比べ（違えば分かれ目を探す）、
 //! 確かめた確定を上げて証明をしまい、確定より [`CHECKPOINT_EPOCHS`] エポック下より古いチェックポイントを1つを
-//! 残して消す。刈り込むなら（[`Keep`]）、そのときに差分も消す。分かれ目を探すのは、確かめた確定の高さから。
-//! 同じラウンドで違うブロックを指す証明が2つ通ったら、止める。
+//! 残して消す。刈り込むなら（[`Keep`]）、そのときに差分も消す。同じラウンドで違うブロックを指す証明が2つ
+//! 通ったら、止める。
+//!
+//! 確定が先端より上を指すあいだは、その高さに来たブロックが合わなければ弾くだけで、自分の枝がそこへ続くかは
+//! まだわからない。分かれ目を探すのも、巻き戻せる下限も、自分の枝の上にあるとわかっている確定
+//! （[`Chain::anchor`]）から。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -172,6 +176,32 @@ async fn block_at<S: ChainStore>(store: &S, height: u64) -> Result<Block, ChainE
             .await?
             .ok_or("実行した高さのブロックがありません")?,
     )?)
+}
+
+/// しまった証明のうち、指す高さが実行した高さ `tip` 以下で、指すブロックがしまったものと合う一番新しいもの
+/// （[`Chain::anchor`]）。なければ Nemesis。ここより下は分かれていない
+///
+/// 先端より上を指す証明は飛ばす。それが自分の枝の上かは、そこまで実行するまでわからない。ブロックを消した高さを
+/// 指す証明は、突き合わせられないので、そのまま使う
+async fn anchor_of<S: ChainStore>(store: &S, tip: u64) -> Result<FinalizedBlockHeader, ChainError> {
+    for epoch in (1..=store.proofs_tip().await?).rev() {
+        let Some(proof) = store.proof(epoch).await? else {
+            continue;
+        };
+        let header = proof_header(&proof)?;
+        if header.height > tip {
+            continue;
+        }
+        match store.block(header.height).await? {
+            Some(bytes) if Block::from_bytes(&bytes)?.hash() != header.hash => continue,
+            _ => return Ok(header),
+        }
+    }
+    Ok(FinalizedBlockHeader {
+        round: FinalizationRound { epoch: 1, point: 1 },
+        height: 1,
+        hash: block_at(store, 1).await?.hash(),
+    })
 }
 
 /// 実行の状態の高さで、親のブロック、難易度の統計、Tip を DB から読み、二度入れを弾くハッシュを直前の
@@ -695,8 +725,11 @@ pub struct Chain<'a, S: ChainStore + StateSource> {
     tip: Tip,
     peers: BTreeMap<PeerId, Peer>,
     sync: Sync,
-    /// 確かめた一番新しいファイナライズ。そこより下は分かれていない
+    /// 確かめた一番新しいファイナライズ。先端より上を指すこともあり、そのときは、その高さに来たブロックが合わなければ弾く
     finalized: FinalizedBlockHeader,
+    /// 確かめたファイナライズのうち、自分の枝の上にあるとわかっている一番新しいもの。そこより下は分かれていない。
+    /// `finalized` が先端以下なら同じ
+    anchor: FinalizedBlockHeader,
     /// 頼んで返事を待っている証明
     proof_requested: finality::ProofRequest,
     /// ここより前のエポックの証明は、しまってあるか、取り直しを一度頼んだ。抜けを探すのはここから
@@ -736,7 +769,7 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
         partial: bool,
     ) -> Result<Self, ChainError> {
         let loaded = load_from(store, config.clone(), parameters, partial).await?;
-        // 追いつく段階で確かめてしまった、一番新しい証明。なければ Nemesis
+        // 追いつく段階や先端の段階でしまった、一番新しい証明。なければ Nemesis。先端より上を指すこともある
         let finalized = match store.proofs_tip().await? {
             0 => FinalizedBlockHeader {
                 round: FinalizationRound { epoch: 1, point: 1 },
@@ -750,8 +783,10 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
                     .ok_or("しまった証明がありません")?,
             )?,
         };
+        let anchor = anchor_of(store, loaded.tip.height).await?;
         Ok(Self {
             finalized,
+            anchor,
             proof_requested: finality::ProofRequest::default(),
             backfilled: 1,
             store,
@@ -895,6 +930,46 @@ impl<'a, S: ChainStore + StateSource> Chain<'a, S> {
         self.actions
             .retain(|action| matches!(action, Action::Notify(_)));
         Ok(self.tip.hash != before)
+    }
+
+    /// 確かめた確定のうち、自分の枝の上にあるとわかっている一番新しいもの。ここより下は分かれていない
+    pub fn anchor(&self) -> FinalizedBlockHeader {
+        self.anchor
+    }
+
+    /// 先端を、[`Self::anchor`] 以上の高さ `common` まで、ピアなしで巻き戻す。外れる枝は孤立ブロックの表に残す。
+    /// 追いつく段階の前に、実行した先端がピアのチェーンから外れていたときに使う（追いつく段階は先端の続きを
+    /// 取るだけで、分かれ目を探さない）
+    pub async fn rewind_to(&mut self, common: u64) -> Result<(), ChainError> {
+        if common < self.anchor.height {
+            return Err(format!(
+                "高さ {common} は、自分の枝の上にある確定（高さ {}）より下なので巻き戻せません",
+                self.anchor.height
+            )
+            .into());
+        }
+        let mut originals = Vec::new();
+        for height in common + 1..=self.tip.height {
+            originals.push(
+                self.store
+                    .block(height)
+                    .await?
+                    .ok_or("外れる枝のブロックがありません")?,
+            );
+        }
+        let orphans = originals
+            .iter()
+            .map(|bytes| {
+                let block = Block::from_bytes(bytes)?;
+                Ok((block.height, block.hash().0, bytes.as_slice()))
+            })
+            .collect::<Result<Vec<_>, ChainError>>()?;
+        if !orphans.is_empty() {
+            self.rewind(common, &orphans).await?;
+        }
+        self.actions
+            .retain(|action| matches!(action, Action::Notify(_)));
+        Ok(())
     }
 
     /// ピア `id` とやりとりを始めたことを知らせる。ほかのノードに教えるために、名乗りを聞く

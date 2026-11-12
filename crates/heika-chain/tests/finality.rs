@@ -194,6 +194,19 @@ fn produce(
     parameters: &'static NetworkParameters,
     nemesis: &[u8],
 ) -> Vec<Vec<u8>> {
+    produce_from(config, parameters, nemesis, &[], LAST, None)
+}
+
+/// `prefix`（高さ 2 から）を当てた上に、鍵 2 でハーベストして、高さ `last` までのブロックを作る。`beneficiary`
+/// を渡すと、受取先を変えて、同じ時刻の違うブロックになる。返すのは作ったものだけ
+fn produce_from(
+    config: &ChainConfig,
+    parameters: &'static NetworkParameters,
+    nemesis: &[u8],
+    prefix: &[Vec<u8>],
+    last: u64,
+    beneficiary: Option<Address>,
+) -> Vec<Vec<u8>> {
     let store = MemoryStore::default();
     seed(&store, config, parameters, nemesis);
     let clock = Clock(Cell::new(parameters.epoch() + Duration::from_secs(1)));
@@ -205,7 +218,16 @@ fn produce(
         false,
     ))
     .unwrap();
+    for bytes in prefix {
+        let block = Block::from_bytes(bytes).unwrap();
+        clock
+            .0
+            .set(parameters.epoch() + Duration::from_millis(block.timestamp));
+        now_or_never(chain.extend_offline(&block, bytes.clone())).unwrap();
+        chain.take_actions();
+    }
     chain.set_harvesters(Arc::new(vec![(key(2), key(9))]));
+    chain.set_beneficiary(beneficiary);
     let peer = PeerId(0);
     let nemesis_hash = Block::from_bytes(nemesis).unwrap().hash();
     let mut produced = Vec::new();
@@ -251,7 +273,7 @@ fn produce(
         }
     };
     run(&mut chain, ChainEvent::PeerAdded { peer });
-    while chain.height() < LAST {
+    while chain.height() < last {
         run(&mut chain, ChainEvent::Tick);
         let HarvestPlan::Hit { timestamp, .. } = chain.harvest_plan() else {
             panic!("当たりを求めていません: {:?}", chain.harvest_plan());
@@ -259,7 +281,7 @@ fn produce(
         clock.0.set(timestamp);
         run(&mut chain, ChainEvent::Wake);
     }
-    assert_eq!(produced.len() as u64, LAST - 1);
+    assert_eq!(produced.len() as u64, last - 1 - prefix.len() as u64);
     produced
 }
 
@@ -270,6 +292,7 @@ struct FakePeer {
     finalized: FinalizedBlockHeader,
     proofs: HashMap<u32, Vec<u8>>,
     score: u128,
+    nemesis: Hash256,
 }
 
 /// 追う側の中核を動かした結果
@@ -354,8 +377,11 @@ impl FakePeer {
         ran
     }
 
-    /// 高さ `height`（2 以上）のブロックのハッシュ
+    /// 高さ `height` のブロックのハッシュ
     fn hash(&self, height: u64) -> Hash256 {
+        if height == 1 {
+            return self.nemesis;
+        }
         Block::from_bytes(&self.blocks[height as usize - 2])
             .unwrap()
             .hash()
@@ -402,6 +428,7 @@ fn keeps_a_proof_ahead_of_the_tip_and_goes_on_requesting_proofs() {
         },
         proofs: HashMap::new(),
         score: 0,
+        nemesis: nemesis_hash,
     };
     let hashes: Vec<Hash256> = std::iter::once(nemesis_hash)
         .chain((2..=GROUPING).map(|height| peer.hash(height)))
@@ -461,6 +488,7 @@ fn rejects_a_block_that_differs_from_a_proof_ahead_of_the_tip() {
         },
         proofs: HashMap::new(),
         score: 0,
+        nemesis: nemesis_hash,
     };
     let mut hashes: Vec<Hash256> = std::iter::once(nemesis_hash)
         .chain((2..=GROUPING).map(|height| peer.hash(height)))
@@ -479,4 +507,143 @@ fn rejects_a_block_that_differs_from_a_proof_ahead_of_the_tip() {
     assert!(ran.disconnected);
     assert_eq!(chain.height(), GROUPING - 1);
     assert_eq!(chain.status().finalized, header);
+}
+
+/// 追う側の先端を、ピアの枝にない高さ 3 のブロックにする。高さ 2 はピアと同じ。返すのは、ピアが持つ枝の高さ 4
+/// を確定した、エポック 2 の証明（追う側の先端より上を指す）
+fn branch_off(
+    store: &MemoryStore,
+    chain: &mut Chain<'_, MemoryStore>,
+    config: &ChainConfig,
+    parameters: &'static NetworkParameters,
+    nemesis: &[u8],
+    peer: &FakePeer,
+) -> (FinalizedBlockHeader, Vec<u8>) {
+    let nemesis_hash = Block::from_bytes(nemesis).unwrap().hash();
+    let rival = produce_from(
+        config,
+        parameters,
+        nemesis,
+        &peer.blocks[..1],
+        3,
+        Some(address(3)),
+    );
+    assert_eq!(rival.len(), 1);
+    assert_ne!(Block::from_bytes(&rival[0]).unwrap().hash(), peer.hash(3));
+    for bytes in [&peer.blocks[0], &rival[0]] {
+        let block = Block::from_bytes(bytes).unwrap();
+        now_or_never(chain.extend_offline(&block, bytes.clone())).unwrap();
+    }
+    chain.take_actions();
+    assert_eq!(chain.height(), 3);
+    assert_eq!(
+        now_or_never(store.block(3)).unwrap().unwrap(),
+        rival[0],
+        "追う側の高さ 3 は、ピアの枝にないブロック"
+    );
+    let hashes: Vec<Hash256> = std::iter::once(nemesis_hash)
+        .chain((2..=GROUPING).map(|height| peer.hash(height)))
+        .collect();
+    proof(FinalizationRound { epoch: 2, point: 1 }, 1, &hashes)
+}
+
+/// 高さ 2 から [`LAST`] までのブロック `blocks` を持つが、まだ Nemesis にいると答えるピア
+fn peer_at_nemesis(blocks: Vec<Vec<u8>>, nemesis: &[u8]) -> FakePeer {
+    let nemesis = Block::from_bytes(nemesis).unwrap().hash();
+    FakePeer {
+        blocks,
+        height: 1,
+        finalized: FinalizedBlockHeader {
+            round: FinalizationRound { epoch: 1, point: 1 },
+            height: 1,
+            hash: nemesis,
+        },
+        proofs: HashMap::new(),
+        score: 0,
+        nemesis,
+    }
+}
+
+#[test]
+fn switches_off_a_rival_tip_below_a_proof_ahead_of_it() {
+    let (config, parameters, nemesis, blocks) = setup();
+    let store = MemoryStore::default();
+    seed(&store, &config, parameters, &nemesis);
+    let clock = later_clock(&blocks, parameters);
+    let mut chain = now_or_never(Chain::new(
+        &store,
+        &clock,
+        config.clone(),
+        parameters,
+        false,
+    ))
+    .unwrap();
+    let mut peer = peer_at_nemesis(blocks, &nemesis);
+    let (header, epoch2) = branch_off(&store, &mut chain, &config, parameters, &nemesis, &peer);
+
+    // ピアの枝の高さ 4 を確定した証明が、ブロックより先に届く。確定は上がるが、追う側の枝がそこへ続くかは
+    // まだわからないので、自分の枝の上にある確定は Nemesis のまま
+    peer.finalized = header;
+    peer.proofs.insert(2, epoch2);
+    let ran = peer.run(&mut chain, ChainEvent::PeerAdded { peer: FakePeer::ID });
+    assert_eq!(ran.finalized, [GROUPING]);
+    assert_eq!(chain.status().finalized, header);
+    assert_eq!(chain.anchor().height, 1);
+
+    // ピアが先へ進むと、続きは追う側の先端につながらない。分かれ目は確定（4）より下の高さ 2 だが、自分の枝の
+    // 上にある確定（1）から比べるので見つかり、ピアの枝に取り替える（前は比べ始めの高さ 3 で違うとして、
+    // どのピアも外し、そこで止まっていた）
+    peer.height = LAST;
+    peer.score = u128::MAX;
+    let ran = peer.run(&mut chain, ChainEvent::Tick);
+    assert!(!ran.disconnected);
+    assert_eq!(chain.height(), LAST);
+    assert_eq!(chain.tip().hash, peer.hash(LAST));
+    assert_eq!(chain.anchor(), header);
+}
+
+#[test]
+fn restarts_from_a_stored_proof_ahead_of_a_rival_tip() {
+    let (config, parameters, nemesis, blocks) = setup();
+    let store = MemoryStore::default();
+    seed(&store, &config, parameters, &nemesis);
+    let clock = later_clock(&blocks, parameters);
+    let mut chain = now_or_never(Chain::new(
+        &store,
+        &clock,
+        config.clone(),
+        parameters,
+        false,
+    ))
+    .unwrap();
+    let mut peer = peer_at_nemesis(blocks, &nemesis);
+    let (header, epoch2) = branch_off(&store, &mut chain, &config, parameters, &nemesis, &peer);
+    // 前の版は、先端より上を指す証明もしまっていた。その DB から動かし直す
+    now_or_never(store.put_proof(2, &epoch2)).unwrap();
+    drop(chain);
+    let mut chain = now_or_never(Chain::new(
+        &store,
+        &clock,
+        config.clone(),
+        parameters,
+        false,
+    ))
+    .unwrap();
+    assert_eq!(chain.status().finalized, header);
+    assert_eq!(chain.anchor().height, 1);
+
+    // 自分の枝の上にある確定より下へは巻き戻さない。その上なら、外れた枝を捨てて戻せる（追いつく段階の前に使う）
+    assert!(now_or_never(chain.rewind_to(0)).is_err());
+    now_or_never(chain.rewind_to(2)).unwrap();
+    assert_eq!(chain.height(), 2);
+    assert_eq!(chain.tip().hash, peer.hash(2));
+
+    peer.finalized = header;
+    peer.proofs.insert(2, epoch2);
+    peer.height = LAST;
+    peer.score = u128::MAX;
+    let ran = peer.run(&mut chain, ChainEvent::PeerAdded { peer: FakePeer::ID });
+    assert!(!ran.disconnected);
+    assert_eq!(chain.height(), LAST);
+    assert_eq!(chain.tip().hash, peer.hash(LAST));
 }

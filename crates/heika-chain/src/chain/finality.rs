@@ -158,7 +158,11 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         }
         self.store.put_proof(epoch, &proof).await?;
         self.finalized = header;
-        let pruned = self.prune(header.height).await?;
+        // 先端より上を指す確定は、自分の枝がそこへ続くかまだわからない。刈り込むのは、枝の上にある確定から
+        if header.height <= self.tip.height {
+            self.anchor = header;
+        }
+        let pruned = self.prune(self.anchor.height).await?;
         self.notify(Notice::Finalized {
             epoch,
             point: header.round.point,

@@ -29,9 +29,10 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         self.pull(id, &statistics);
     }
 
-    /// 分かれ目を探し始める。確かめた確定の高さから（自分の先端まで）比べる
+    /// 分かれ目を探し始める。自分の枝の上にある確定（[`Self::anchor`]）の高さから（自分の先端まで）比べる。
+    /// 先端より上を指す確定からは比べない。自分の先端がもう外れていたら、どのピアとも比べ始めの高さで違ってしまう
     pub(super) fn compare(&mut self, id: PeerId) {
-        let from = self.finalized.height.clamp(1, self.tip.height);
+        let from = self.anchor.height.clamp(1, self.tip.height);
         self.compare_from(id, from);
     }
 

@@ -124,6 +124,10 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         self.parent = block.clone();
         self.generation_hash = generation_hash;
         self.tip = tip;
+        // 先端より上を指していた確定に届いた。合わないブロックは上で弾いているので、自分の枝の上にある
+        if tip.height == self.finalized.height {
+            self.anchor = self.finalized;
+        }
         self.statistics.push_back(BlockStatistic::from(block));
         if self.statistics.len() > self.parameters.max_difficulty_blocks {
             self.statistics.pop_front();

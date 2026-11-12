@@ -86,7 +86,7 @@ impl<S: ChainStore + StateSource> Chain<'_, S> {
         let common = height - 1;
         let grandparent = self.statistics.iter().rev().nth(1).copied();
         let Some(grandparent) = grandparent.filter(|_| {
-            common >= self.finalized.height
+            common >= self.anchor.height
                 && matches!(self.sync, Sync::Idle)
                 && self.not_yet(&block).is_none()
         }) else {

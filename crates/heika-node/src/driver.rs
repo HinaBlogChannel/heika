@@ -14,7 +14,7 @@ use heika_cert::certificate::Certificate;
 use heika_cert::key::private_key_from_pem;
 use heika_chain::chain::{Action, CHECKPOINT_EPOCHS, Chain, Keep, Notice, Outcome, Penalty};
 use heika_chain::env::SystemEnv;
-use heika_chain::event::{ChainEvent, PeerId};
+use heika_chain::event::{ChainEvent, PULL_HASHES, PeerId};
 use heika_chain::nemesis::{SEED_BLOCK_FILE, nemesis_proof, read_seed_block};
 use heika_chain::produce::{Assemble, Pending};
 use heika_chain::store::{EXECUTOR_META, now_or_never};
@@ -388,6 +388,10 @@ fn catch_up_if_behind(
         );
         return Ok(());
     }
+    // 追いつく段階は先端の続きを取るだけなので、先端がピアのチェーンから外れているとつながらない。先に分かれ目まで戻す
+    if executed > 0 {
+        (db, executed) = rewind_off_branch(setup, db, &mut peers[0].connection, executed)?;
+    }
     // 1つに一覧を聞いて、外したピアの代わりの候補にする
     let own = *setup.identity.key();
     if let Ok(nodes) = peers[0].connection.peers() {
@@ -463,6 +467,81 @@ fn catch_up_if_behind(
         None,
     )?;
     Ok(())
+}
+
+/// 実行した先端 `executed` のブロックが、`connection` のピアのチェーンのものと違えば、自分の枝の上にある確定
+/// （[`Chain::anchor`]）からハッシュを並べて分かれ目を探し、そこまで巻き戻す。戻した DB と、実行した高さを返す
+///
+/// ピアがチェーンの先にいれば、自分の先端の高さのハッシュは返ってくる。返らない（ピアのほうが短い）か同じなら、
+/// 何もしない。巻き戻すのはその確定より上だけなので、ピアが嘘をついても、それより下は消えない
+fn rewind_off_branch(
+    setup: &Setup<'_>,
+    db: Db,
+    connection: &mut ClientConnection,
+    executed: u64,
+) -> Result<(Db, u64), NodeError> {
+    let ours = |db: &Db, height: u64| -> Result<[u8; 32], NodeError> {
+        let bytes = db
+            .block(height)?
+            .ok_or_else(|| format!("高さ {height} のブロックがありません"))?;
+        Ok(Block::from_bytes(&bytes)?.hash().0)
+    };
+    match connection.pull_block_hashes(executed, 1)?.first() {
+        Some(hash) if *hash != ours(&db, executed)? => {}
+        _ => return Ok((db, executed)),
+    }
+    let shared = Arc::new(db);
+    let common = {
+        let spec = setup.spec;
+        let store = CachedStore::new(Arc::clone(&shared), spec.storage.cache.state.as_usize());
+        let mut chain = now_or_never(Chain::new(
+            &store,
+            &SystemEnv,
+            setup.config.clone(),
+            setup.parameters,
+            spec.storage.partial_state(),
+        ))?;
+        let floor = chain.anchor().height;
+        let mut common = None;
+        let mut from = floor;
+        'search: while from <= executed {
+            let hashes = connection.pull_block_hashes(from, PULL_HASHES)?;
+            if hashes.is_empty() {
+                break;
+            }
+            for (index, hash) in hashes.iter().enumerate() {
+                let height = from + index as u64;
+                if height > executed {
+                    break 'search;
+                }
+                if *hash != ours(store.db(), height)? {
+                    if height == floor {
+                        return Err(format!(
+                            "ピアのチェーンは、自分の枝の上にある確定（高さ {floor}）のブロックから違います"
+                        )
+                        .into());
+                    }
+                    common = Some(height - 1);
+                    break 'search;
+                }
+            }
+            from += hashes.len() as u64;
+        }
+        let common = common.ok_or_else(|| {
+            format!("実行した先端（高さ {executed}）がピアのチェーンと違うのに、分かれ目が見つかりません")
+        })?;
+        println!(
+            "実行した先端（高さ {executed}）は、ピアのチェーンから高さ {common} のあとで外れています。自分の枝の上にある確定（高さ {floor}）より上なので、そこまで巻き戻します"
+        );
+        now_or_never(chain.rewind_to(common)).map_err(|error| {
+            format!(
+                "高さ {common} まで巻き戻せません: {error}。`heika peer copy` でほかのノードの DB から取り直すか、データのディレクトリを空にして同期し直してください"
+            )
+        })?;
+        common
+    };
+    let db = Arc::try_unwrap(shared).map_err(|_| "巻き戻した DB を、まだほかが持っています")?;
+    Ok((db, common))
 }
 
 /// 先端の段階。止める合図か、確定まで遅れて追いつく段階が要るまで続ける

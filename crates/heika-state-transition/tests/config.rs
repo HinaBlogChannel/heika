@@ -50,6 +50,11 @@ fn builtin_configs_match_node_resources() {
             _ => continue,
         };
         assert_eq!(format!("{builtin:?}"), format!("{loaded:?}"), "{folder}");
+        let parameters = match network.identifier {
+            NetworkIdentifier::MAINNET => NetworkParameters::MAINNET,
+            _ => NetworkParameters::TESTNET,
+        };
+        assert_eq!(network.fork_heights, parameters.fork_heights, "{folder}");
     }
 }
 
@@ -69,6 +74,10 @@ fn builtin_configs_agree_with_network_parameters() {
         assert_eq!(
             config.finalization.voting_set_grouping,
             parameters.voting_set_grouping
+        );
+        assert_eq!(
+            config.vrf_gamma_subgroup_check,
+            parameters.fork_heights.vrf_gamma_subgroup_check
         );
     }
 }

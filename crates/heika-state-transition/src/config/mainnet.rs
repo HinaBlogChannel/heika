@@ -40,6 +40,7 @@ pub(super) fn config() -> ChainConfig {
         skip_secret_lock_expirations: vec![3197860, 3197866],
         force_secret_lock_expirations: vec![3197458, 3197781],
         total_voting_balance_calculation_fix: 528000,
+        vrf_gamma_subgroup_check: 5967570,
         nemesis_signer_public_key: PublicKey(bytes(
             "BE0B4CF546B7B4F4BBFCFF9F574FDA527C07A53D3FC76F8BB7DB746F8E8E0A9F",
         )),

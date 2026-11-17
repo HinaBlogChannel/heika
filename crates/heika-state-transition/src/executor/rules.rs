@@ -260,6 +260,14 @@ impl Executor {
                 if !valid {
                     self.check("KeyLink", || hex(&signer))?;
                 }
+                // catapult の `VrfKeyLinkPublicKeyValidator`。フォークのあとは、VRF の鍵に使えない公開鍵をリンクできない
+                if matches!(body, Body::VrfKeyLink(_))
+                    && link.link_action == LinkAction::Link
+                    && height >= self.config.vrf_gamma_subgroup_check
+                    && !heika_core::vrf::is_valid_public_key(&link.linked_public_key)
+                {
+                    self.check("VrfKeyLinkPublicKey", || hex(&link.linked_public_key.0))?;
+                }
             }
             Body::VotingKeyLink(link) => {
                 if link.link_action == LinkAction::Link {
@@ -1037,6 +1045,7 @@ mod tests {
             skip_secret_lock_expirations: Vec::new(),
             force_secret_lock_expirations: Vec::new(),
             total_voting_balance_calculation_fix: 0,
+            vrf_gamma_subgroup_check: 0,
             nemesis_signer_public_key: PublicKey([0; 32]),
             treasury_reissuance_transaction_signatures: Vec::new(),
             treasury_reissuance_height: 0,
@@ -1858,6 +1867,45 @@ mod tests {
         assert_eq!(modify(&mut executor, c, 1, 1, &[d], &[]), 1);
         // b に a を付けると輪になる
         assert_eq!(modify(&mut executor, b, 0, 0, &[a], &[]), 1);
+    }
+
+    #[test]
+    fn vrf_key_links_need_a_usable_key_from_the_fork() {
+        let mut executor = executor();
+        let signer = address(1);
+        executor
+            .accounts
+            .insert(signer, AccountState::new(signer, 1));
+        let usable =
+            PublicKey::from_private_key(&heika_core::key::PrivateKey::from_bytes(&[7; 32]));
+        let mut neutral = [0; 32];
+        neutral[0] = 1;
+        let link = |key: [u8; 32]| {
+            Body::VrfKeyLink(KeyLink {
+                linked_public_key: PublicKey(key),
+                link_action: LinkAction::Link,
+            })
+        };
+        let body = |executor: &mut Executor, height, body: Body| {
+            rejected(executor, |e| e.check_body_rules(height, signer, &body))
+        };
+        assert_eq!(body(&mut executor, HEIGHT, link(usable.0)), None);
+        // 全部 0（点に戻せない）と単位元は、フォークの高さから弾く
+        executor.config.vrf_gamma_subgroup_check = HEIGHT;
+        for key in [[0; 32], neutral] {
+            assert_eq!(body(&mut executor, HEIGHT - 1, link(key)), None);
+            assert_eq!(
+                body(&mut executor, HEIGHT, link(key)).as_deref(),
+                Some("VrfKeyLinkPublicKey")
+            );
+        }
+        // 外すほうは、新しい鍵を持ち込まないので確かめない
+        executor.accounts.get_mut(&signer).unwrap().vrf = Some([0; 32]);
+        let unlink = Body::VrfKeyLink(KeyLink {
+            linked_public_key: PublicKey([0; 32]),
+            link_action: LinkAction::Unlink,
+        });
+        assert_eq!(body(&mut executor, HEIGHT, unlink), None);
     }
 
     #[test]

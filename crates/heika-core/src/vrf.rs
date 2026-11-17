@@ -22,6 +22,13 @@ use crate::key::{PrivateKey, PublicKey};
 /// ECVRF-EDWARDS25519-SHA512-TAI の suite
 const SUITE: u8 = 0x03;
 
+/// 単位元を圧縮したもの
+const IDENTITY: [u8; 32] = {
+    let mut bytes = [0; 32];
+    bytes[0] = 1;
+    bytes
+};
+
 /// VRF の証明。catapult の `crypto::VrfProof`。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VrfProof {
@@ -117,27 +124,54 @@ pub fn gamma(private_key: &PrivateKey, alpha: &[u8]) -> Option<[u8; 32]> {
     (gamma != EdwardsPoint::default().compress().to_bytes()).then_some(gamma)
 }
 
-/// 公開鍵を確かめるか。catapult の `crypto::VrfProofOptions`。
+/// 証明をどこまで確かめるか。catapult の `crypto::VrfProofOptions`。フォークより前のブロックを catapult と同じに
+/// 確かめるために、外せるようにしてある。ブロックの高さで選ぶなら
+/// [`NetworkParameters::vrf_checks`](crate::network::NetworkParameters::vrf_checks)。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum KeyCheck {
+pub struct Checks {
     /// 点に戻せない公開鍵（正規形でない、曲線上にない、素数位数の部分群に入っていない）の証明は通さない
-    Strict,
-    /// 公開鍵を確かめない。フォーク（`strictVrfPublicKeyCheck`）より前のブロックを、catapult と同じに確かめるためだけに使う
-    SkipBeforeFork,
+    /// （`Check_Public_Key`。`strictVrfPublicKeyCheck` から）
+    pub public_key: bool,
+    /// gamma が素数位数の部分群に入っていないか、c 倍すると単位元になる証明と、公開鍵が単位元の証明は通さない
+    /// （`Check_Gamma` と `Check_Public_Key_Neutral`。`vrfGammaSubgroupCheck` から）
+    pub gamma: bool,
 }
 
-/// 証明を検証して、通れば証明のハッシュを返す。catapult の `crypto::VerifyVrfProof` で、公開鍵も確かめる。
+impl Checks {
+    /// 全部確かめる。catapult の `VrfProofOptions::Default`
+    pub const ALL: Self = Self {
+        public_key: true,
+        gamma: true,
+    };
+    /// どれも確かめない。どちらのフォークよりも前のブロック
+    pub const NONE: Self = Self {
+        public_key: false,
+        gamma: false,
+    };
+}
+
+/// 証明を検証して、通れば証明のハッシュを返す。catapult の `crypto::VerifyVrfProof` で、全部確かめる。
 pub fn verify(public_key: &PublicKey, alpha: &[u8], proof: &VrfProof) -> Option<ProofHash> {
-    verify_with(public_key, alpha, proof, KeyCheck::Strict)
+    verify_with(public_key, alpha, proof, Checks::ALL)
 }
 
-/// [`verify`] の、公開鍵を確かめるかを選べるもの。ブロックの高さで選ぶなら
-/// [`NetworkParameters::vrf_key_check`](crate::network::NetworkParameters::vrf_key_check)。
+/// VRF の鍵として使える公開鍵か。正規形で、曲線上にあり、素数位数の部分群に入っていて、単位元でない。
+/// catapult の `crypto::IsValidVrfPublicKey`。`vrfGammaSubgroupCheck` からは、そうでない鍵をリンクできない
+pub fn is_valid_public_key(public_key: &PublicKey) -> bool {
+    ed25519::decode(&public_key.0).is_some() && !is_neutral(&public_key.0)
+}
+
+/// 単位元を表すバイト列か。catapult の `crypto::IsNeutralElement` と同じく、x の符号のビットは見ない
+fn is_neutral(bytes: &[u8; 32]) -> bool {
+    bytes[0] == 1 && bytes[1..31].iter().all(|&byte| byte == 0) && bytes[31] & 0x7F == 0
+}
+
+/// [`verify`] の、どこまで確かめるかを選べるもの
 pub fn verify_with(
     public_key: &PublicKey,
     alpha: &[u8],
     proof: &VrfProof,
-    key_check: KeyCheck,
+    checks: Checks,
 ) -> Option<ProofHash> {
     // gamma は正規形で、曲線上になければならない。部分群に入っているかはここでは見ない
     if !ed25519::is_canonical(&proof.gamma) || decompress(&proof.gamma).is_none() {
@@ -153,18 +187,27 @@ pub fn verify_with(
         Some(y) => EdwardsPoint::vartime_double_scalar_mul_basepoint(&c, &-y, &s)
             .compress()
             .to_bytes(),
-        None if key_check == KeyCheck::Strict => return None,
+        None if checks.public_key => return None,
         None => [0; 32],
     };
+    // 単位元は部分群に入っているので、上では弾けない。フォークのあとは別に弾く
+    if checks.gamma && is_neutral(&public_key.0) {
+        return None;
+    }
     // v = s * h - c * gamma。catapult は一度圧縮したものを戻して足すので、それに合わせる。
-    // gamma が部分群に入っていなければ、c * gamma は全部 0 を戻したものになる。
+    // gamma が部分群に入っていなければ、c * gamma は全部 0 を戻したものになる。catapult の `ScalarMult` は、
+    // そのときと、かけた結果が単位元のときに失敗を返す。フォークのあとは、どちらも通さない。
     // 確かめるだけで秘密は扱わないので、時間の一定でないかけ算でよい。h は余因子倍してあるので、いつも部分群に入る
     let h_point = decompress(&h).expect("a compressed point");
     let s_times_h = EdwardsPoint::vartime_multiscalar_mul([s], [h_point]);
     let c_times_gamma = match ed25519::decode(&proof.gamma) {
         Some(gamma) => EdwardsPoint::vartime_multiscalar_mul([c], [gamma]),
+        None if checks.gamma => return None,
         None => decompress(&[0; 32]).expect("a compressed point"),
     };
+    if checks.gamma && c_times_gamma.compress().to_bytes() == IDENTITY {
+        return None;
+    }
     let v = (s_times_h - c_times_gamma).compress().to_bytes();
     (challenge(&h, &proof.gamma, &u, &v) == proof.verification_hash)
         .then(|| proof_hash(&proof.gamma))
@@ -295,11 +338,19 @@ mod tests {
             );
             let beta = ProofHash(bytes(beta));
             assert_eq!(verify(&public_key, &input, &proof), Some(beta), "{secret}");
-            assert_eq!(
-                verify_with(&public_key, &input, &proof, KeyCheck::SkipBeforeFork),
-                Some(beta),
-                "{secret}"
-            );
+            for checks in [
+                Checks::NONE,
+                Checks {
+                    public_key: true,
+                    gamma: false,
+                },
+            ] {
+                assert_eq!(
+                    verify_with(&public_key, &input, &proof, checks),
+                    Some(beta),
+                    "{secret}"
+                );
+            }
             assert_eq!(proof_hash(&proof.gamma), beta, "{secret}");
         }
     }
@@ -413,10 +464,69 @@ mod tests {
         for key in [[0; 32], [0xFF; 32], not_on_curve] {
             assert!(ed25519::decode(&key).is_none());
             assert_eq!(
-                verify_with(&PublicKey(key), &alpha, &proof, KeyCheck::Strict),
+                verify_with(
+                    &PublicKey(key),
+                    &alpha,
+                    &proof,
+                    Checks {
+                        public_key: true,
+                        gamma: false,
+                    },
+                ),
                 None
             );
             assert_eq!(verify(&PublicKey(key), &alpha, &proof), None);
+        }
+    }
+
+    #[test]
+    fn gamma_check_rejects_the_neutral_public_key() {
+        // 単位元の鍵（秘密鍵が 0）なら、gamma も単位元で、u = s * B、v = s * h になる証明が作れる
+        let neutral = PublicKey(IDENTITY);
+        let alpha = [0x5A; 32];
+        let h = map_to_point(&neutral.0, &alpha).unwrap();
+        let k = Scalar::from_bytes_mod_order([0x42; 32]);
+        let u = EdwardsPoint::mul_base(&k).compress().to_bytes();
+        let v = (k * decompress(&h).unwrap()).compress().to_bytes();
+        let proof = VrfProof {
+            gamma: IDENTITY,
+            verification_hash: challenge(&h, &IDENTITY, &u, &v),
+            scalar: k.to_bytes(),
+        };
+        // 単位元は部分群に入るので、点に戻せるかだけを見る確かめでは通ってしまう
+        assert!(ed25519::decode(&neutral.0).is_some());
+        for checks in [
+            Checks::NONE,
+            Checks {
+                public_key: true,
+                gamma: false,
+            },
+        ] {
+            assert!(verify_with(&neutral, &alpha, &proof, checks).is_some());
+        }
+        for checks in [
+            Checks::ALL,
+            Checks {
+                public_key: false,
+                gamma: true,
+            },
+        ] {
+            assert_eq!(verify_with(&neutral, &alpha, &proof, checks), None);
+        }
+        assert_eq!(verify(&neutral, &alpha, &proof), None);
+    }
+
+    #[test]
+    fn valid_public_keys_are_points_in_the_subgroup_other_than_the_neutral_one() {
+        let (public_key, _, _) = valid();
+        assert!(is_valid_public_key(&public_key));
+        let mut negative_neutral = IDENTITY;
+        negative_neutral[31] |= 0x80;
+        let outside = (decompress(&public_key.0).unwrap() + EIGHT_TORSION[4])
+            .compress()
+            .to_bytes();
+        for key in [IDENTITY, negative_neutral, [0; 32], [0xFF; 32], outside] {
+            assert!(!is_valid_public_key(&PublicKey(key)), "{key:02X?}");
         }
     }
 }

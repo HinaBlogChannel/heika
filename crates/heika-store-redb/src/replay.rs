@@ -383,7 +383,7 @@ impl<'a> Replay<'a> {
                 &key,
                 &alpha.0,
                 &block.generation_hash_proof,
-                self.parameters.vrf_key_check(block.height),
+                self.parameters.vrf_checks(block.height),
             )
             .is_none()
             {

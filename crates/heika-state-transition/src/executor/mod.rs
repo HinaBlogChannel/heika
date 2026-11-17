@@ -717,7 +717,7 @@ impl Executor {
             &vrf_key,
             &parent_generation_hash.0,
             &block.generation_hash_proof,
-            parameters.vrf_key_check(block.height),
+            parameters.vrf_checks(block.height),
         )
         .ok_or_else(|| harvester_error("VRF の証明が通りません"))?;
         Ok(proof_hash.generation_hash())

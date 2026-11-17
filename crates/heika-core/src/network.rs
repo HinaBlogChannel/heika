@@ -150,6 +150,9 @@ pub struct ForkHeights {
     pub unique_aggregate_transaction_hash: u64,
     /// `strictVrfPublicKeyCheck`。この高さから、点に戻せない VRF の公開鍵の証明は通らない（catapult 1.0.3.10 から）
     pub strict_vrf_public_key_check: u64,
+    /// `vrfGammaSubgroupCheck`。この高さから、gamma が素数位数の部分群に入っていない VRF の証明と、公開鍵が単位元の
+    /// 証明は通らず、VRF の鍵に使えない公開鍵はリンクできない（catapult 1.0.3.11 から）
+    pub vrf_gamma_subgroup_check: u64,
 }
 
 /// 1日の秒数。設定の `2d` のような期間を書くのに使う。
@@ -187,6 +190,7 @@ impl NetworkParameters {
             strict_aggregate_transaction_hash: 1_690_500,
             unique_aggregate_transaction_hash: 4_759_100,
             strict_vrf_public_key_check: 5_952_255,
+            vrf_gamma_subgroup_check: 5_967_570,
         },
         corrupt_aggregate_transaction_hashes: &MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES,
     };
@@ -222,6 +226,7 @@ impl NetworkParameters {
             strict_aggregate_transaction_hash: 0,
             unique_aggregate_transaction_hash: 2_742_000,
             strict_vrf_public_key_check: 3_888_648,
+            vrf_gamma_subgroup_check: 3_904_683,
         },
         corrupt_aggregate_transaction_hashes: &[],
     };
@@ -271,12 +276,11 @@ impl NetworkParameters {
         1 + adjustment + height / self.voting_set_grouping
     }
 
-    /// その高さのブロックの VRF の証明で、公開鍵を確かめるか。catapult の `BlockchainProcessor` の `CheckGenerationHash`。
-    pub fn vrf_key_check(&self, height: u64) -> crate::vrf::KeyCheck {
-        if height >= self.fork_heights.strict_vrf_public_key_check {
-            crate::vrf::KeyCheck::Strict
-        } else {
-            crate::vrf::KeyCheck::SkipBeforeFork
+    /// その高さのブロックの VRF の証明を、どこまで確かめるか。catapult の `BlockchainProcessor` の `CheckGenerationHash`。
+    pub fn vrf_checks(&self, height: u64) -> crate::vrf::Checks {
+        crate::vrf::Checks {
+            public_key: height >= self.fork_heights.strict_vrf_public_key_check,
+            gamma: height >= self.fork_heights.vrf_gamma_subgroup_check,
         }
     }
 
@@ -471,7 +475,7 @@ const MAINNET_CORRUPT_AGGREGATE_TRANSACTION_HASHES: [(Hash256, Hash256); 20] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vrf::KeyCheck;
+    use crate::vrf::Checks;
 
     #[cfg(feature = "std")]
     #[test]
@@ -573,13 +577,21 @@ mod tests {
     }
 
     #[test]
-    fn checks_vrf_public_keys_from_the_fork() {
+    fn checks_vrf_proofs_from_the_forks() {
+        let only_key = Checks {
+            public_key: true,
+            gamma: false,
+        };
         let mainnet = NetworkParameters::MAINNET;
-        assert_eq!(mainnet.vrf_key_check(5_952_254), KeyCheck::SkipBeforeFork);
-        assert_eq!(mainnet.vrf_key_check(5_952_255), KeyCheck::Strict);
+        assert_eq!(mainnet.vrf_checks(5_952_254), Checks::NONE);
+        assert_eq!(mainnet.vrf_checks(5_952_255), only_key);
+        assert_eq!(mainnet.vrf_checks(5_967_569), only_key);
+        assert_eq!(mainnet.vrf_checks(5_967_570), Checks::ALL);
         let testnet = NetworkParameters::TESTNET;
-        assert_eq!(testnet.vrf_key_check(3_888_647), KeyCheck::SkipBeforeFork);
-        assert_eq!(testnet.vrf_key_check(3_888_648), KeyCheck::Strict);
+        assert_eq!(testnet.vrf_checks(3_888_647), Checks::NONE);
+        assert_eq!(testnet.vrf_checks(3_888_648), only_key);
+        assert_eq!(testnet.vrf_checks(3_904_682), only_key);
+        assert_eq!(testnet.vrf_checks(3_904_683), Checks::ALL);
     }
 
     #[test]

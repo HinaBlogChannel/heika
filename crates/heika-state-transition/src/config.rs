@@ -262,6 +262,9 @@ pub struct ChainConfig {
     /// この高さから、importance ブロックの投票の残高の合計を、そのエポックに鍵のあるアカウントだけで数える
     /// （`totalVotingBalanceCalculationFix`）
     pub total_voting_balance_calculation_fix: u64,
+    /// この高さから、VRF の鍵に使えない公開鍵はリンクできない（`vrfGammaSubgroupCheck`、catapult 1.0.3.11 から。
+    /// 設定に無ければフォークしない）
+    pub vrf_gamma_subgroup_check: u64,
     /// `nemesisSignerPublicKey`。Nemesis のあとは、これで署名できない（`NemesisSink`）
     pub nemesis_signer_public_key: PublicKey,
     /// 国庫の再発行の高さでだけ、Nemesis の鍵で署名してよい署名（`[treasury_reissuance_transaction_signatures]`）
@@ -396,6 +399,9 @@ impl ChainConfig {
                 .numbers("fork_heights", "forceSecretLockExpirations")?,
             total_voting_balance_calculation_fix: network
                 .number("fork_heights", "totalVotingBalanceCalculationFix")?,
+            vrf_gamma_subgroup_check: network
+                .optional_number("fork_heights", "vrfGammaSubgroupCheck")?
+                .unwrap_or(u64::MAX),
             nemesis_signer_public_key: network
                 .get("network", "nemesisSignerPublicKey")?
                 .parse()
@@ -635,9 +641,12 @@ pub fn network_parameters(network: &str) -> Result<NetworkParameters, ConfigErro
                 .number("fork_heights", "strictAggregateTransactionHash")?,
             unique_aggregate_transaction_hash: network
                 .number("fork_heights", "uniqueAggregateTransactionHash")?,
-            // catapult 1.0.3.10 から。前の設定ファイルには無いので、無ければフォークしない
+            // catapult 1.0.3.10 と 1.0.3.11 から。前の設定ファイルには無いので、無ければフォークしない
             strict_vrf_public_key_check: network
                 .optional_number("fork_heights", "strictVrfPublicKeyCheck")?
+                .unwrap_or(u64::MAX),
+            vrf_gamma_subgroup_check: network
+                .optional_number("fork_heights", "vrfGammaSubgroupCheck")?
                 .unwrap_or(u64::MAX),
         },
         corrupt_aggregate_transaction_hashes: Vec::leak(corrupt),

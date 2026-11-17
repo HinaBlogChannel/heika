@@ -120,6 +120,10 @@ fn generate(c: &ChainConfig) -> String {
         c.total_voting_balance_calculation_fix.to_string(),
     );
     field(
+        "vrf_gamma_subgroup_check",
+        c.vrf_gamma_subgroup_check.to_string(),
+    );
+    field(
         "nemesis_signer_public_key",
         format!(
             "PublicKey(bytes(\"{}\"))",

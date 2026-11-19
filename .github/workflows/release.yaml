@@ -133,7 +133,14 @@ jobs:
           done
       - name: APK が決めた鍵で署名されているか確かめる
         run: |
-          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          # 一番新しい版でも、プレビューなどで zipalign や apksigner の入っていないことがあるので、両方あるものから選ぶ
+          build_tools=$(for dir in "$ANDROID_HOME"/build-tools/*; do
+            if [ -x "$dir/zipalign" ] && [ -x "$dir/apksigner" ]; then echo "$dir"; fi
+          done | sort -V | tail -1)
+          if [ -z "$build_tools" ]; then
+            echo "::error::zipalign と apksigner のそろった build-tools がありません"; ls "$ANDROID_HOME"/build-tools; exit 1
+          fi
+          echo "build-tools: $build_tools"
           # 版によって `Signer #1 certificate …` とも `V3.0 Signer: certificate …` とも出るので、どちらも拾う
           # パイプにすると apksigner が落ちても気づけないので、いったんファイルに書く
           "$build_tools/apksigner" verify --print-certs dist/*.apk > apksigner.txt
